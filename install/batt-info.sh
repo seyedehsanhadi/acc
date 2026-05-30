@@ -75,12 +75,16 @@ power_now ${powerNow}W"
       echo "
 charge_type $power_supply_type"
 
-      power_supply_amps=$(dtr_conv_factor $(cat $i/*current_now | tail -n 1) ${ampFactor:-$ampFactor_})
+      psaRaw=$(cat $i/*current_now 2>/dev/null | tail -n 1)
+      dtr_conv_factor ${psaRaw#-} ${ampFactor:-$ampFactor_}
+      power_supply_amps=$(calc2 ${psaRaw:-0} / $factor)
 
       if [ 0${power_supply_amps%.*} -gt 0 ]; then
-        power_supply_volts=$(dtr_conv_factor $(cat $i/voltage_now) ${voltFactor-})
+        psvRaw=$(cat $i/voltage_now 2>/dev/null)
+        dtr_conv_factor ${psvRaw:-0} ${voltFactor-}
+        power_supply_volts=$(calc2 ${psvRaw:-0} / $factor)
         power_supply_watts=$(calc2 $power_supply_amps \* $power_supply_volts)
-        consumed_watts=$(calc2 $power_supply_watts - $powernow)
+        consumed_watts=$(calc2 $power_supply_watts - $powerNow)
 
         echo "power_supply_amps $power_supply_amps
 power_supply_volts $power_supply_volts

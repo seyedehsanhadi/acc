@@ -662,8 +662,8 @@ case "${1-}" in
 
   -u|--upgrade)
     shift
-    local array[0]=
-    local reference=
+    array[0]=
+    reference=
 
     for i; do
       array+=("$i")

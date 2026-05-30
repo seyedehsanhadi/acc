@@ -88,6 +88,7 @@ set_prop() {
 
     -ss::|--charging*witch::)
       sort $dataDir/logs/working-switches.log | nl -s ") " -w 2 -v 1
+      return 0
     ;;
 
     # set charging current
@@ -121,7 +122,7 @@ set_prop() {
       if [ -f "${1:-//}" ]; then
         # import config
         cat $config > $TMPDIR/.tmp
-        dos2unix < "$1" | grep -Ev '^:|=""$' >> $TMPDIR/.tmp
+        dos2unix < "$1" | grep -Ev '^:|=""$' >> $TMPDIR/.tmp || :
         dos2unix < "$1" | grep '^:' | while IFS= read -r line; do
           $TMPDIR/acca $TMPDIR/.tmp --config a "$line"
         done

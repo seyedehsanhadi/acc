@@ -112,7 +112,7 @@ if ! $_INIT; then
     apply_on_plug default
     tempLevel=0
     enable_charging
-    if [[ "$exitCode" = [127] ]]; then
+    if [[ "$exitCode" = @(1|2|7|127) ]]; then
       . $execDir/logf.sh
       logf --export
       notif "⚠️ Exit $exitCode; log: acc -l tail"
@@ -194,7 +194,7 @@ if ! $_INIT; then
 
        # set charging voltage control files, as needed
       if [ -n "${maxChargingVoltage[0]-}" ] \
-        && { [ -z "${maxChargingVoltage[1]-}" ] || [[ "${maxChargingCurrent[1]-}" = -* ]]; } \
+        && { [ -z "${maxChargingVoltage[1]-}" ] || [[ "${maxChargingVoltage[1]-}" = -* ]]; } \
         && grep -q / $TMPDIR/ch-volt-ctrl-files 2>/dev/null
       then
         set_ch_volt ${maxChargingVoltage[0]} || :
@@ -227,7 +227,7 @@ if ! $_INIT; then
     else
 
       $rebootResume \
-        && le_resume_cap \
+        && _le_resume_cap \
         && [ $(cat $temp) -lt $(( ${temperature[1]} * 10 )) ] && {
           notif "⚠️ System will reboot in 60 seconds to re-enable charging! Run \"accd.\" to abort."
           sleep 60

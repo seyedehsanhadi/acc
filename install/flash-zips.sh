@@ -124,4 +124,4 @@ Exit: CTRL-C
 
 done
 
-exit $exitCode
+exit $?
