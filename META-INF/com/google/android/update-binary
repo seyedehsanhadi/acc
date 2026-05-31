@@ -172,6 +172,15 @@ cp $srcDir/module.prop $installDir/
 cp -f $srcDir/README.* $data_dir/
 
 
+# stable: one-time adoption of corrected defaults for EXISTING configs, so no manual
+# command is ever needed. Only flips the value that used to be the default, runs once
+# (guarded by a marker), and never clobbers a deliberate later choice.
+[ -f $data_dir/.stable-defaults ] || {
+  [ ! -f $config ] || sed -i 's/^allowIdleAbovePcap=true$/allowIdleAbovePcap=false/' $config 2>/dev/null || :
+  touch $data_dir/.stable-defaults 2>/dev/null || :
+}
+
+
 # KaiOS patches
 [ ! -d /data/usbmsc_mnt/ ] || {
   for i in $installDir/$id/*.sh; do
