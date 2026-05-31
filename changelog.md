@@ -1,3 +1,9 @@
+**v2025.5.18-stable.1 (202505188)**
+- Existing configs now auto-adopt the corrected defaults on update (one-time, in the
+  installer): the new `allow_idle_above_pcap=false` ("never sit above the limit")
+  applies WITHOUT any manual `acc -s` command. Runs once (marker-guarded) and never
+  clobbers a deliberate later choice. Fresh installs already get the new defaults.
+
 **v2025.5.18-stable (202505187)**
 - First STABLE community build -- consolidates and hardens fix2..fix12:
   * Charge limit holds EXACTLY at your level on Pixel/Tensor -- no overshoot. The
