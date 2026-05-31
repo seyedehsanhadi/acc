@@ -1,3 +1,15 @@
+**v2025.5.18-dev-fix9 (202505183)**
+- Full fail-safe coverage: every capacity comparison (pause, resume, cooldown,
+  shutdown, idle-reassert) now treats an empty OR non-numeric value as the safe
+  outcome (pause / do-not-resume / do-not-shutdown), not just the two hardened in
+  fix4/fix8. A garbage config can now never make any limit check error out.
+- Flat-hold generalized: the `/proc/driver/charger_limit` node now also accepts the
+  `pcap` (hold-at-target) off value like the Google charge_stop_level node, so more
+  chipsets hold the cap flat (firmware-native) with no overshoot.
+- Breach watchdog: if the battery is at/above the limit and charging still has not
+  stopped, accd posts a throttled warning instead of failing silently; it clears
+  itself once charging stops.
+
 **v2025.5.18-dev-fix8 (202505182)**
 - Fail-safe hardening: a malformed (non-numeric) pause_capacity or resume_capacity
   now reads as "pause now / do not resume" instead of letting the numeric test

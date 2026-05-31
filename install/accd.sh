@@ -19,6 +19,7 @@ if ! $_INIT; then
 
 
   _ge_cooldown_cap() {
+    case ${capacity[1]-} in ''|*[!0-9]*) return 1;; esac
     if [ ${capacity[1]} -gt 3000 ]; then
       [ $(volt_now) -ge ${capacity[1]} ]
     else
@@ -42,6 +43,7 @@ if ! $_INIT; then
 
 
   _le_pause_cap() {
+    case ${capacity[3]-} in ''|*[!0-9]*) return 1;; esac
     if [ ${capacity[3]} -gt 3000 ]; then
       [ $(volt_now) -le ${capacity[3]} ]
     else
@@ -51,6 +53,7 @@ if ! $_INIT; then
 
 
   _lt_pause_cap() {
+    case ${capacity[3]-} in ''|*[!0-9]*) return 1;; esac
     if [ ${capacity[3]} -gt 3000 ]; then
       [ $(volt_now) -lt ${capacity[3]} ]
     else
@@ -60,6 +63,7 @@ if ! $_INIT; then
 
 
   _gt_resume_cap() {
+    case ${capacity[2]-} in ''|*[!0-9]*) return 0;; esac
     if [ ${capacity[2]} -gt 3000 ]; then
       [ $(volt_now) -gt ${capacity[2]} ]
     else
@@ -84,6 +88,7 @@ if ! $_INIT; then
 
 
   _le_shutdown_cap() {
+    case ${capacity[0]-} in ''|*[!0-9]*) return 1;; esac
     if [ ${capacity[0]} -gt 3000 ]; then
       [ $(volt_now) -le ${capacity[0]} ]
     else
@@ -312,6 +317,14 @@ if ! $_INIT; then
             # reset battery stats on pause
             resetbs
           }
+          # fix9: breach watchdog (notify-only, throttled). If we are at/above the
+          # capacity limit and charging still has not stopped, surface it so a cap
+          # that is not holding is never silent again. Self-clears once stopped.
+          if _ge_pause_cap && ! not_charging; then
+            [ -f $TMPDIR/.breach ] || { notif "⚠️ Battery at/above your ${capacity[3]:-?}% limit but still charging — open AccA, Scripts, 'Scan & fix charging switch'"; touch $TMPDIR/.breach; }
+          else
+            rm $TMPDIR/.breach 2>/dev/null || :
+          fi 2>/dev/null || :
           sleep ${loopDelay[1]}
           rm $TMPDIR/.minCapMax 2>/dev/null || :
           continue
@@ -536,7 +549,7 @@ if ! $_INIT; then
 
   apply_on_boot
   touch $TMPDIR/.minCapMax
-  rm $TMPDIR/.testingsw $TMPDIR/.sw-strict-done 2>/dev/null || :
+  rm $TMPDIR/.testingsw $TMPDIR/.sw-strict-done $TMPDIR/.breach 2>/dev/null || :
   ctrl_charging
   exit $?
 

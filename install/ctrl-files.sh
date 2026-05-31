@@ -49,6 +49,7 @@ battery/input_suspend 0 1 /proc/mtk_battery_cmd/en_power_path 1 1
 /sys/kernel/nubia_charge/charger_bypass off on
 /sys/module/pm*_charger/parameters/disabled 0 1
 
+/proc/driver/charger_limit_enable 0 1 /proc/driver/charger_limit 100 pcap
 /proc/driver/charger_limit_enable 0 1 /proc/driver/charger_limit 100 battery/capacity
 /proc/driver/charger_limit_enable 0 1 /proc/driver/charger_limit 100 5
 /proc/mtk_battery_cmd/current_cmd 0::0 0::1
