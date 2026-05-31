@@ -1,4 +1,4 @@
-**v2025.5.18-dev-fix7 (202505180)**
+**v2025.5.18-dev-fix7 (202505181)**
 - Pixel/Tensor: the upper limit now HOLDS instead of being overshot. The google
   `charge_stop_level` node is a charge LIMIT ("charge to N%, hold"), not an on/off
   switch. fix5/fix6 drove it as 100/5 -- writing 5 makes the firmware discharge, then
