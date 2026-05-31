@@ -25,8 +25,15 @@ execDir=/data/adb/$domain/acc
 dataDir=/data/adb/$domain/acc-data
 PATH=/data/adb/$domain/bin:$PATH
 
-MAX_S=${1:-4}                      # max seconds to wait per switch before "no effect"
+MAX_S=4                            # max seconds to wait per switch before "no effect"
 STEP_MS=300                        # poll interval (ms)
+APPLY=0                            # --apply: lock in the best switch automatically
+for _a in "$@"; do
+  case "$_a" in
+    --apply) APPLY=1;;
+    [0-9]*)  MAX_S=$_a;;
+  esac
+done
 
 say()  { echo "$@"; }
 warn() { echo "! $*"; }
@@ -163,8 +170,14 @@ if [ -n "$results" ]; then
   done
   best=$(printf '%s' "$results" | sort -n | head -n1 | cut -d' ' -f3-)
   say ""
-  say "Recommended — lock this one in (stops ACC auto-cycling it):"
-  say "  acc -s s='${best} --'"
+  say "BEST=${best}"
+  if [ "$APPLY" = 1 ] && [ -n "$best" ]; then
+    [ -n "$ACCA" ] && "$ACCA" -s "s=${best} --" >/dev/null 2>&1 || :
+    say "APPLIED=1   (locked in: acc -s s='${best} --')"
+  else
+    say "Recommended — lock this one in (stops ACC auto-cycling it):"
+    say "  acc -s s='${best} --'"
+  fi
   say ""
   say "[idle] = holds the battery flat (bypass);  [discharging] = stops charging,"
   say "phone then runs off the battery until it drops to your resume level."

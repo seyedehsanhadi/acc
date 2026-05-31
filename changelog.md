@@ -1,3 +1,10 @@
+**v2025.5.18-dev-fix6 (202505180)**
+- Add acc-switch-scan.sh, a fast charging-switch scanner. `acc -t` waits up to 35s
+  per switch; this polls the charging current ~3x/sec and decides each in ~1-4s,
+  tests the whole list, ranks the working ones, prints a machine-readable BEST=
+  line, and with --apply locks in the best switch automatically. AccA's switch
+  test uses it from 1.0.50.
+
 **v2025.5.18-dev-fix5 (202505180)**
 - Pixel/Tensor: prefer the fixed-threshold google charge_stop_level switch. The
   dynamic "battery/capacity" variant pinned the stop level to the live %, so the
