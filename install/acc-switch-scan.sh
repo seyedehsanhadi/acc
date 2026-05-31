@@ -50,6 +50,13 @@ nap() { if [ -n "$BB" ]; then "$BB" usleep $(( STEP_MS * 1000 )); else sleep 1; 
 [ "$(id -u 2>/dev/null)" = 0 ] || { warn "must run as root (su)"; exit 1; }
 cd /sys/class/power_supply/ 2>/dev/null || { warn "no /sys/class/power_supply"; exit 1; }
 
+# fix7: resolve the "pcap" off-token (used by limit-type switches like
+# charge_stop_level) to the configured pause_capacity, falling back to the live
+# capacity. This makes the scan test the same flat-hold value the daemon applies,
+# so the limit node reads as a clean [idle] hold instead of a [discharging] drain.
+PCAP=$(grep -hoE '^pause_capacity=[0-9]+' "$dataDir/config.txt" "$execDir/config.txt" 2>/dev/null | grep -oE '[0-9]+' | head -n1)
+[ -n "${PCAP:-}" ] || PCAP=$(cat battery/capacity 2>/dev/null || echo 60)
+
 # ---------- low-level switch writers ----------
 _write() {  # _write <on|off> <switch line>
   local dir=$1 line=$2 f onv offv v o
@@ -61,6 +68,7 @@ _write() {  # _write <on|off> <switch line>
     if [ "$dir" = off ]; then v=$offv; else v=$onv; fi
     case "$v" in
       3600mV) o=$(cat "$f" 2>/dev/null || echo 0); [ "$o" -lt 10000 ] 2>/dev/null && v=3600 || v=3600000;;
+      pcap)   v=$PCAP;;
       */*)    [ -f "$v" ] && v=$(cat "$v" 2>/dev/null);;
     esac
     v=$(echo "$v" | sed 's/::/ /g')
@@ -154,7 +162,16 @@ while IFS= read -r line; do
   r=$(test_switch "$line")
   set -- $r
   case "${1:-}" in
-    ok)   say "STOPS ${2}ms [${3}]"; results="${results}${2} ${3} ${line}
+    ok)   say "STOPS ${2}ms [${3}]"
+          # fix7: rank idle/flat-hold (P=0) above discharging (P=1). A flat hold caps
+          # the battery at the level without draining it (longevity + tighter, no
+          # sawtooth); a discharging switch works but drains to the resume level.
+          case "$3" in idle) P=0;; *) P=1;; esac
+          # a "pcap" (target-level) limit switch holds the battery AT the cap by design;
+          # always rank it first even if it briefly reads as discharging while pulling
+          # down to the cap -- it ends flat at pause_capacity, not in a resume sawtooth.
+          case "$line" in *\ pcap|*\ pcap\ *) P=0;; esac
+          results="${results}${P} ${2} ${3} ${line}
 ";;
     skip) say "(not charging — rerun while charging)";;
     *)    say "no effect";;
@@ -164,11 +181,11 @@ done < "$SW"
 say ""
 say "================ RESULT ================"
 if [ -n "$results" ]; then
-  say "Working switches (fastest first):"
-  printf '%s' "$results" | sort -n | while read ms mode rest; do
+  say "Working switches (best first -- idle/flat-hold preferred, then fastest):"
+  printf '%s' "$results" | sort -n -k1,1 -k2,2n | while read prio ms mode rest; do
     say "  [${ms}ms ${mode}]  $rest"
   done
-  best=$(printf '%s' "$results" | sort -n | head -n1 | cut -d' ' -f3-)
+  best=$(printf '%s' "$results" | sort -n -k1,1 -k2,2n | head -n1 | cut -d' ' -f4-)
   say ""
   say "BEST=${best}"
   if [ "$APPLY" = 1 ] && [ -n "$best" ]; then

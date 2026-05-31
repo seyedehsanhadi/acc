@@ -1,3 +1,19 @@
+**v2025.5.18-dev-fix7 (202505180)**
+- Pixel/Tensor: the upper limit now HOLDS instead of being overshot. The google
+  `charge_stop_level` node is a charge LIMIT ("charge to N%, hold"), not an on/off
+  switch. fix5/fix6 drove it as 100/5 -- writing 5 makes the firmware discharge, then
+  resume at the resume level, then re-charge and overshoot the cap (a 70<->limit
+  sawtooth; reported breach 75 -> 77 on a Pixel 9a). fix7 drives it to the TARGET
+  level via a new `pcap` off-token (= pause_capacity), so the firmware holds the
+  battery flat at the cap: tight, no overshoot, and true battery-idle. `100 5`
+  (discharge) and `100 battery/capacity` (hold at live %) remain as fallbacks.
+- Charging-switch scanner now prefers idle/flat-hold switches over discharging ones,
+  and understands the `pcap` token, so `--apply` locks the flat-hold variant rather
+  than the sawtoothing discharge variant.
+- Restored 2022/2023 behavior: when a pause can't be confirmed, accd reports failure
+  and retries on the next loop instead of `exec`-ing a full daemon re-init mid-pause
+  (the re-init re-armed charging in its window and thrashed flicker-prone switches).
+
 **v2025.5.18-dev-fix6 (202505180)**
 - Add acc-switch-scan.sh, a fast charging-switch scanner. `acc -t` waits up to 35s
   per switch; this polls the charging current ~3x/sec and decides each in ~1-4s,

@@ -186,9 +186,11 @@ disable_charging() {
     fi
 
     if $autoMode && ! not_charging; then
-      #return 7 # total failure
-      notif "⚠️ Exit 7; accd is re-initializing"
-      exec $TMPDIR/accd $config --init
+      # fix7: restore 2022/2023 behavior -- report failure and let the daemon loop
+      # retry the pause next tick. Do NOT exec/re-init mid-pause: tearing the daemon
+      # down re-arms charging during the init window and thrashes on a switch that
+      # only needs another loop to settle.
+      return 7 # total failure
     fi
 
     (set +eux; eval '${runCmdOnPause-}') || :
@@ -331,6 +333,11 @@ flip_sw() {
     if [ $3 = 3600mV ]; then
       off=$(cat $1)
       [ $off -lt 10000 ] && off=3600 || off=3600000
+    elif [ $3 = pcap ]; then
+      # fix7: limit-node off value = pause_capacity, so the firmware holds the
+      # battery flat at the cap (tight, no overshoot, true idle). Falls back to a
+      # safe low cap if pause_capacity is unset (can only stop charging, never run on).
+      off=${capacity[3]:-60}
     else
       off="$(parse_value "$3")"
     fi

@@ -62,12 +62,15 @@ battery/input_suspend 0 1 /proc/mtk_battery_cmd/en_power_path 1 1
 #battery/charge_control_start_threshold 0 1 battery/charge_control_end_threshold 0 2
 /sys/class/qcom-battery/cool_mode 0 1
 /sys/class/qcom-battery/wireless_boost_en 0 1
+# fix7: the Google charge-limit node holds the battery flat at whatever level it is set
+# to (Adaptive-Charging style). Driving it to the TARGET level (pause_capacity, the
+# "pcap" token resolved in flip_sw) makes the FIRMWARE hold the cap = tight, no overshoot,
+# no 70<->limit discharge sawtooth, and it is true battery-idle (prioritize_batt_idle_mode).
+# This is preferred. The fixed "100 5" below stays as a discharge-type fallback for
+# firmware that ignores in-range stop levels; "battery/capacity" holds at the live %.
+/sys/devices/platform/google,charger/charge_stop_level 100 pcap
 /sys/devices/platform/google,charger/charge_stop_level 100 5
-# fix5: the dynamic "battery/capacity" off value pins the stop level to the live %,
-# so the firmware re-resumes at the threshold and accd keeps re-testing the switch
-# (on/off pulsing near the limit on Pixel/Tensor). The fixed "100 5" variant above
-# stops cleanly and holds the limit without churn, so keep this variant disabled.
-#/sys/devices/platform/google,charger/charge_stop_level 100 battery/capacity
+/sys/devices/platform/google,charger/charge_stop_level 100 battery/capacity
 /sys/devices/platform/soc/soc:oplus,chg_intf/oplus_chg/battery/chg_enable 1 0
 /sys/devices/platform/soc/soc:oplus,chg_intf/oplus_chg/battery/chg_enable 1 0
 /sys/devices/platform/soc/soc:oplus,chg_intf/oplus_chg/battery/cool_down 0 1
