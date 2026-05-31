@@ -1,6 +1,6 @@
 configVerCode=202505180
 
-allowIdleAbovePcap=true
+allowIdleAbovePcap=false
 ampFactor=
 battStatusWorkaround=true
 capacity=(5 101 70 75 false)

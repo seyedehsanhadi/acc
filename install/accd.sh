@@ -338,7 +338,7 @@ if ! $_INIT; then
           # capacity limit and charging still has not stopped, surface it so a cap
           # that is not holding is never silent again. Self-clears once stopped.
           if _ge_pause_cap && ! not_charging; then
-            [ -f $TMPDIR/.breach ] || { notif "⚠️ Battery at/above your ${capacity[3]:-?}% limit but still charging — open AccA, Scripts, 'Scan & fix charging switch'"; touch $TMPDIR/.breach; }
+            [ -f $TMPDIR/.breach ] || { notif "⚠️ Battery at/above your ${capacity[3]:-?}% limit but still charging — in AccA open Scripts and run a 'Scan & lock' script"; touch $TMPDIR/.breach; }
           else
             rm $TMPDIR/.breach 2>/dev/null || :
           fi 2>/dev/null || :

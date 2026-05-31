@@ -1,3 +1,20 @@
+**v2025.5.18-stable (202505187)**
+- First STABLE community build -- consolidates and hardens fix2..fix12:
+  * Charge limit holds EXACTLY at your level on Pixel/Tensor -- no overshoot. The
+    limit node is driven by the target level on BOTH sides (pcap), never "charge to
+    100% then interrupt" (which caused the old 75->77 breach).
+  * Default: discharge down to your limit, then HOLD there (battery-idle). Turn
+    battery-idle off for a discharge-cycle between resume_capacity and the limit.
+  * allow_idle_above_pcap now defaults to FALSE -- never sit ABOVE the limit; if the
+    battery is over it, discharge down to it.
+  * Hardened: "pcap" falls back to a safe low cap if pause_capacity is empty OR
+    non-numeric; every capacity/temp comparison is fail-safe (pause / do-not-resume).
+  * Settings apply within ~1s (live re-read, no daemon restart, no UI freeze).
+  * The daemon survives a front-end restart -- a switch scan can no longer leave it
+    stopped / charging uncapped; it verifies the daemon came back.
+  * Breach watchdog warns if the cap ever isn't holding.
+  * Switch scanner can LOCK a chosen method: hold (default) or discharge-cycle.
+
 **v2025.5.18-dev-fix12 (202505186)**
 - The switch scanner can now LOCK a chosen method (default unchanged: pcap hold):
     * `acc-switch-scan.sh --apply`          -> lock "hold at the limit" (pcap pcap), DEFAULT
