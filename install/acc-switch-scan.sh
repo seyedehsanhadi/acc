@@ -88,8 +88,23 @@ cur_line=
 cleanup() {
   [ -n "$cur_line" ] && restore_on "$cur_line" 2>/dev/null
   [ -n "$ACCA" ] && "$ACCA" -D restart >/dev/null 2>&1 || :
+  # fix10: confirm the daemon actually came back. `acca -D restart` now detaches it,
+  # but verify so a failed restart is never silent -- a stopped daemon = no cap.
+  # `acca -D` exits 0 when accd holds its lock (running), 9 when it does not.
+  up=0
+  if [ -n "$ACCA" ]; then
+    i=0; while [ "$i" -lt 8 ]; do
+      "$ACCA" -D >/dev/null 2>&1 && { up=1; break; }
+      nap; i=$((i+1))
+    done
+  fi
   say ""
-  say "ACC daemon restarted; charging is back under ACC control."
+  if [ "$up" = 1 ]; then
+    say "ACC daemon restarted; charging is back under ACC control."
+  else
+    say "! ACC daemon did NOT come back -- charging is currently UNCAPPED."
+    say "  Fix: reboot, or toggle the daemon off then on in AccA."
+  fi
 }
 trap cleanup EXIT INT TERM
 
@@ -115,6 +130,11 @@ to_mA() { awk "BEGIN{printf \"%d\", $1/($ampFactor_/1000)}" 2>/dev/null || echo 
 # echoes: "ok <ms> <idle|discharging>" | "fail" | "skip"
 test_switch() {
   local line=$1 base nr now i ms st mode lim
+  # fix10: a previous test may have left the charger idle/bypassed; wait briefly for
+  # charging to resume so this switch is measured from a charging baseline. Without
+  # this, a switch tested right after a stopping one (e.g. the pcap variant) falsely
+  # reads as "skip / not charging" and never gets evaluated.
+  i=0; while [ "$(abs "$(raw)")" -le "$THR" ] 2>/dev/null && [ "$i" -lt 14 ]; do nap; i=$((i+1)); done
   base=$(abs "$(raw)")
   [ "$base" -gt "$THR" ] 2>/dev/null || { echo skip; return; }
   cur_line=$line

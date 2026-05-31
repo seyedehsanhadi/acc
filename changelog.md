@@ -1,3 +1,17 @@
+**v2025.5.18-dev-fix10 (202505184)**
+- Settings apply immediately. The daemon already re-reads the config every loop; its
+  per-loop wait now wakes the instant the config file changes, so limit/temperature/
+  switch edits from AccA take effect within ~1s (live re-read) instead of after the
+  full loop delay -- no daemon restart, no UI freeze.
+- The daemon survives a front-end restart. `acca -D restart` was a bare `exec accd`,
+  which ran the daemon inside the calling process; when the caller was a one-shot
+  script (the switch scanner), the daemon died the moment that script exited, leaving
+  charging UNCAPPED. It now launches detached (its own session) and stays up.
+- Switch scanner: re-arms charging between tests so every switch (including the
+  flat-hold `pcap` variant) is actually evaluated instead of being skipped as "not
+  charging", and it now verifies the daemon came back after a scan -- warning loudly
+  if it did not.
+
 **v2025.5.18-dev-fix9 (202505183)**
 - Full fail-safe coverage: every capacity comparison (pause, resume, cooldown,
   shutdown, idle-reassert) now treats an empty OR non-numeric value as the safe

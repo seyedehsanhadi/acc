@@ -12,7 +12,18 @@ online() { :; }
 daemon_ctrl() {
   case "${1-}" in
     start|restart)
-      exec $TMPDIR/accd $config
+      # Detach so the daemon survives a transient caller. A bare `exec accd` leaves
+      # accd in the caller's session/process-group; when that caller is a one-shot
+      # script (e.g. the switch scanner run from a front-end), accd dies the moment
+      # the script exits -- leaving charging UNCAPPED. Launch it in its own session.
+      if command -v setsid >/dev/null 2>&1; then
+        setsid $TMPDIR/accd $config </dev/null >/dev/null 2>&1 &
+      elif command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -bx $execDir/accd.sh -S -- $config >/dev/null 2>&1
+      else
+        nohup $TMPDIR/accd $config </dev/null >/dev/null 2>&1 &
+      fi
+      exit 0
     ;;
     stop)
       . $execDir/release-lock.sh

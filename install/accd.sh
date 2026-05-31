@@ -102,6 +102,23 @@ if ! $_INIT; then
   }
 
 
+  _nap() {
+    # fix10: interruptible sleep. The daemon already re-reads the config every loop,
+    # so the only thing delaying a settings change is this wait. Wake as soon as the
+    # config file changes, so AccA edits (limits, temps, switch, ...) apply within
+    # ~1s -- live, no daemon restart, no UI freeze. Degrades to a plain wait if stat
+    # is unavailable (both reads return "x" -> never an early break).
+    local left=${1:-5} ts
+    case $left in ''|*[!0-9]*) left=5;; esac
+    ts=$(stat -c %Y $config 2>/dev/null || echo x)
+    while [ $left -gt 0 ]; do
+      sleep 1
+      left=$((left - 1))
+      [ "$(stat -c %Y $config 2>/dev/null || echo x)" = "$ts" ] || break
+    done
+  }
+
+
   cap_idle_threshold() {
     if [ ${capacity[3]} -gt 3000 ]; then
       [ ${capacity[3]} -gt 3900 ] && [ $(volt_now) -gt $(( ${capacity[3]} + 50 )) ]
@@ -325,7 +342,7 @@ if ! $_INIT; then
           else
             rm $TMPDIR/.breach 2>/dev/null || :
           fi 2>/dev/null || :
-          sleep ${loopDelay[1]}
+          _nap ${loopDelay[1]}
           rm $TMPDIR/.minCapMax 2>/dev/null || :
           continue
         fi
@@ -361,7 +378,7 @@ if ! $_INIT; then
         done
 
         cooldown=false
-        sleep ${loopDelay[0]}
+        _nap ${loopDelay[0]}
 
       else
 
@@ -399,7 +416,7 @@ if ! $_INIT; then
             fi
           fi
         fi
-        sleep ${loopDelay[1]}
+        _nap ${loopDelay[1]}
       fi
       rm $TMPDIR/.minCapMax 2>/dev/null || :
     done
