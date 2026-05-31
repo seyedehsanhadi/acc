@@ -28,9 +28,11 @@ if ! $_INIT; then
 
 
   _ge_pause_cap() {
-    # fail safe: an empty/unset pause_capacity must read as "at or above the
-    # limit" so charging is paused, never left running above an unknown limit
-    [ -n "${capacity[3]-}" ] || return 0
+    # fail safe: an empty/unset OR non-numeric pause_capacity must read as "at or
+    # above the limit" so charging is paused, never left running above an unknown
+    # or garbage limit -- a malformed value would otherwise make the numeric test
+    # below error out and silently skip the pause (overcharge).
+    case ${capacity[3]-} in ''|*[!0-9]*) return 0;; esac
     if [ ${capacity[3]} -gt 3000 ]; then
       [ $(volt_now) -ge ${capacity[3]} ]
     else
@@ -70,9 +72,9 @@ if ! $_INIT; then
     if $mtReached && _lt_pause_cap; then
       return 0
     fi
-    # fail safe: an empty/unset resume_capacity must read as "do not resume",
-    # so a bad config can never re-enable charging on its own
-    [ -n "${capacity[2]-}" ] || return 1
+    # fail safe: an empty/unset OR non-numeric resume_capacity must read as "do
+    # not resume", so a bad/garbage config can never re-enable charging on its own
+    case ${capacity[2]-} in ''|*[!0-9]*) return 1;; esac
     if [ ${capacity[2]} -gt 3000 ]; then
       [ $(volt_now) -le ${capacity[2]} ]
     else

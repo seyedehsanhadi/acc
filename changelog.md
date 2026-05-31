@@ -1,3 +1,13 @@
+**v2025.5.18-dev-fix8 (202505182)**
+- Fail-safe hardening: a malformed (non-numeric) pause_capacity or resume_capacity
+  now reads as "pause now / do not resume" instead of letting the numeric test
+  error out and silently skip the cap (which could overcharge). Previously only an
+  empty value was guarded; a garbage value slipped through.
+- A charging switch locked with `--` that STOPS working now triggers the auto
+  fallback (re-selects a working switch) and posts a warning, instead of failing
+  silently. `--` still suppresses routine re-cycling while the switch works, so
+  there is no churn in the normal case.
+
 **v2025.5.18-dev-fix7 (202505181)**
 - Pixel/Tensor: the upper limit now HOLDS instead of being overshot. The google
   `charge_stop_level` node is a charge LIMIT ("charge to N%, hold"), not an on/off

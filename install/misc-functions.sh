@@ -173,10 +173,13 @@ disable_charging() {
         if ! { flip_sw off && not_charging; }; then
           $isAccd || print_switch_fails "${chargingSwitch[@]-}"
           flip_sw on 2>/dev/null || :
-          if $autoMode; then
-            unset_switch
-            cycle_switches_off
-          fi
+          # fix7 hardening: recover even from a --locked switch that has stopped
+          # working. "--" suppresses routine auto-cycling (no churn while it works),
+          # but a switch that fails to stop charging AT ALL must still trigger the
+          # fallback -- safety outranks the lock. Alert once so a stale lock is seen.
+          $autoMode || notif "⚠️ Locked charging switch failed to stop charging; auto-selecting another"
+          unset_switch
+          cycle_switches_off
         fi
       else
         invalid_switch
@@ -185,11 +188,12 @@ disable_charging() {
       cycle_switches_off
     fi
 
-    if $autoMode && ! not_charging; then
+    if ! not_charging; then
       # fix7: restore 2022/2023 behavior -- report failure and let the daemon loop
-      # retry the pause next tick. Do NOT exec/re-init mid-pause: tearing the daemon
-      # down re-arms charging during the init window and thrashes on a switch that
-      # only needs another loop to settle.
+      # retry the pause next tick (now also for --locked switches, since the
+      # fallback above runs regardless of the lock). Do NOT exec/re-init mid-pause:
+      # tearing the daemon down re-arms charging in the init window and thrashes on
+      # a switch that only needs another loop to settle.
       return 7 # total failure
     fi
 
