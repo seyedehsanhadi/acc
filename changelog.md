@@ -1,3 +1,10 @@
+**v2025.5.18-dev-fix5 (202505180)**
+- Pixel/Tensor: prefer the fixed-threshold google charge_stop_level switch. The
+  dynamic "battery/capacity" variant pinned the stop level to the live %, so the
+  firmware re-resumed at the threshold and accd re-tested the switch (brief on/off
+  bursts near the limit). Disabling that variant lets ACC adopt the clean fixed
+  switch, which holds the limit without churn.
+
 **v2025.5.18-dev-fix4 (202505180)**
 - Charging no longer pulses on/off near the limit. The strict charging-switch
   selection (fix3) re-enabled charging while pausing on devices whose only working
