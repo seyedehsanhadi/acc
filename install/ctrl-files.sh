@@ -63,17 +63,13 @@ battery/input_suspend 0 1 /proc/mtk_battery_cmd/en_power_path 1 1
 #battery/charge_control_start_threshold 0 1 battery/charge_control_end_threshold 0 2
 /sys/class/qcom-battery/cool_mode 0 1
 /sys/class/qcom-battery/wireless_boost_en 0 1
-# fix11: drive the Google charge-limit node with the TARGET level (pause_capacity) so
-# the recharge stops EXACTLY at the cap. "pcap" = pause_capacity, resolved in flip_sw
-# on both the on and off side. The old on=100 ("charge to 100%") sailed past the limit
-# on every resume -> overshoot (the 75->77 breach); these never write 100, so no
-# overshoot is possible. The "100 5" / "battery/capacity" variants are removed.
-#   pcap pcap : charge to the cap and hold there  -- battery-idle / DEFAULT.
-#   pcap 5    : discharge to resume_capacity, recharge to the cap, repeat -- the
-#               discharge-cycle used when battery-idle is off (recharge still tops
-#               out exactly at the cap, never above).
+# Drive the Google charge-limit node to your TARGET level on BOTH sides ("pcap" =
+# pause_capacity, resolved in flip_sw): charge up to your limit and HOLD there
+# (charge_stop_level = limit). Stops exactly at the limit, never above, and never
+# drains below it. The on=100 ("charge to 100%") variants are gone (they overshot,
+# the 75->77 breach); the "pcap 5" discharge variant is gone too (it drained the
+# battery down to resume_capacity, ~70). Hold-at-limit is the only behavior.
 /sys/devices/platform/google,charger/charge_stop_level pcap pcap
-/sys/devices/platform/google,charger/charge_stop_level pcap 5
 /sys/devices/platform/soc/soc:oplus,chg_intf/oplus_chg/battery/chg_enable 1 0
 /sys/devices/platform/soc/soc:oplus,chg_intf/oplus_chg/battery/chg_enable 1 0
 /sys/devices/platform/soc/soc:oplus,chg_intf/oplus_chg/battery/cool_down 0 1

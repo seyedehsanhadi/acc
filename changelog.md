@@ -1,3 +1,12 @@
+**v2025.5.18-stable.2 (202505189)**
+- Hold-at-limit only. Removed the `charge_stop_level pcap 5` discharge variant and
+  reverted `allow_idle_above_pcap` to its original default. The stable.1 default
+  (`allow_idle_above_pcap=false`) pushed auto-mode into the discharge variant, which
+  drained the battery down to resume_capacity (~70) instead of holding at the limit.
+  Now charging stops at your limit and holds there -- the only behavior. The installer
+  migrates existing configs (undo the false default, drop a locked pcap-5 switch), so
+  this needs no manual command.
+
 **v2025.5.18-stable.1 (202505188)**
 - Existing configs now auto-adopt the corrected defaults on update (one-time, in the
   installer): the new `allow_idle_above_pcap=false` ("never sit above the limit")

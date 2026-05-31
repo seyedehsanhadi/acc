@@ -66,7 +66,7 @@ printf "\n\n\n" >> $TMPDIR/.scripts
 
 echo "configVerCode=$(cat $TMPDIR/.config-ver)
 
-allowIdleAbovePcap=${aiapc:-false}
+allowIdleAbovePcap=${aiapc:-true}
 ampFactor=$af
 battStatusWorkaround=${bsw:-true}
 capacity=(${sc:-5} ${cc:-101} $rc $pc ${cm:-false})
