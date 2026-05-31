@@ -80,6 +80,7 @@ cycle_switches() {
 
   local on=
   local off=
+  local strict=${3:-false}
 
   touch $TMPDIR/.testingsw
 
@@ -93,6 +94,26 @@ cycle_switches() {
         not_charging || break
       else
         if not_charging ${2-}; then
+          # Stability gate: re-confirm the off state PERSISTS before adopting this
+          # switch. A level/throttle node (e.g. *charge_stop_level*, siop_level)
+          # can read "stopped" for an instant and then be re-armed by the charger
+          # firmware -- that is the on/off flicker. Only enforced on the strict
+          # pass; cycle_switches_off runs a lenient fallback afterwards, so a
+          # device whose ONLY working switch flickers is still capped (no regression).
+          if $strict; then
+            sleep ${loopDelay[0]}
+            if ! not_charging ${2-}; then
+              # resumed on its own -> flicker; keep charging OFF (never pulse it
+              # back on while we are trying to pause at/above the limit), then
+              # reject the switch and move it to the end like a failure
+              flip_sw off 2>/dev/null || :
+              if ! ${acc_t:-false}; then
+                sed -i "\|^${chargingSwitch[*]}$|d" $TMPDIR/ch-switches
+                echo "${chargingSwitch[*]}" >> $TMPDIR/ch-switches
+              fi
+              continue
+            fi
+          fi
           # set working charging switch(es)
           s="${chargingSwitch[*]}" # for some reason, without this, the array is null
           . $execDir/write-config.sh
@@ -114,11 +135,30 @@ cycle_switches() {
 
 
 cycle_switches_off() {
-  case $prioritizeBattIdleMode in
-    true) cycle_switches off Idle;;
-    no)   cycle_switches off Discharging;;
-  esac
-  not_charging || cycle_switches off
+  # Pass 1 (strict): prefer a switch whose off state persists, so a flicker-prone
+  # level switch is skipped whenever a cleaner one exists on this device.
+  # Probe strictly only while no switch is set yet, and at most once per accd
+  # session. Re-probing on every pause loop is what made a flicker-prone device
+  # cycle charging on/off near the limit; once a switch is chosen the plain
+  # disable below holds it off without probing (or pulsing) again.
+  if [ -z "${chargingSwitch[0]-}" ] && [ ! -f $TMPDIR/.sw-strict-done ]; then
+    case $prioritizeBattIdleMode in
+      true) cycle_switches off Idle true;;
+      no)   cycle_switches off Discharging true;;
+    esac
+    not_charging || cycle_switches off "" true
+    touch $TMPDIR/.sw-strict-done 2>/dev/null || :
+  fi
+  # Pass 2 (lenient fallback): if nothing latched cleanly (e.g. the device only
+  # exposes a flicker-prone level switch), restore the original behavior so
+  # charging is still capped. Worst case here equals the previous behavior.
+  not_charging || {
+    case $prioritizeBattIdleMode in
+      true) cycle_switches off Idle;;
+      no)   cycle_switches off Discharging;;
+    esac
+    not_charging || cycle_switches off
+  }
 }
 
 

@@ -28,6 +28,9 @@ if ! $_INIT; then
 
 
   _ge_pause_cap() {
+    # fail safe: an empty/unset pause_capacity must read as "at or above the
+    # limit" so charging is paused, never left running above an unknown limit
+    [ -n "${capacity[3]-}" ] || return 0
     if [ ${capacity[3]} -gt 3000 ]; then
       [ $(volt_now) -ge ${capacity[3]} ]
     else
@@ -66,7 +69,11 @@ if ! $_INIT; then
   _le_resume_cap() {
     if $mtReached && _lt_pause_cap; then
       return 0
-    elif [ ${capacity[2]} -gt 3000 ]; then
+    fi
+    # fail safe: an empty/unset resume_capacity must read as "do not resume",
+    # so a bad config can never re-enable charging on its own
+    [ -n "${capacity[2]-}" ] || return 1
+    if [ ${capacity[2]} -gt 3000 ]; then
       [ $(volt_now) -le ${capacity[2]} ]
     else
       [ $(batt_cap) -le ${capacity[2]} ]
@@ -527,7 +534,7 @@ if ! $_INIT; then
 
   apply_on_boot
   touch $TMPDIR/.minCapMax
-  rm $TMPDIR/.testingsw 2>/dev/null || :
+  rm $TMPDIR/.testingsw $TMPDIR/.sw-strict-done 2>/dev/null || :
   ctrl_charging
   exit $?
 

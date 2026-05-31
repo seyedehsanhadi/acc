@@ -1,3 +1,11 @@
+**v2025.5.18-dev-fix4 (202505180)**
+- Charging no longer pulses on/off near the limit. The strict charging-switch
+  selection (fix3) re-enabled charging while pausing on devices whose only working
+  switch the firmware keeps re-arming; it now keeps charging OFF while probing and
+  selects a switch once per accd session instead of on every pause loop.
+- Fail-safe limit: a missing/unreadable pause or resume capacity now reads as
+  "pause now / do not resume" instead of letting the battery charge past the limit.
+
 **v2025.5.18-dev (202505180)**
 - acc -f fixes & enhancements
 - acca -t q ... (quiet test; reports Ok, Idle or Fail)
