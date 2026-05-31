@@ -334,13 +334,17 @@ flip_sw() {
   while [ -f ${1:-//} ]; do
 
     on="$(parse_value "$2")"
+    # fix11: "pcap" resolves to pause_capacity on the ON side too, so the RECHARGE
+    # stops exactly at the cap. The old on=100 ("charge to 100%") made the firmware
+    # sail toward 100 on every resume and overshoot the limit before accd caught it.
+    [ "$2" != pcap ] || on=${capacity[3]:-60}
     if [ $3 = 3600mV ]; then
       off=$(cat $1)
       [ $off -lt 10000 ] && off=3600 || off=3600000
     elif [ $3 = pcap ]; then
       # fix7: limit-node off value = pause_capacity, so the firmware holds the
-      # battery flat at the cap (tight, no overshoot, true idle). Falls back to a
-      # safe low cap if pause_capacity is unset (can only stop charging, never run on).
+      # battery at the cap (tight, no overshoot). Falls back to a safe low cap if
+      # pause_capacity is unset (can only stop charging, never run on).
       off=${capacity[3]:-60}
     else
       off="$(parse_value "$3")"

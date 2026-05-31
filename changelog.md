@@ -1,3 +1,15 @@
+**v2025.5.18-dev-fix11 (202505185)**
+- The cap is now driven by the TARGET level on both sides, so the recharge stops
+  EXACTLY at pause_capacity. The old on-value of 100 ("charge to 100%") made the
+  firmware sail past the limit on every resume and overshoot it (the 75->77 breach).
+  The google charge_stop_level switch is now:
+    * `pcap pcap` -- charge to the cap and hold there (battery-idle), the DEFAULT;
+    * `pcap 5`    -- discharge to resume_capacity, then recharge to the cap, repeat
+                     (the cycle used when battery-idle is off; recharge still tops out
+                     exactly at the cap, never above).
+  The overshooting `100 5` and `100 battery/capacity` (on=100) variants are removed.
+  `pcap` resolves to pause_capacity on both the on and off side in flip_sw.
+
 **v2025.5.18-dev-fix10 (202505184)**
 - Settings apply immediately. The daemon already re-reads the config every loop; its
   per-loop wait now wakes the instant the config file changes, so limit/temperature/

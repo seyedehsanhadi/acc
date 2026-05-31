@@ -63,15 +63,17 @@ battery/input_suspend 0 1 /proc/mtk_battery_cmd/en_power_path 1 1
 #battery/charge_control_start_threshold 0 1 battery/charge_control_end_threshold 0 2
 /sys/class/qcom-battery/cool_mode 0 1
 /sys/class/qcom-battery/wireless_boost_en 0 1
-# fix7: the Google charge-limit node holds the battery flat at whatever level it is set
-# to (Adaptive-Charging style). Driving it to the TARGET level (pause_capacity, the
-# "pcap" token resolved in flip_sw) makes the FIRMWARE hold the cap = tight, no overshoot,
-# no 70<->limit discharge sawtooth, and it is true battery-idle (prioritize_batt_idle_mode).
-# This is preferred. The fixed "100 5" below stays as a discharge-type fallback for
-# firmware that ignores in-range stop levels; "battery/capacity" holds at the live %.
-/sys/devices/platform/google,charger/charge_stop_level 100 pcap
-/sys/devices/platform/google,charger/charge_stop_level 100 5
-/sys/devices/platform/google,charger/charge_stop_level 100 battery/capacity
+# fix11: drive the Google charge-limit node with the TARGET level (pause_capacity) so
+# the recharge stops EXACTLY at the cap. "pcap" = pause_capacity, resolved in flip_sw
+# on both the on and off side. The old on=100 ("charge to 100%") sailed past the limit
+# on every resume -> overshoot (the 75->77 breach); these never write 100, so no
+# overshoot is possible. The "100 5" / "battery/capacity" variants are removed.
+#   pcap pcap : charge to the cap and hold there  -- battery-idle / DEFAULT.
+#   pcap 5    : discharge to resume_capacity, recharge to the cap, repeat -- the
+#               discharge-cycle used when battery-idle is off (recharge still tops
+#               out exactly at the cap, never above).
+/sys/devices/platform/google,charger/charge_stop_level pcap pcap
+/sys/devices/platform/google,charger/charge_stop_level pcap 5
 /sys/devices/platform/soc/soc:oplus,chg_intf/oplus_chg/battery/chg_enable 1 0
 /sys/devices/platform/soc/soc:oplus,chg_intf/oplus_chg/battery/chg_enable 1 0
 /sys/devices/platform/soc/soc:oplus,chg_intf/oplus_chg/battery/cool_down 0 1
