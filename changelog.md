@@ -1,3 +1,12 @@
+**v2025.5.18-dev-fix12 (202505186)**
+- The switch scanner can now LOCK a chosen method (default unchanged: pcap hold):
+    * `acc-switch-scan.sh --apply`          -> lock "hold at the limit" (pcap pcap), DEFAULT
+    * `acc-switch-scan.sh --apply --cycle`  -> lock the "discharge-cycle" (pcap 5):
+      discharge to resume_capacity, then recharge to the cap, repeat.
+  It picks the method by the switch LINE rather than the device-dependent measured
+  idle/discharging reading, so the choice is reliable even where the kernel slow-
+  drains at the limit. AccA exposes both as one-tap Scripts.
+
 **v2025.5.18-dev-fix11 (202505185)**
 - The cap is now driven by the TARGET level on both sides, so the recharge stops
   EXACTLY at pause_capacity. The old on-value of 100 ("charge to 100%") made the

@@ -1,8 +1,8 @@
 id=acc
 domain=vr25
 name=Advanced Charging Controller (ACC)
-version=v2025.5.18-dev-fix11
-versionCode=202505185
-author=VR25 (community fix11)
-description=[community fix11: charge limit driven by the target level on both sides (recharge stops EXACTLY at the cap, no on=100 overshoot); default pcap flat-hold, pcap-5 discharge-cycle when idle is off. fix10: settings apply within ~1s (live, no restart/freeze); the daemon survives a front-end restart; scanner re-arms and verifies the daemon. fix9: full fail-safe coverage + flat-hold on all charge-limit nodes + breach watchdog. fix8: malformed-config fail-safe + locked-switch recovery. fix7: Pixel/Tensor cap now HOLDS at the limit. Drives the google charge_stop_level node to pause_capacity so the firmware holds the battery flat at the cap (tight, no overshoot, true idle) instead of toggling 100/5 and sawtoothing past it; switch scanner prefers idle/flat-hold switches; restores retry-on-stall (no daemon re-init mid-pause). Includes fix2-fix6.] Extend your battery's service life by controlling charging current, temperature, and voltage. Any root solution is supported. The installation is always "systemless". Works on Android and KaiOS.
+version=v2025.5.18-dev-fix12
+versionCode=202505186
+author=VR25 (community fix12)
+description=[community fix12: scanner can LOCK a chosen method -- --apply locks hold-at-limit (pcap, DEFAULT), --apply --cycle locks the discharge-cycle (pcap 5). fix11: charge limit driven by the target level on both sides (recharge stops EXACTLY at the cap, no on=100 overshoot); default pcap flat-hold, pcap-5 discharge-cycle when idle is off. fix10: settings apply within ~1s (live, no restart/freeze); the daemon survives a front-end restart; scanner re-arms and verifies the daemon. fix9: full fail-safe coverage + flat-hold on all charge-limit nodes + breach watchdog. fix8: malformed-config fail-safe + locked-switch recovery. fix7: Pixel/Tensor cap now HOLDS at the limit. Drives the google charge_stop_level node to pause_capacity so the firmware holds the battery flat at the cap (tight, no overshoot, true idle) instead of toggling 100/5 and sawtoothing past it; switch scanner prefers idle/flat-hold switches; restores retry-on-stall (no daemon re-init mid-pause). Includes fix2-fix6.] Extend your battery's service life by controlling charging current, temperature, and voltage. Any root solution is supported. The installation is always "systemless". Works on Android and KaiOS.
 updateJson=https://raw.githubusercontent.com/VR-25/acc/master/module.json

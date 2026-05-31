@@ -2,10 +2,10 @@
     "busybox": "https://github.com/Magisk-Modules-Repo/busybox-ndk",
     "changelog": "https://raw.githubusercontent.com/VR-25/acc/master/changelog.md",
     "curl": "https://github.com/Zackptg5/Cross-Compiled-Binaries-Android/tree/master/curl",
-    "onlineInstaller": "https://github.com/VR-25/acc/releases/download/v2025.5.18-dev-fix11/install-online.sh",
-    "tgz": "https://github.com/VR-25/acc/releases/download/v2025.5.18-dev-fix11/acc_v2025.5.18-dev-fix11_202505185.tgz",
-    "tgzInstaller": "https://github.com/VR-25/acc/releases/download/v2025.5.18-dev-fix11/install-tarball.sh",
-    "version": "v2025.5.18-dev-fix11",
-    "versionCode": 202505185,
-    "zipUrl": "https://github.com/VR-25/acc/releases/download/v2025.5.18-dev-fix11/acc_v2025.5.18-dev-fix11_202505185.zip"
+    "onlineInstaller": "https://github.com/VR-25/acc/releases/download/v2025.5.18-dev-fix12/install-online.sh",
+    "tgz": "https://github.com/VR-25/acc/releases/download/v2025.5.18-dev-fix12/acc_v2025.5.18-dev-fix12_202505186.tgz",
+    "tgzInstaller": "https://github.com/VR-25/acc/releases/download/v2025.5.18-dev-fix12/install-tarball.sh",
+    "version": "v2025.5.18-dev-fix12",
+    "versionCode": 202505186,
+    "zipUrl": "https://github.com/VR-25/acc/releases/download/v2025.5.18-dev-fix12/acc_v2025.5.18-dev-fix12_202505186.zip"
 }

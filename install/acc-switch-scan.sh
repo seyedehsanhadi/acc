@@ -14,7 +14,9 @@
 # so charging is never left disabled.
 #
 # RUN (must be plugged in and actively charging):
-#   su -c 'sh /sdcard/acc-switch-scan.sh'
+#   su -c 'sh /sdcard/acc-switch-scan.sh'         # scan only (recommend a switch)
+#   ...acc-switch-scan.sh --apply                 # + LOCK the "hold at limit" method (DEFAULT)
+#   ...acc-switch-scan.sh --apply --cycle         # + LOCK the "discharge-cycle" method instead
 # Optional max seconds-per-switch (default 4):   ...acc-switch-scan.sh 6
 
 set -u
@@ -27,10 +29,13 @@ PATH=/data/adb/$domain/bin:$PATH
 
 MAX_S=4                            # max seconds to wait per switch before "no effect"
 STEP_MS=300                        # poll interval (ms)
-APPLY=0                            # --apply: lock in the best switch automatically
+APPLY=0                            # --apply: lock the best switch automatically
+METHOD=hold                        # which method to lock: hold (park at limit, DEFAULT) | cycle (discharge<->recharge)
 for _a in "$@"; do
   case "$_a" in
     --apply) APPLY=1;;
+    --cycle) METHOD=cycle;;
+    --hold)  METHOD=hold;;
     [0-9]*)  MAX_S=$_a;;
   esac
 done
@@ -164,6 +169,7 @@ SW=$TMPDIR/ch-switches
 say "== ACC fast switch scan =="
 say "device : $(getprop ro.product.device 2>/dev/null)"
 say "current: $(to_mA "$(raw)") mA  (source: ${currFile})"
+[ "$APPLY" = 1 ] && say "lock   : $([ "$METHOD" = cycle ] && echo 'discharge-cycle (battery-idle OFF)' || echo 'hold at limit / battery-idle (DEFAULT)')"
 [ "$(abs "$(raw)")" -gt "$THR" ] 2>/dev/null || { warn "Not charging now. Plug in the charger and rerun."; exit 1; }
 
 [ -n "$ACCA" ] && "$ACCA" -D stop >/dev/null 2>&1 || :
@@ -183,14 +189,17 @@ while IFS= read -r line; do
   set -- $r
   case "${1:-}" in
     ok)   say "STOPS ${2}ms [${3}]"
-          # fix7: rank idle/flat-hold (P=0) above discharging (P=1). A flat hold caps
-          # the battery at the level without draining it (longevity + tighter, no
-          # sawtooth); a discharging switch works but drains to the resume level.
-          case "$3" in idle) P=0;; *) P=1;; esac
-          # a "pcap" (target-level) limit switch holds the battery AT the cap by design;
-          # always rank it first even if it briefly reads as discharging while pulling
-          # down to the cap -- it ends flat at pause_capacity, not in a resume sawtooth.
-          case "$line" in *\ pcap|*\ pcap\ *) P=0;; esac
+          # fix12: rank by the METHOD the user chose to lock, decided by the switch
+          # LINE itself (measured idle/discharging is unreliable on devices that
+          # slow-drain even at the limit). "<node> pcap pcap" = hold-at-cap;
+          # "<node> pcap 5" = discharge-cycle. Default (hold) -> pcap-pcap first;
+          # --cycle -> pcap-5 first. Plain (non-pcap) switches: idle above discharging.
+          P=4
+          case "$line" in
+            *\ pcap\ pcap) [ "$METHOD" = cycle ] && P=2 || P=0;;
+            *\ pcap\ 5)    [ "$METHOD" = cycle ] && P=0 || P=2;;
+            *)             case "$3" in idle) P=1;; *) P=3;; esac;;
+          esac
           results="${results}${P} ${2} ${3} ${line}
 ";;
     skip) say "(not charging — rerun while charging)";;
@@ -201,7 +210,7 @@ done < "$SW"
 say ""
 say "================ RESULT ================"
 if [ -n "$results" ]; then
-  say "Working switches (best first -- idle/flat-hold preferred, then fastest):"
+  say "Working switches (best first -- $([ "$METHOD" = cycle ] && echo 'discharge-cycle' || echo 'hold-at-limit') method preferred, then fastest):"
   printf '%s' "$results" | sort -n -k1,1 -k2,2n | while read prio ms mode rest; do
     say "  [${ms}ms ${mode}]  $rest"
   done
@@ -210,14 +219,15 @@ if [ -n "$results" ]; then
   say "BEST=${best}"
   if [ "$APPLY" = 1 ] && [ -n "$best" ]; then
     [ -n "$ACCA" ] && "$ACCA" -s "s=${best} --" >/dev/null 2>&1 || :
-    say "APPLIED=1   (locked in: acc -s s='${best} --')"
+    say "APPLIED=1   method=${METHOD}   (locked in: acc -s s='${best} --')"
   else
-    say "Recommended — lock this one in (stops ACC auto-cycling it):"
+    say "Recommended ($([ "$METHOD" = cycle ] && echo 'discharge-cycle' || echo 'hold-at-limit')) -- lock it in (stops ACC auto-cycling):"
     say "  acc -s s='${best} --'"
+    say "  (re-run the scan with --apply to lock it; add --cycle for the discharge-cycle method)"
   fi
   say ""
-  say "[idle] = holds the battery flat (bypass);  [discharging] = stops charging,"
-  say "phone then runs off the battery until it drops to your resume level."
+  say "hold-at-limit = parks the battery at your limit (pcap pcap);  discharge-cycle ="
+  say "drops to your resume level then recharges to the limit, repeating (pcap 5)."
 else
   say "NO switch stopped charging on this device."
   say "Almost always the OS is overriding ACC. Do this, then rerun:"
