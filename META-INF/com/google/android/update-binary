@@ -186,12 +186,15 @@ cp -f $srcDir/README.* $data_dir/
   touch $data_dir/.stable-defaults3 2>/dev/null || :
 }
 
-# one-time: adopt the gentler default max_temp (50 -> 45 C; heat above ~45 ages the
-# cell noticeably faster). Only changes a config still on the old default of 50, so a
-# value you deliberately set is left untouched. Runs once.
-[ -f $data_dir/.stable-defaults4 ] || {
-  [ ! -f $config ] || sed -i 's/^\(temperature=([0-9]* \)50 /\145 /' $config 2>/dev/null || :
-  touch $data_dir/.stable-defaults4 2>/dev/null || :
+# one-time (stable.5): repair a temperature band left degenerate by stable.4. That release
+# lowered max_temp 50 -> 45, which collapsed it onto cooldown_temp (both 45). cooldown_temp is
+# where the gentle cooldown cycle STARTS and max_temp is the hard pause; when they are equal the
+# cooldown loop enters and instantly breaks at max_temp, so it never throttles. Restore the
+# proven upstream max_temp of 50 (band: cooldown 45 < max 50). Only the exact collapsed
+# signature "(45 45 " is touched; a band you set yourself is left alone. Runs once.
+[ -f $data_dir/.stable-defaults5 ] || {
+  [ ! -f $config ] || sed -i 's/^\(temperature=(45 \)45 /\150 /' $config 2>/dev/null || :
+  touch $data_dir/.stable-defaults5 2>/dev/null || :
 }
 
 

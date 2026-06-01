@@ -54,10 +54,17 @@ printf "\n\n\n" >> $TMPDIR/.scripts
   [ $pc -gt 3000 ] && rc=$((pc - 150)) || rc=$((pc - 5))
 }
 
-: ${mt:=45}
+: ${mt:=50}
 : ${rt:=40}
+: ${ct:=45}
 
 ! [[ $rt -ge $mt || $((mt - $rt)) -gt 10 ]] || rt=$((mt - 1))
+
+# cooldown_temp must stay below max_temp -- if they are equal, the cooldown cycle enters and
+# immediately breaks at max_temp, so it never actually throttles. Keep a gap below max_temp,
+# and never let cooldown_temp fall below resume_temp.
+[ $ct -lt $mt ] || ct=$((mt - 5))
+[ $ct -ge $rt ] || ct=$rt
 
 
 # reset switch (in auto-mode) if pbim has changed and another switch is not being set
@@ -79,7 +86,7 @@ offMid=${om:-true}
 prioritizeBattIdleMode=${pbim:-true}
 rebootResume=${rr:-false}
 resetBattStats=(${rbsp:-false} ${rbsu:-false} ${rbspl:-false})
-temperature=(${ct:-45} $mt $rt ${st:-55})
+temperature=($ct $mt $rt ${st:-55})
 tempLevel=${tl:-0}
 voltFactor=$vf
 

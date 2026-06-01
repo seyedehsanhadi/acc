@@ -1,3 +1,20 @@
+**v2025.5.18-stable.5 (202505192)**
+- Reverts the stable.4 "gentler max_temp 45 C" change, which was wrong. Lowering max_temp to 45
+  left it equal to cooldown_temp, so the config read `temperature=(45 45 40 55)`. cooldown_temp is
+  the temperature at which the gentle cooldown cycle STARTS; max_temp is the hard pause. When the
+  two are equal the cooldown loop enters and immediately breaks at max_temp -- it never actually
+  throttles, so the cooldown stage is dead. The two thresholds have to keep a gap.
+- Default temperature band restored to the proven upstream `cooldown 45 < max 50` (resume 40,
+  shutdown 55). 50 C has been ACC's default for years; the 5 C gap beneath it is the working range
+  of the cooldown cycle. Heat does age cells, but the levers for that are a lower charge limit and
+  the cooldown cycle -- not collapsing the two temperature thresholds onto one value.
+- Hardening so it cannot recur: write-config now defaults max_temp to 50 and enforces
+  cooldown_temp < max_temp (and >= resume_temp) on every rewrite, rather than rebuilding the array
+  with both at 45.
+- Migration: a config left on the degenerate `(45 45 ...)` by stable.4 is repaired once to
+  `(45 50 ...)`. Only that exact collapsed signature is touched; a band you set yourself is left
+  alone. No command needed.
+
 **v2025.5.18-stable.4 (202505191)**
 - ACC is now fully standalone. Removed the cleanup script that deleted ACC when the
   AccA app was uninstalled -- ACC is a normal Magisk/KSU module, so removing the

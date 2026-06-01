@@ -13,7 +13,7 @@ offMid=true
 prioritizeBattIdleMode=true
 rebootResume=false
 resetBattStats=(false false false)
-temperature=(45 45 40 55)
+temperature=(45 50 40 55)
 tempLevel=0
 voltFactor=
 
