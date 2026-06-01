@@ -174,16 +174,16 @@ cp -f $srcDir/README.* $data_dir/
 
 # one-time migration for EXISTING configs, so no manual command is needed (runs once,
 # marker-guarded; never clobbers a deliberate later choice):
-#  - hold-at-limit only: undo the brief allow_idle_above_pcap=false default, which made
-#    the daemon DISCHARGE down to resume_capacity (~70) instead of holding at the limit;
-#  - drop any locked "charge_stop_level pcap 5" (the removed discharge variant) so the
-#    daemon re-selects the hold switch on its own.
-[ -f $data_dir/.stable-defaults2 ] || {
+#  - ensure allow_idle_above_pcap is on (hold/charge in range, not forced discharge);
+#  - upgrade a locked "charge_stop_level pcap pcap" (froze the battery -- writing the
+#    limit value never re-arms the charger) or "... pcap 5" (drained to ~70) to
+#    "... 100 pcap" (ON=100 resumes, OFF=limit stops), so a locked config charges again.
+[ -f $data_dir/.stable-defaults3 ] || {
   [ ! -f $config ] || {
     sed -i 's/^allowIdleAbovePcap=false$/allowIdleAbovePcap=true/' $config 2>/dev/null || :
-    sed -i 's/^chargingSwitch=.*charge_stop_level pcap 5.*/chargingSwitch=()/' $config 2>/dev/null || :
+    sed -i 's/charge_stop_level pcap pcap/charge_stop_level 100 pcap/g; s/charge_stop_level pcap 5/charge_stop_level 100 pcap/g' $config 2>/dev/null || :
   }
-  touch $data_dir/.stable-defaults2 2>/dev/null || :
+  touch $data_dir/.stable-defaults3 2>/dev/null || :
 }
 
 

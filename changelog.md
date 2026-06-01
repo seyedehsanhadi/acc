@@ -1,3 +1,14 @@
+**v2025.5.18-stable.3 (202505190)**
+- Fixes charging getting STUCK below the range (e.g. frozen at 64 % with a 70-75 range:
+  neither charging nor discharging). The Google charge-stop node latches "stopped" once
+  it reaches the limit. stable.2 used the limit value (pcap) as BOTH the stop and the
+  resume value, and re-writing the limit never re-arms the charger -- so once stopped it
+  stayed stopped, even after the battery drained below the range. The resume value is
+  now `100` ("charge up"), which re-arms it (what 2022/2023 did); the stop value stays
+  at your limit. Net: charge up to your limit, stop, drift down, resume at your resume
+  level -- a tight cycle within your range. The installer upgrades a locked pcap-pcap /
+  pcap-5 switch to `100 pcap` automatically, no command.
+
 **v2025.5.18-stable.2 (202505189)**
 - Hold-at-limit only. Removed the `charge_stop_level pcap 5` discharge variant and
   reverted `allow_idle_above_pcap` to its original default. The stable.1 default

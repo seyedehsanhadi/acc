@@ -334,10 +334,11 @@ flip_sw() {
   while [ -f ${1:-//} ]; do
 
     on="$(parse_value "$2")"
-    # "pcap" = pause_capacity, resolved on BOTH the on and off side so the recharge
-    # stops EXACTLY at the cap (the old on=100 sailed toward 100% and overshot the
-    # limit on every resume). Hardened: an empty OR non-numeric pause_capacity falls
-    # back to a safe low cap (60) so a garbage config can only cap low, never run on.
+    # "pcap" resolves to pause_capacity -- used as the OFF (stop) value so charging
+    # stops AT your limit. Numeric-safe: empty/garbage pause_capacity -> a safe low
+    # cap (60), so it can only cap low, never charge on. The ON (resume) value is 100,
+    # NOT pcap: charge_stop_level latches "stopped", and only a higher value (100)
+    # re-arms the charger -- writing the limit value back would leave it frozen.
     [ "$2" != pcap ] || case ${capacity[3]-} in ''|*[!0-9]*) on=60;; *) on=${capacity[3]};; esac
     if [ $3 = 3600mV ]; then
       off=$(cat $1)
