@@ -186,6 +186,14 @@ cp -f $srcDir/README.* $data_dir/
   touch $data_dir/.stable-defaults3 2>/dev/null || :
 }
 
+# one-time: adopt the gentler default max_temp (50 -> 45 C; heat above ~45 ages the
+# cell noticeably faster). Only changes a config still on the old default of 50, so a
+# value you deliberately set is left untouched. Runs once.
+[ -f $data_dir/.stable-defaults4 ] || {
+  [ ! -f $config ] || sed -i 's/^\(temperature=([0-9]* \)50 /\145 /' $config 2>/dev/null || :
+  touch $data_dir/.stable-defaults4 2>/dev/null || :
+}
+
 
 # KaiOS patches
 [ ! -d /data/usbmsc_mnt/ ] || {
@@ -226,26 +234,11 @@ if $acca; then
 
     ln -fs $installDir $accaFiles/
 
-    # AccA post-uninstall cleanup script
-    mkdir -p /data/adb/service.d || {
-      rm /data/adb/service.d
-      mkdir /data/adb/service.d
-    }
-    echo "#!/system/bin/sh
-      # acc front-end post-uninstall cleanup script
-
-      until test -d /sdcard/Android \\
-        && test .\$(getprop sys.boot_completed) = .1
-      do
-        sleep 60
-      done
-
-      sleep 60
-
-      [ -e $accaFiles/$id ] || rm -rf \$0 /data/adb/$domain/$id /data/adb/modules/$id 2>/dev/null
-
-      exit 0" | sed 's/^      //' > /data/adb/service.d/${id}-cleanup.sh
-    chmod 0755 /data/adb/service.d/${id}-cleanup.sh
+    # ACC is a STANDALONE module -- do NOT tie its lifecycle to the AccA app. Older
+    # builds dropped a service.d cleanup script that DELETED ACC (and the daemon) when
+    # AccA was uninstalled. Remove any leftover so uninstalling the AccA app never
+    # removes ACC: the daemon and your limits keep working without the front-end.
+    rm -f /data/adb/service.d/${id}-cleanup.sh 2>/dev/null || :
   }
 fi
 

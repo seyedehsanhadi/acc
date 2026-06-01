@@ -54,7 +54,7 @@ printf "\n\n\n" >> $TMPDIR/.scripts
   [ $pc -gt 3000 ] && rc=$((pc - 150)) || rc=$((pc - 5))
 }
 
-: ${mt:=50}
+: ${mt:=45}
 : ${rt:=40}
 
 ! [[ $rt -ge $mt || $((mt - $rt)) -gt 10 ]] || rt=$((mt - 1))

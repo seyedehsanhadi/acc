@@ -1,3 +1,15 @@
+**v2025.5.18-stable.4 (202505191)**
+- ACC is now fully standalone. Removed the cleanup script that deleted ACC when the
+  AccA app was uninstalled -- ACC is a normal Magisk/KSU module, so removing the
+  front-end never touches the daemon or your config. Existing installs drop that
+  script on update too. (Your config always persists in config.txt regardless.)
+- Gentler default temperature limit: max_temp 50 -> 45 C (heat above ~45 ages the cell
+  noticeably faster -- BU-410). Fresh installs ship 45; a config still on the old
+  default of 50 is updated once; a value you set yourself is left alone.
+- Hygiene: AccA's boot receiver is now registered (justifies its boot permission and
+  is belt-and-suspenders next to the module's own boot hook), and AccA's stale profile
+  temperature default (a legacy "90") is corrected to a sensible resume temp.
+
 **v2025.5.18-stable.3 (202505190)**
 - Fixes charging getting STUCK below the range (e.g. frozen at 64 % with a 70-75 range:
   neither charging nor discharging). The Google charge-stop node latches "stopped" once
