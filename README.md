@@ -874,8 +874,8 @@ Options
 
   -p|--parse [<base file> <file to parse>] | <file to parse>]   Helps find potential charging switches quickly, for any device
     e.g.,
-      acc -p   Parse /logs/power_supply-\*.log and print potential charging switches not present in /c/Users/PC/AppData/Local/Temp/claude/ch-switches
-      acc -p /sdcard/power_supply-harpia.log   Parse the given file and print potential charging switches that are not already in /c/Users/PC/AppData/Local/Temp/claude/ch-switches
+      acc -p   Parse /logs/power_supply-\*.log and print potential charging switches not present in /ch-switches
+      acc -p /sdcard/power_supply-harpia.log   Parse the given file and print potential charging switches that are not already in /ch-switches
       acc -p /sdcard/charging-switches.txt /sdcard/power_supply-harpia.log   Parse /sdcard/power_supply-harpia.log and print potential charging switches absent from /sdcard/charging-switches.txt
 
   -r|--readme [g for GUI]]   Open the manual
@@ -960,7 +960,7 @@ Options
       acc -t battery/charging_enabled 1 0
       acc -t /proc/mtk_battery_cmd/current_cmd 0::0 0::1 /proc/mtk_battery_cmd/en_power_path 1 0 ("::" is a placeholder for " " - MTK only)
 
-  -t[#]|--test[#] [q] [file]   Test charging switches from a file (default: /c/Users/PC/AppData/Local/Temp/claude/ch-switches)
+  -t[#]|--test[#] [q] [file]   Test charging switches from a file (default: /ch-switches)
     Implies -x, as in acc -x -t ...
     [q]: acca -t q ... (quiet test; reports Ok, Idle or Fail)
     e.g.,
@@ -1016,7 +1016,7 @@ Exit Codes
   10. All charging switches fail (--test)
   11. Current (mA) out of 0-9999 range
   12. Initialization failed
-  13. Failed to lock /c/Users/PC/AppData/Local/Temp/claude/acc.lock
+  13. Failed to lock /acc.lock
   14. ACC won't initialize, because a "disable" flag is set
   15. Idle mode is supported (--test)
   16. Failed to enable charging (--test)

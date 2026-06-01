@@ -86,7 +86,10 @@ then
     echo; sed -n '/^#\/TC#/,$p' README.md.tmp; } > README.md
     rm README.md.tmp
   set +e
-  markdown README.md > README.html 2>/dev/null || :
+  # Only regenerate README.html when a markdown converter exists AND it produces
+  # non-empty output -- otherwise the redirect would truncate README.html to 0 bytes
+  # (this box has no `markdown` binary). Write to a temp and move only on success.
+  command -v markdown >/dev/null 2>&1 && markdown README.md > README.html.tmp 2>/dev/null && [ -s README.html.tmp ] && mv -f README.html.tmp README.html; rm -f README.html.tmp 2>/dev/null || :
 fi
 
 
