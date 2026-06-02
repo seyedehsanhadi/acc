@@ -55,6 +55,18 @@ battery/input_suspend 0 1 /proc/mtk_battery_cmd/en_power_path 1 1
 /sys/kernel/nubia_charge/charger_bypass off on
 /sys/module/pm*_charger/parameters/disabled 0 1
 
+# Set CHARGE/INPUT CURRENT to 0 = stop. On newer kernels (e.g. Android-16 Pixel 9a)
+# the on/off and charge-limit nodes often DON'T cut, but forcing the current to 0 DOES.
+# On value = a high number (the kernel clamps to its own max on restore); off value = 0.
+# Wildcards match many vendors (Qualcomm/MTK/etc: usb, main-charger, gccd, battery,
+# rt9471, tcpm-source-psy, constant_charge_current(_max), input_current(_limit) ...).
+# Offered as candidates here; cycle_switches keeps whichever actually cuts the current.
+*/current_max 3000000 0
+*/constant_charge_current 5000000 0
+*/constant_charge_current_max 5000000 0
+*/input_current_limit 3000000 0
+*/input_current 3000000 0
+
 /proc/driver/charger_limit_enable 0 1 /proc/driver/charger_limit 100 pcap
 /proc/driver/charger_limit_enable 0 1 /proc/driver/charger_limit 100 battery/capacity
 /proc/driver/charger_limit_enable 0 1 /proc/driver/charger_limit 100 5

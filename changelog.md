@@ -1,3 +1,11 @@
+**v2025.5.18-stable.6-rc11 (202505202)** — PRE-RELEASE
+- **"Cut current to 0 = stop" switches for ALL SoCs.** The method proven on the A16 Pixel
+  (`usb/current_max …0`) is now generic in the switch DB via wildcards
+  (`*/current_max 3000000 0`, `*/constant_charge_current(_max) 5000000 0`,
+  `*/input_current(_limit) 3000000 0`), so Qualcomm/MediaTek/etc. that don't respond to the
+  on/off or charge-limit nodes can still be stopped. The current-verified auto-lock keeps
+  whichever actually cuts.
+
 **v2025.5.18-stable.6-rc10 (202505201)** — PRE-RELEASE
 - **Pixel/Tensor limit now holds automatically.** Confirmed on an Android-16 Pixel 9a: the
   charge_stop_level node does NOT cut on A16, but `usb/current_max ... 0` (cut input current)
