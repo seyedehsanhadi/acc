@@ -106,7 +106,11 @@ cycle_switches() {
             # "not charging". A level/trap node (e.g. Tensor charging_state) reports stopped
             # while current keeps flowing -- reject it if |current| is still clearly nonzero
             # (>50mA on a uA-reporting kernel; lenient/no-op on mA kernels, so no regression).
-            if ! not_charging ${2-} || { _cc=$(cat "$currFile" 2>/dev/null); _cc=${_cc#-}; [ "${_cc:-0}" -gt 50000 ] 2>/dev/null; }; then
+            # Reject only if current is still strongly POSITIVE (charging). Do NOT take the
+            # absolute value: a working stop switch (e.g. charge_stop_level 100 5) makes the
+            # battery DISCHARGE -- negative current means charging stopped, so accept it. (The
+            # old abs-value check wrongly rejected the working switch, so nothing ever locked.)
+            if ! not_charging ${2-} || { _cc=$(cat "$currFile" 2>/dev/null); [ "${_cc:-0}" -gt 50000 ] 2>/dev/null; }; then
               # resumed on its own -> flicker; keep charging OFF (never pulse it
               # back on while we are trying to pause at/above the limit), then
               # reject the switch and move it to the end like a failure

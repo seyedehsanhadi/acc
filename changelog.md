@@ -1,3 +1,11 @@
+**v2025.5.18-stable.6-rc8 (202505199)** — PRE-RELEASE
+- **THE fix.** The switch-verification (rc5) checked the *absolute* current, so a working stop
+  switch that makes the battery DISCHARGE (e.g. `charge_stop_level 100 5`, negative current)
+  was wrongly rejected as "still flowing" -> nothing ever locked -> the daemon re-probed every
+  35 loops and charging restarted (stop-then-reset). Now it rejects a candidate only if current
+  is still strongly POSITIVE (charging); a negative/idle current = stopped = accepted + locked.
+  This is why rc5-rc7 found the switch, stopped, but couldn't keep it.
+
 **v2025.5.18-stable.6-rc7 (202505198)** — PRE-RELEASE
 - **Auto-LOCK the switch once it's current-verified** — fixes "stops at the limit, then
   resumes/resets" sawtooth. In auto mode the daemon re-probes switches every _STI (35)
