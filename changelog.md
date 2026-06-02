@@ -1,3 +1,11 @@
+**v2025.5.18-stable.6-rc10 (202505201)** — PRE-RELEASE
+- **Pixel/Tensor limit now holds automatically.** Confirmed on an Android-16 Pixel 9a: the
+  charge_stop_level node does NOT cut on A16, but `usb/current_max ... 0` (cut input current)
+  does. ACC's idle-above-pcap path "succeeded" in status while charging continued, so it never
+  hard-paused. On devices exposing google,charger, the installer now defaults to
+  allow_idle_above_pcap=false + prioritize_batt_idle_mode=no (hard-pause), so rc9's current-
+  verified auto-lock locks the working current-limit switch on its own. Runs once; only Tensor.
+
 **v2025.5.18-stable.6-rc9 (202505200)** — PRE-RELEASE
 - **Reworked switch auto-lock so it actually locks on discharge-only devices.** Two issues:
   (1) `prioritize_batt_idle_mode=true` made the strict pass demand *Idle* (true bypass, ~0

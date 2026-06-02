@@ -197,6 +197,16 @@ cp -f $srcDir/README.* $data_dir/
   touch $data_dir/.stable-defaults5 2>/dev/null || :
 }
 
+# Pixel/Tensor (e.g. Android 16) cannot truly bypass: idle-above-pcap "succeeds" in status
+# while charging continues, so the limit was overshot. Hard-pause instead, so the current-
+# verified auto-lock can lock the working current-limit switch (e.g. usb/current_max ... 0).
+# Only on devices exposing google,charger; runs once.
+[ -f $data_dir/.stable-defaults6 ] || {
+  { [ -e /sys/devices/platform/google,charger/charge_stop_level ] && [ -f $config ]; } && \
+    sed -i 's/^allowIdleAbovePcap=true$/allowIdleAbovePcap=false/; s/^prioritizeBattIdleMode=true$/prioritizeBattIdleMode=no/' $config 2>/dev/null || :
+  touch $data_dir/.stable-defaults6 2>/dev/null || :
+}
+
 
 # KaiOS patches
 [ ! -d /data/usbmsc_mnt/ ] || {
