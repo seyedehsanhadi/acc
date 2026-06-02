@@ -336,6 +336,18 @@ if ! $_INIT; then
       # publish the state export (subsystem A) -- best-effort, never blocks the loop
       write_state || :
 
+      # rc20: native firmware limit -- just keep the levels synced and let the firmware
+      # hold/resume. Re-source $config so AccA limit changes apply live. No switch toggle,
+      # no current-cut, no overshoot/drain. (Low-battery shutdown + thermal are handled by
+      # the firmware/OS in this mode; opt out with $dataDir/.no-native-limit for the
+      # generic switch logic below.)
+      if $nativeLimit; then
+        . $config 2>/dev/null || :
+        sync_native_limit
+        _nap ${loopDelay[1]:-9}
+        continue
+      fi
+
       if is_charging; then
 
         xIdle=false
@@ -528,6 +540,20 @@ if ! $_INIT; then
   }
 
 
+  sync_native_limit() {
+    # rc20: keep the firmware limit nodes in step with the user's pause/resume capacity.
+    # The firmware charges to charge_stop_level, holds idle, and resumes at
+    # charge_start_level. Temperature safety: at/above max_temp, force a pause by lowering
+    # the stop level to the resume level; it self-restores once the battery cools.
+    local stop=${capacity[3]:-80} start=${capacity[2]:-75} t
+    t=$(cat $temp 2>/dev/null || echo 0)
+    [ "$t" -ge $(( ${temperature[1]:-50} * 10 )) ] 2>/dev/null && stop=$start
+    chmod 0644 $gcsl $gcst 2>/dev/null || :
+    echo "$start" > $gcst 2>/dev/null || :
+    echo "$stop"  > $gcsl 2>/dev/null || :
+  }
+
+
   pause_now() {
     capacity[3]=$(batt_cap)
     capacity[2]=$((capacity[3] - 5))
@@ -648,6 +674,19 @@ if ! $_INIT; then
   . $config
   currentWorkaround0=$currentWorkaround
 
+  # rc20: NATIVE Pixel/Tensor firmware charge limit. When google,charger exposes the
+  # charge_stop_level + charge_start_level pair, the FIRMWARE holds at the stop level and
+  # resumes at the start level (confirmed on Pixel 9a: holds idle at the limit, no
+  # overshoot, no drain). ACC's generic on/off toggle FIGHTS this (writes 100 = overshoot,
+  # or off=5 = drains) and current_max=0 does not even gate Tensor's charge path, so on
+  # these phones nothing worked. Here we DRIVE THE NATIVE PAIR from pause/resume_capacity
+  # and skip the toggle entirely -- the 2023-era behavior that users confirm works.
+  # Opt out (use the generic switch logic instead): touch $dataDir/.no-native-limit
+  gcsl=/sys/devices/platform/google,charger/charge_stop_level
+  gcst=/sys/devices/platform/google,charger/charge_start_level
+  nativeLimit=false
+  { [ -f "$gcsl" ] && [ -f "$gcst" ] && [ ! -f $dataDir/.no-native-limit ]; } && nativeLimit=true
+
 
   # fix#305/#308: boot blacklist. If a charging node kernel-panicked / hard-rebooted
   # the device on a prior boot, journal_check (defined in probe-journal.sh, sourced via
@@ -669,7 +708,11 @@ if ! $_INIT; then
   # restore candidate switches to their ON value ONCE at (re)start to un-pin it, so AccA's
   # "restart daemon" recovers charging with no reboot. Subshell isolates cycle_switches'
   # chargingSwitch writes from the locked config value (set_dp re-sources $config anyway).
-  online 2>/dev/null && ( cycle_switches on ) >/dev/null 2>&1 || :
+  if $nativeLimit; then
+    sync_native_limit 2>/dev/null || :   # set the firmware limit at once (no toggle/overshoot)
+  else
+    online 2>/dev/null && ( cycle_switches on ) >/dev/null 2>&1 || :
+  fi
   ctrl_charging
   exit $?
 
