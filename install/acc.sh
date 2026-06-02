@@ -449,6 +449,12 @@ case "${1-}" in
     batt_info "${2-}" | more
   ;;
 
+  -j|--state)
+    # publish/print the machine-readable state export (subsystem A): cats the daemon's
+    # tmpfs snapshot, or generates one on demand if the daemon is not running.
+    print_state
+  ;;
+
   -la)
     shift
     logf --acc "$@"

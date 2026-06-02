@@ -512,6 +512,7 @@ trap exxit EXIT
 . $execDir/setup-busybox.sh
 . $execDir/set-ch-curr.sh
 . $execDir/set-ch-volt.sh
+. $execDir/state-export.sh
 
 # wait for accd initialization
 if ! ${isAccd:-false} && [ ! -f $TMPDIR/.batt-interface.sh ]; then

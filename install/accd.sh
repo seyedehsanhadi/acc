@@ -300,6 +300,9 @@ if ! $_INIT; then
 
     while :; do
 
+      # publish the state export (subsystem A) -- best-effort, never blocks the loop
+      write_state || :
+
       if is_charging; then
 
         xIdle=false
