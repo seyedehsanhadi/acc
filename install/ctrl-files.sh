@@ -1,5 +1,11 @@
 ls_ch_switches() {
   echo "
+# Pixel/Tensor charge-limit node tried FIRST (before the */charging_state wildcard trap,
+# which reports stopped while current keeps flowing). Both drivings are offered -- the
+# stable on=100/off=pause_capacity, and the 2022/2023 on=100/off=5 that users confirm
+# worked -- and the current-verification in cycle_switches keeps whichever actually cuts.
+/sys/devices/platform/google,charger/charge_stop_level 100 pcap
+/sys/devices/platform/google,charger/charge_stop_level 100 5
 */*charging_enable* 1 0
 */*disable_charg* 0 1
 */charge_disable 0 1

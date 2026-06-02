@@ -1,3 +1,11 @@
+**v2025.5.18-stable.6-rc6 (202505197)** — PRE-RELEASE
+- **Pixel/Tensor: try `charge_stop_level` FIRST**, before the `*/charging_state` wildcard
+  trap that auto-mode was hitting first (it reports "stopped" while current keeps flowing,
+  so the daemon churned and locked nothing -> charging passed the limit). Both drivings are
+  offered -- `100 pcap` (stable) and `100 5` (the 2022/2023 driving users confirm worked) --
+  and rc5's current-verification keeps whichever actually drops the current. So the daemon
+  locks the switch that truly cuts instead of the trap.
+
 **v2025.5.18-stable.6-rc5 (202505196)** — PRE-RELEASE
 - **Switch auto-lock now verifies current, not just status** (fixes limit overshoot on
   Tensor/Pixel and any device with a "trap" switch). The strict switch-test rejected a
