@@ -118,8 +118,12 @@ cycle_switches() {
               continue
             fi
           fi
-          # set working charging switch(es)
-          s="${chargingSwitch[*]}" # for some reason, without this, the array is null
+          # set working charging switch(es). When strict-verified (current actually dropped),
+          # LOCK it with a trailing "--" so the daemon STOPS re-probing switches every _STI
+          # loops -- that periodic re-probe was toggling charging back on (the "stopped at the
+          # limit, then resumed/reset" sawtooth). A --locked switch that later stops working is
+          # still recovered (fix8), so locking is safe.
+          $strict && s="${chargingSwitch[*]} --" || s="${chargingSwitch[*]}"
           . $execDir/write-config.sh
           break
         else

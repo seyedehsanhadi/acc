@@ -1,3 +1,11 @@
+**v2025.5.18-stable.6-rc7 (202505198)** — PRE-RELEASE
+- **Auto-LOCK the switch once it's current-verified** — fixes "stops at the limit, then
+  resumes/resets" sawtooth. In auto mode the daemon re-probes switches every _STI (35)
+  loops; that re-probe toggled charging back on, so even after it found the working switch
+  and stopped, it restarted ~1% later. Now, when the strict test confirms a switch actually
+  dropped the current, the daemon locks it (`--`) and stops re-probing, so it HOLDS. A
+  locked switch that later fails is still auto-recovered.
+
 **v2025.5.18-stable.6-rc6 (202505197)** — PRE-RELEASE
 - **Pixel/Tensor: try `charge_stop_level` FIRST**, before the `*/charging_state` wildcard
   trap that auto-mode was hitting first (it reports "stopped" while current keeps flowing,
