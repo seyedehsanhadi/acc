@@ -1,3 +1,14 @@
+**v2025.5.18-stable.6-rc1 (202505193)** — PRE-RELEASE
+- New: `acca --state` (alias `acc -j`) publishes a machine-readable JSON snapshot of
+  ACC's actual state to tmpfs every daemon loop and on demand. It is the keystone for
+  the upcoming AccA control-bus + diagnostics rebuild: the read-back the front-end
+  confirms changes against, the diagnostics feed, and the exportable report source.
+- Additive only — no change to charging behavior. The export is written atomically
+  (temp+rename, no torn reads), best-effort/non-blocking (never stalls the safety
+  loop), tmpfs-only (no flash wear), carries a non-PII fingerprint, and a value that
+  cannot be read is JSON null, never 0.
+- Includes every STABLE.5 fix below.
+
 **v2025.5.18-stable.5 (202505192)**
 - Reverts the stable.4 "gentler max_temp 45 C" change, which was wrong. Lowering max_temp to 45
   left it equal to cooldown_temp, so the config read `temperature=(45 45 40 55)`. cooldown_temp is
