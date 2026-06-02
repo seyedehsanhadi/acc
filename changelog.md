@@ -1,3 +1,14 @@
+**v2025.5.18-stable.6-rc2 (202505194)** — PRE-RELEASE
+- Fixes three bugs in the rc1 `acca --state` export (found on a Pixel 9a):
+  - **acc version/versionCode were empty** on the daemon/front-end path (`accVer` is only
+    set in acc.sh) — now read from module.prop directly, correct in every context.
+  - **status read "unknown"** when the front-end requested the snapshot (that path never
+    calls `read_status`) — now falls back to a current-sign derivation (Charging /
+    Discharging / Idle).
+  - **the snapshot could freeze** (`print_state` cat an existing file) — `acca --state`
+    now always refreshes before printing, so it's never stale.
+- Still additive; no charging-behavior change.
+
 **v2025.5.18-stable.6-rc1 (202505193)** — PRE-RELEASE
 - New: `acca --state` (alias `acc -j`) publishes a machine-readable JSON snapshot of
   ACC's actual state to tmpfs every daemon loop and on demand. It is the keystone for
