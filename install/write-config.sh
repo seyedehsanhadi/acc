@@ -157,9 +157,13 @@ maxChargingCurrent=($mcc)
 
 maxChargingVoltage=($mcv)
 
-runCmdOnPause='$rcp'" > $config
+runCmdOnPause='$rcp'" > $config.tmp
 
 
-cat $TMPDIR/.scripts $TMPDIR/.config-help >> $config
+cat $TMPDIR/.scripts $TMPDIR/.config-help >> $config.tmp
+# rc16+: write to a temp then ATOMICALLY rename, so the daemon (which re-reads config.txt
+# every loop) never sees a half-written file, and a failed/partial write (disk full,
+# permission loss) leaves the previous config intact instead of truncating it.
+mv -f $config.tmp $config 2>/dev/null || rm -f $config.tmp 2>/dev/null
 rm $TMPDIR/.scripts
 set -u)
