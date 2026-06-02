@@ -370,55 +370,44 @@ if ! $_INIT; then
             # reset battery stats on pause
             resetbs
           }
-          # ── rc16: auto scan+lock + runtime contract monitor ──────────────────
-          # We just tried to stop charging (above). If we are PLUGGED IN, at/above
-          # the limit, and STILL charging -- confirmed over a short debounce so a
-          # transient plug/unplug blip can never be mistaken for "charging past the
-          # limit" -- then whatever switch is active is not holding the cap.
+          # ── rc19: runtime contract monitor + breach notify (NO external scan) ──
+          # disable_charging above ALREADY ran the daemon's own in-process,
+          # current-verified switch locker (cycle_switches_off), which auto-selects and
+          # LOCKS a working switch. We must NOT spawn the external acc-switch-scan.sh
+          # here (rc16 did): it `acca -D stop`s the daemon and toggles switches in a
+          # detached process Android can kill -- a kill leaves a current node at 0 (NO
+          # CHARGE until reboot) and holds a scan lock that blocks the user's manual
+          # scan ("another scan already running"). Two auto-lockers also raced. Now the
+          # in-process locker is the ONLY auto path; below we just monitor + surface it.
+          # Debounced so a transient plug/unplug blip is never mistaken for charging.
           if online && _ge_pause_cap && ! not_charging \
              && sleep 2 && online && _ge_pause_cap && ! not_charging
           then
             if [[ "${chargingSwitch[*]-}" = *\ -- ]]; then
-              # CONTRACT MONITOR: a switch is LOCKED yet the cap is breached anyway
-              # (firmware drift, OS-renamed node, partial multi-path). After a few
-              # confirmed loops, unlock it, blacklist it for this session, and let
-              # auto-detect pick a different one. This is what makes the X..Y range a
-              # guarantee rather than a one-shot guess.
+              # CONTRACT MONITOR: a LOCKED switch is not holding the limit. After a few
+              # confirmed loops, unlock + blacklist it so the in-process locker picks a
+              # different one next loop (cycle_switches honors $TMPDIR/.sw-blacklist).
               lf=$(cat $TMPDIR/.lockfail-count 2>/dev/null || echo 0); lf=$((lf + 1))
               echo $lf > $TMPDIR/.lockfail-count
               if [ $lf -ge 3 ]; then
                 echo "${chargingSwitch[*]% --}" >> $TMPDIR/.sw-blacklist
-                notif "⚠️ ACC: the locked charging switch stopped holding your ${capacity[3]:-?}% limit — re-detecting another."
+                notif "⚠️ ACC: the locked charging switch stopped holding your ${capacity[3]:-?}% limit — selecting another."
                 $TMPDIR/acca $config --set charging_switch= 2>/dev/null || :
                 chargingSwitch=()
-                rm $TMPDIR/.autolock-tried $TMPDIR/.lockfail-count 2>/dev/null || :
+                rm $TMPDIR/.lockfail-count 2>/dev/null || :
               fi
-            elif [ -f $execDir/acc-switch-scan.sh ] && [ ! -f $dataDir/.no-autolock ] \
-                 && [ ! -f $TMPDIR/.autolock-tried ]
-            then
-              # AUTO-DETECT: nothing locked yet. BOUNDED to 3 attempts per episode so a
-              # phone with no working switch can never loop or go silently uncapped.
-              ac=$(cat $TMPDIR/.autolock-count 2>/dev/null || echo 0)
-              if [ $ac -lt 3 ]; then
-                echo $((ac + 1)) > $TMPDIR/.autolock-count
-                touch $TMPDIR/.autolock-tried
-                # mode passed to the scanner: Hold@Limit (bypass) iff idle-above-pcap
-                # is enabled, else the default Range Cycle.
-                if $allowIdleAbovePcap; then _m=--hold; else _m=--cycle; fi
-                notif "🔍 ACC: auto-detecting a switch that holds your ${capacity[3]:-?}% limit (try $((ac + 1))/3)…"
-                if command -v setsid >/dev/null 2>&1; then
-                  setsid sh $execDir/acc-switch-scan.sh --apply $_m </dev/null >/dev/null 2>&1 &
-                else
-                  nohup sh $execDir/acc-switch-scan.sh --apply $_m </dev/null >/dev/null 2>&1 &
-                fi
+            else
+              # Nothing locked yet and the in-process locker has not stopped charge this
+              # loop; it retries automatically next loop. Just surface it, bounded, then
+              # give up loudly -- never silently uncapped, never spawn an external scan.
+              ac=$(cat $TMPDIR/.autolock-count 2>/dev/null || echo 0); ac=$((ac + 1))
+              echo $ac > $TMPDIR/.autolock-count
+              if [ $ac -le 6 ]; then
+                [ -f $TMPDIR/.breach ] || { notif "🔍 ACC: selecting a charging switch that holds your ${capacity[3]:-?}% limit…"; touch $TMPDIR/.breach; }
               elif [ ! -f $TMPDIR/.autolock-gaveup ]; then
-                # give up loudly, ONCE -- never silently uncapped (the audit bug).
                 touch $TMPDIR/.autolock-gaveup
-                notif "⚠️ ACC: no reliable charging switch found automatically after 3 tries. Open AccA → Scripts to test manually; this phone may not expose a supported switch."
+                notif "⚠️ ACC: no charging switch on this phone stops charging at your ${capacity[3]:-?}% limit. Open AccA → Scripts → 'Scan & lock' to test, or this device may need a switch ACC does not have yet."
               fi
-            elif [ ! -f $execDir/acc-switch-scan.sh ] && [ ! -f $TMPDIR/.breach ]; then
-              notif "⚠️ Battery at/above your ${capacity[3]:-?}% limit but still charging — run a 'Scan & lock' script in AccA."
-              touch $TMPDIR/.breach
             fi
           else
             # not breaching (stopped at the limit, below it, or UNPLUGGED): clear the
@@ -674,6 +663,13 @@ if ! $_INIT; then
   # scanner's own daemon restart; they reset when charging stops (see is_charging).
   rm $TMPDIR/.testingsw $TMPDIR/.sw-strict-done $TMPDIR/.breach \
      $TMPDIR/.autolock-tried $TMPDIR/.lockfail-count 2>/dev/null || :
+  # rc19 recovery: a killed manual scan (SIGKILL skips its restore trap) can leave a
+  # charge-current node pinned at 0 -> the phone will not charge until reboot, because
+  # enable_charging only restores the LOCKED switch, not other nodes. When plugged in,
+  # restore candidate switches to their ON value ONCE at (re)start to un-pin it, so AccA's
+  # "restart daemon" recovers charging with no reboot. Subshell isolates cycle_switches'
+  # chargingSwitch writes from the locked config value (set_dp re-sources $config anyway).
+  online 2>/dev/null && ( cycle_switches on ) >/dev/null 2>&1 || :
   ctrl_charging
   exit $?
 

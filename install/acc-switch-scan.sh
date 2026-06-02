@@ -97,8 +97,20 @@ for a in "$TMPDIR/acca" /dev/.$domain/acc/acca "$(command -v acca 2>/dev/null)";
   [ -n "$a" ] && [ -e "$a" ] && ACCA=$a && break
 done
 cur_line=
+restore_all_on() {
+  # rc19: restore EVERY candidate switch to its ON value, so an interrupted/errored test
+  # can never leave a charge node pinned off (the "no charge until reboot" report). SW is
+  # set by the time any exit happens. SIGKILL still skips this -- the daemon's startup
+  # recovery (cycle_switches on) covers that case.
+  [ -f "${SW:-/x}" ] || return 0
+  while IFS= read -r _l; do
+    case "$_l" in ''|'#'*) continue;; esac
+    restore_on "$_l" 2>/dev/null || :
+  done < "$SW"
+}
 cleanup() {
   [ -n "$cur_line" ] && restore_on "$cur_line" 2>/dev/null
+  restore_all_on
   [ -n "$ACCA" ] && "$ACCA" -D restart >/dev/null 2>&1 || :
   # fix10: confirm the daemon actually came back. `acca -D restart` now detaches it,
   # but verify so a failed restart is never silent -- a stopped daemon = no cap.
@@ -224,6 +236,14 @@ total=$(grep -cvE '^#|^$' "$SW" 2>/dev/null || echo "?")
 say "testing $total switches (max ${MAX_S}s each)..."
 say ""
 
+# rc19: persist per-switch results so AccA diagnostics can show which method works and
+# which does NOT on THIS phone (overwritten each scan).
+RESLOG=$dataDir/logs/switch-test.log
+mkdir -p $dataDir/logs 2>/dev/null || :
+{ echo "# ACC switch test  device=$(getprop ro.product.device 2>/dev/null)  method=$METHOD"
+  echo "# WORKS=stops charging  DRAINS=stops but cuts passthrough (rejected)  NOEFFECT=no stop  SKIP=not charging"
+} > $RESLOG 2>/dev/null || :
+
 results=
 drained=0
 n=0
@@ -242,8 +262,10 @@ while IFS= read -r line; do
           if [ "$klass" = drain ]; then
             # NEVER lock a switch that kills charger passthrough -> drains while plugged
             say "        ^ rejected: blocks passthrough (battery would DRAIN while plugged)"
+            echo "DRAINS   $line   (rejected: cuts charger passthrough -> would drain plugged)" >> $RESLOG 2>/dev/null || :
             drained=$((drained + 1))
           else
+            echo "WORKS    $line   (${3}/${klass}/$([ "$rok" = 1 ] && echo resumes || echo no-resume), ${2}ms)" >> $RESLOG 2>/dev/null || :
             # rank: pcap-pcap=hold, pcap-5=cycle (ordered by chosen METHOD); plain
             # switches by mode; in Hold mode a bypass-classified switch wins. A switch
             # whose RESUME was not verified gets +4 so resume-verified ones (the real
@@ -260,8 +282,10 @@ while IFS= read -r line; do
 "
           fi
           ;;
-    skip) say "(not charging — rerun while charging)";;
-    *)    say "no effect";;
+    skip) say "(not charging — rerun while charging)"
+          echo "SKIP     $line   (not charging during test)" >> $RESLOG 2>/dev/null || :;;
+    *)    say "no effect"
+          echo "NOEFFECT $line" >> $RESLOG 2>/dev/null || :;;
   esac
 done < "$SW"
 
@@ -274,6 +298,7 @@ if [ -n "$results" ]; then
   done
   best=$(printf '%s' "$results" | sort -n -k1,1 -k2,2n | head -n1 | cut -d' ' -f4-)
   rm $TMPDIR/.autolock-noswitch 2>/dev/null || :
+  { echo ""; echo "BEST(${METHOD})=${best}"; } >> $RESLOG 2>/dev/null || :
   say ""
   say "BEST=${best}"
   if [ "$APPLY" = 1 ] && [ -n "$best" ]; then
