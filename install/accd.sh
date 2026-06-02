@@ -367,9 +367,33 @@ if ! $_INIT; then
           # capacity limit and charging still has not stopped, surface it so a cap
           # that is not holding is never silent again. Self-clears once stopped.
           if _ge_pause_cap && ! not_charging; then
-            [ -f $TMPDIR/.breach ] || { notif "⚠️ Battery at/above your ${capacity[3]:-?}% limit but still charging — in AccA open Scripts and run a 'Scan & lock' script"; touch $TMPDIR/.breach; }
+            # rc15: auto scan+lock. At/above the limit but still charging = no
+            # switch is actually stopping charge on this phone. If auto-lock is
+            # enabled (no $dataDir/.no-autolock opt-out) and the user has not
+            # already locked a switch (trailing " --"), trigger the tested scanner
+            # ONCE per breach episode. It detaches, briefly stops us, tests every
+            # switch, writes charging_switch=<best> -- (persists across reboot —
+            # ACC owns config.txt), and restarts us (self-healing cleanup trap).
+            # When the config is reset or ACC reinstalled the lock is gone, so the
+            # next over-limit charge re-runs this automatically. Falls back to the
+            # notify-only nudge when the scanner is absent or auto-lock is off.
+            if [ -f $execDir/acc-switch-scan.sh ] && [ ! -f $dataDir/.no-autolock ] \
+              && [[ "${chargingSwitch[*]-}" != *\ -- ]] && [ ! -f $TMPDIR/.autolock-tried ]
+            then
+              touch $TMPDIR/.autolock-tried
+              notif "🔍 ACC: auto-detecting a charging switch that holds your ${capacity[3]:-?}% limit…"
+              if command -v setsid >/dev/null 2>&1; then
+                setsid sh $execDir/acc-switch-scan.sh --apply </dev/null >/dev/null 2>&1 &
+              else
+                nohup sh $execDir/acc-switch-scan.sh --apply </dev/null >/dev/null 2>&1 &
+              fi
+            elif [ ! -f $TMPDIR/.breach ] && [ ! -f $TMPDIR/.autolock-tried ]; then
+              # only nudge when auto-lock did NOT just fire (else messages contradict)
+              notif "⚠️ Battery at/above your ${capacity[3]:-?}% limit but still charging — in AccA open Scripts and run a 'Scan & lock' script"
+              touch $TMPDIR/.breach
+            fi
           else
-            rm $TMPDIR/.breach 2>/dev/null || :
+            rm $TMPDIR/.breach $TMPDIR/.autolock-tried 2>/dev/null || :
           fi 2>/dev/null || :
           _nap ${loopDelay[1]}
           rm $TMPDIR/.minCapMax 2>/dev/null || :
