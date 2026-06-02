@@ -75,6 +75,11 @@ case ${cm-} in true|false) :;; *) cm=false;; esac
   [ $pc -gt 3000 ] && rc=$((pc - 150)) || rc=$((pc - 5))
 }
 
+# ensure shutdown_capacity < resume_capacity. Without this an inverted config (e.g.
+# shutdown >= resume) could make the daemon shut the phone down at a high level or never
+# pause. Only meaningful in %-mode (pc <= 3000); skip in mV-mode.
+[ $pc -gt 3000 ] || { [ ${sc:-5} -lt $rc ] || sc=$(( rc > 1 ? rc - 1 : 0 )); }
+
 : ${mt:=50}
 : ${rt:=40}
 : ${ct:=45}

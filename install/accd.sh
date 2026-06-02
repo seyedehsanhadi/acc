@@ -546,6 +546,10 @@ if ! $_INIT; then
     # charge_start_level. Temperature safety: at/above max_temp, force a pause by lowering
     # the stop level to the resume level; it self-restores once the battery cools.
     local stop=${capacity[3]:-80} start=${capacity[2]:-75} t
+    # the firmware nodes are a percentage: clamp to [0..100] so a bad/out-of-range config
+    # value can never be written raw to charge_stop_level / charge_start_level.
+    case $stop in ''|*[!0-9]*) stop=80;; esac; [ "$stop" -le 100 ] || stop=100
+    case $start in ''|*[!0-9]*) start=75;; esac; [ "$start" -le 100 ] || start=100
     t=$(cat $temp 2>/dev/null || echo 0)
     [ "$t" -ge $(( ${temperature[1]:-50} * 10 )) ] 2>/dev/null && stop=$start
     chmod 0644 $gcsl $gcst 2>/dev/null || :
@@ -608,7 +612,9 @@ if ! $_INIT; then
     local battCap=$(batt_cap)
     local maskedCap=
 
-    if ${capacity[4]} && [ ${capacity[3]} -le 100 ]; then
+    if ${capacity[4]} && [ ${capacity[3]} -le 100 ] && [ ${capacity[3]:-0} -gt ${capacity[0]:-0} ]; then
+      # the && pause>shutdown guard prevents a divide-by-zero in the masked-capacity
+      # formula below when pause_capacity == shutdown_capacity.
 
       if [ ${capacity[0]} -le 0 ]; then
         maskedCap=$(calc $battCap \* 100 / ${capacity[3]} | xargs printf %.f)
