@@ -106,11 +106,12 @@ cycle_switches() {
             # "not charging". A level/trap node (e.g. Tensor charging_state) reports stopped
             # while current keeps flowing -- reject it if |current| is still clearly nonzero
             # (>50mA on a uA-reporting kernel; lenient/no-op on mA kernels, so no regression).
-            # Reject only if current is still strongly POSITIVE (charging). Do NOT take the
-            # absolute value: a working stop switch (e.g. charge_stop_level 100 5) makes the
-            # battery DISCHARGE -- negative current means charging stopped, so accept it. (The
-            # old abs-value check wrongly rejected the working switch, so nothing ever locked.)
-            if ! not_charging ${2-} || { _cc=$(cat "$currFile" 2>/dev/null); [ "${_cc:-0}" -gt 50000 ] 2>/dev/null; }; then
+            # Judge by CURRENT only, not the status filter ($2). A switch "works" if current
+            # is no longer strongly positive (charging) -- whether it idles (~0) or discharges
+            # (negative). The old "must be Idle" filter rejected discharge-only devices (e.g.
+            # Pixel/Tensor charge_stop_level 100 5), so the working switch never locked. An
+            # unreadable current is treated as "still charging" (cautious -- don't lock blind).
+            if { _cc=$(cat "$currFile" 2>/dev/null); [ "${_cc:-999999}" -gt 50000 ] 2>/dev/null; }; then
               # resumed on its own -> flicker; keep charging OFF (never pulse it
               # back on while we are trying to pause at/above the limit), then
               # reject the switch and move it to the end like a failure
@@ -153,13 +154,12 @@ cycle_switches_off() {
   # session. Re-probing on every pause loop is what made a flicker-prone device
   # cycle charging on/off near the limit; once a switch is chosen the plain
   # disable below holds it off without probing (or pulsing) again.
-  if [ -z "${chargingSwitch[0]-}" ] && [ ! -f $TMPDIR/.sw-strict-done ]; then
-    case $prioritizeBattIdleMode in
-      true) cycle_switches off Idle true;;
-      no)   cycle_switches off Discharging true;;
-    esac
-    not_charging || cycle_switches off "" true
-    touch $TMPDIR/.sw-strict-done 2>/dev/null || :
+  # One current-verified strict pass that LOCKS the first switch which actually stops
+  # charging (idle OR discharge). Runs whenever nothing is locked yet -- once a switch is
+  # locked this guard is false, so it stops on its own (no sentinel needed). This replaces
+  # the idle-preference + once-per-session gating that left discharge-only devices unlocked.
+  if [ -z "${chargingSwitch[0]-}" ]; then
+    cycle_switches off "" true
   fi
   # Pass 2 (lenient fallback): if nothing latched cleanly (e.g. the device only
   # exposes a flicker-prone level switch), restore the original behavior so

@@ -1,3 +1,13 @@
+**v2025.5.18-stable.6-rc9 (202505200)** — PRE-RELEASE
+- **Reworked switch auto-lock so it actually locks on discharge-only devices.** Two issues:
+  (1) `prioritize_batt_idle_mode=true` made the strict pass demand *Idle* (true bypass, ~0
+  current), but Pixel/Tensor only *discharges* (`charge_stop_level 100 5` -> negative
+  current), so the working switch failed the filter and was skipped; (2) a once-per-session
+  sentinel meant strict only ran once. Now: a single strict pass judges a switch purely by
+  CURRENT (idle OR discharge = stopped), LOCKS the first that truly cuts, and retries every
+  pause until locked (then stops, since a locked switch ends the loop). This finally locks
+  `charge_stop_level` on Android-16 Pixel and any discharge-only SoC.
+
 **v2025.5.18-stable.6-rc8 (202505199)** — PRE-RELEASE
 - **THE fix.** The switch-verification (rc5) checked the *absolute* current, so a working stop
   switch that makes the battery DISCHARGE (e.g. `charge_stop_level 100 5`, negative current)
