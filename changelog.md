@@ -1,3 +1,14 @@
+**v2025.5.18-stable.6-rc13 (202505204)** — PRE-RELEASE
+- **Tensor hard-pause now actually applies** (fresh `.stable-defaults7` marker re-runs the
+  migration that the stale `.6` marker skipped: `allowIdleAbovePcap=false` +
+  `prioritizeBattIdleMode=no` on google,charger devices).
+- **All-paths group switch**: a single line that zeroes EVERY Pixel charge path at once
+  (battery/constant_charge_current + main-charger + usb + gccd + dc current → 0), tried high,
+  so the auto-lock locks the group instead of one path another path defeats.
+- **write-config hardening**: every config param now coerces empty/non-numeric/garbage to its
+  safe default before the daemon's raw arithmetic sees it (temperature[] and capacity_mask were
+  unguarded and could crash the loop); ordering invariants re-verified.
+
 **v2025.5.18-stable.6-rc12 (202505203)** — PRE-RELEASE
 - **Brick-safe switch probing (#305/#308).** A write-ahead journal records a candidate switch
   before the risky pause-write; if it kernel-panics/reboots the device, accd blacklists that

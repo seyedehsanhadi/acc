@@ -47,6 +47,27 @@ printf "\n\n\n" >> $TMPDIR/.scripts
 
 # enforce valid capacity and temp limits
 
+# Defensive numeric coercion (additive, same style as the rc-era ': ${mt:=50}'
+# guards and accd.sh's 'case $x in ''|*[!0-9]*)' fail-safes). The ':=' defaults
+# below only fire on EMPTY/unset values -- a non-numeric value (e.g. mt=abc from a
+# corrupt edit or a bad --set) slips straight through into the config. The daemon
+# reads every temperature[] element with RAW arithmetic ($(( ${temperature[N]} * 10 ))
+# in accd.sh: shutdown/cooldown/resume/max have NO comparator guard), so a garbage
+# temp would crash the control loop. Capacity[0..3] have fail-safe comparators in
+# accd.sh, but capacity_mask (capacity[4]) is run as a command and capacity[0/3] are
+# used raw in mask_capacity/cap_idle_threshold, so coerce those too. Force any
+# non-numeric value back to its documented default BEFORE the ordering guards run,
+# so the arithmetic below and in the daemon only ever sees clean integers.
+case ${sc-} in *[!0-9]*|'') sc=5;; esac
+case ${cc-} in *[!0-9]*|'') cc=101;; esac
+case ${rc-} in *[!0-9]*) rc=;; esac   # recomputed below if needed
+case ${pc-} in *[!0-9]*) pc=;; esac
+case ${ct-} in *[!0-9]*) ct=;; esac
+case ${mt-} in *[!0-9]*) mt=;; esac
+case ${rt-} in *[!0-9]*) rt=;; esac
+case ${st-} in *[!0-9]*|'') st=55;; esac
+case ${cm-} in true|false) :;; *) cm=false;; esac
+
 : ${pc:=75}
 : ${rc:=70}
 
@@ -69,6 +90,38 @@ printf "\n\n\n" >> $TMPDIR/.scripts
 
 # reset switch (in auto-mode) if pbim has changed and another switch is not being set
 ! [[ "${chargingSwitch[*]}" != *\ -- && -z "$s0" && ".$pbim" != ".$prioritizeBattIdleMode" ]] || s=
+
+
+# Defensive coercion for the remaining scalar params. These all have a NULL/empty
+# or fixed default as their documented valid value, so unlike the temps/caps above
+# an empty value must be PRESERVED -- only non-empty garbage is reset. Booleans are
+# run as commands in accd.sh ($forceOff || ...), so garbage merely degrades to false
+# noisily; the rest feed raw arithmetic somewhere (ampFactor/voltFactor in
+# batt-interface.sh '[ $ampFactor_ -eq 1000000 ]'; tempLevel in 'echo $((100 - $l))';
+# cooldownRatio[*] in 'sleep'; cooldownCurrent in set_ch_curr range checks). Keep
+# them clean so a corrupt config can never wedge those code paths.
+case $af in *[!0-9]*) af=;; esac                   # amp_factor: null or integer
+case $vf in *[!0-9]*) vf=;; esac                  # volt_factor: null or integer
+case ${tl-} in *[!0-9]*|'') tl=0;; esac           # temp_level: integer %, default 0
+# cooldown_current: null, plain mA, or a percentage (mA%). Validate the numeric part;
+# blank anything else so set_ch_curr / set_temp_level never choke on garbage.
+case ${cdc-} in
+  '') :;;
+  *%) case ${cdc%\%} in ''|*[!0-9]*) cdc=;; esac;;
+  *[!0-9]*) cdc=;;
+esac
+case ${cch-} in *[!0-9]*) cch=;; esac             # cooldown_charge: null or integer seconds
+case ${cp-} in *[!0-9]*) cp=;; esac               # cooldown_pause:  null or integer seconds
+case ${aiapc-} in true|false) :;; *) aiapc=true;; esac
+case ${bsw-} in true|false) :;; *) bsw=true;; esac
+case ${cw-} in true|false) :;; *) cw=false;; esac
+case ${fo-} in true|false) :;; *) fo=false;; esac
+case ${om-} in true|false) :;; *) om=true;; esac
+case ${pbim-} in true|false|no) :;; *) pbim=true;; esac
+case ${rr-} in true|false) :;; *) rr=false;; esac
+case ${rbsp-} in true|false) :;; *) rbsp=false;; esac
+case ${rbsu-} in true|false) :;; *) rbsu=false;; esac
+case ${rbspl-} in true|false) :;; *) rbspl=false;; esac
 
 
 echo "configVerCode=$(cat $TMPDIR/.config-ver)

@@ -207,6 +207,20 @@ cp -f $srcDir/README.* $data_dir/
   touch $data_dir/.stable-defaults6 2>/dev/null || :
 }
 
+# Re-run of the Tensor hard-pause migration under a FRESH marker. On-device (Pixel 9a,
+# Android 16) the .stable-defaults6 pass did not stick -- some configs still carried
+# allowIdleAbovePcap=true / prioritizeBattIdleMode=true, so the daemon kept trying
+# idle/bypass at the limit (faking "stopped" while current still flowed) and never
+# hard-paused. Forcing both off here lets the current-verified auto-lock fall through to
+# the all-paths current-cut group, which actually stops charging on these multi-charge-path
+# SoCs. New marker so it applies even on installs that already ran the stale .6 block. Only
+# on devices exposing google,charger; runs once; fully guarded.
+[ -f $data_dir/.stable-defaults7 ] || {
+  { [ -e /sys/devices/platform/google,charger/charge_stop_level ] && [ -f $config ]; } && \
+    sed -i 's/^allowIdleAbovePcap=true$/allowIdleAbovePcap=false/; s/^prioritizeBattIdleMode=true$/prioritizeBattIdleMode=no/' $config 2>/dev/null || :
+  touch $data_dir/.stable-defaults7 2>/dev/null || :
+}
+
 
 # KaiOS patches
 [ ! -d /data/usbmsc_mnt/ ] || {

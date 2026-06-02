@@ -6,6 +6,17 @@ ls_ch_switches() {
 # worked -- and the current-verification in cycle_switches keeps whichever actually cuts.
 /sys/devices/platform/google,charger/charge_stop_level 100 pcap
 /sys/devices/platform/google,charger/charge_stop_level 100 5
+
+# Pixel/Tensor multi-path current cut, as ONE group so the current-verified auto-lock
+# locks ALL paths together. On these SoCs (e.g. Pixel 9a, Android 16) charging is fed by
+# several independent paths (main-charger, gccd, rt9471, dc, usb); zeroing a SINGLE
+# current node leaves another path feeding the cell, so a single-node switch fails to
+# stop charging. Chaining every google charge-current path on one line forces them all
+# to 0 at once = a real hard pause. On values are high (the kernel clamps to its own max
+# on restore); off = 0. Placed HIGH (before the wildcard charging_state trap) so this is
+# what the auto-lock latches onto. Paths that are absent simply no-op.
+battery/constant_charge_current 5000000 0 main-charger/current_max 5000000 0 usb/current_max 5000000 0 gccd/current_max 5000000 0 dc/current_max 5000000 0
+
 */*charging_enable* 1 0
 */*disable_charg* 0 1
 */charge_disable 0 1
