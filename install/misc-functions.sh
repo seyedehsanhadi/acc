@@ -102,7 +102,11 @@ cycle_switches() {
           # device whose ONLY working switch flickers is still capped (no regression).
           if $strict; then
             sleep ${loopDelay[0]}
-            if ! not_charging ${2-}; then
+            # Verify the switch actually STOPPED current flow, not just that status reads
+            # "not charging". A level/trap node (e.g. Tensor charging_state) reports stopped
+            # while current keeps flowing -- reject it if |current| is still clearly nonzero
+            # (>50mA on a uA-reporting kernel; lenient/no-op on mA kernels, so no regression).
+            if ! not_charging ${2-} || { _cc=$(cat "$currFile" 2>/dev/null); _cc=${_cc#-}; [ "${_cc:-0}" -gt 50000 ] 2>/dev/null; }; then
               # resumed on its own -> flicker; keep charging OFF (never pulse it
               # back on while we are trying to pause at/above the limit), then
               # reject the switch and move it to the end like a failure

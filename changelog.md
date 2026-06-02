@@ -1,3 +1,12 @@
+**v2025.5.18-stable.6-rc5 (202505196)** — PRE-RELEASE
+- **Switch auto-lock now verifies current, not just status** (fixes limit overshoot on
+  Tensor/Pixel and any device with a "trap" switch). The strict switch-test rejected a
+  switch only if status still read "charging"; the Google `charging_state` node reports
+  "not charging" while current keeps flowing, so the daemon churned and locked nothing,
+  letting charging sail past the limit. Now a candidate is rejected unless the current
+  actually drops (>50 mA still flowing = not stopped), so the daemon locks a switch that
+  truly cuts (e.g. `charge_stop_level`). Lenient on mA-reporting kernels (no regression).
+
 **v2025.5.18-stable.6-rc4 (202505195)** — PRE-RELEASE
 - `acca --state` now reports **smart sensing, measured live for ANY SoC** (not Tensor-only):
   `plugged` (any */online=1), `currentUnits` (uA/mA auto-detected from magnitude),
