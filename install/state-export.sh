@@ -72,6 +72,48 @@ _se_status() {
 }
 
 
+# --- smart sensing, generalized for ALL SoCs (not Tensor-only) ---
+
+# plugged? any /sys/class/power_supply/*/online reads 1
+_se_plugged() {
+  case "$(cat /sys/class/power_supply/*/online 2>/dev/null | tr -d ' \t\n\r')" in
+    *1*) echo true;; *) echo false;; esac
+}
+
+# current units from magnitude: large abs => uA, else mA (works on any kernel)
+_se_units() {
+  case "${1:-null}" in null|''|0) echo unknown; return;; esac
+  local a="${1#-}"
+  if [ "$a" -gt 20000 ] 2>/dev/null; then echo uA; else echo mA; fi
+}
+
+# polarity: cross-check status vs current sign
+_se_polarity() {
+  case "${2:-null}" in null|'') echo unknown; return;; esac
+  case "$1" in
+    Charging)    case "$2" in -*) echo inverted;; *) echo normal;; esac;;
+    Discharging) case "$2" in -*) echo normal;; *) echo inverted;; esac;;
+    *) echo unknown;;
+  esac
+}
+
+# measured class from plug + current (unit-aware idle band), all SoCs:
+# plugged & ~0 -> bypass; unplugged & ~0 -> idle; >0 plugged -> charging; <0 -> discharging
+_se_class() {
+  local cur="$1" plugged="$2" units="$3" a thr
+  case "$cur" in null|'') echo unknown; return;; esac
+  a="${cur#-}"
+  [ "$units" = uA ] && thr=30000 || thr=30
+  if [ "$a" -lt "$thr" ] 2>/dev/null; then
+    [ "$plugged" = true ] && echo bypass || echo idle; return
+  fi
+  case "$cur" in
+    -*) echo discharging;;
+    *) [ "$plugged" = true ] && echo charging || echo discharging;;
+  esac
+}
+
+
 # Build and atomically publish $TMPDIR/state.json. Best-effort; never propagates failure.
 write_state() {
   ( set +eu
@@ -88,6 +130,14 @@ write_state() {
     userLocked=false
     case "${chargingSwitch[*]-}" in *" --"*) userLocked=true;; esac
 
+    local plugged units polarity mclass conf
+    plugged=$(_se_plugged)
+    units=$(_se_units "$cur")
+    polarity=$(_se_polarity "$status" "$cur")
+    mclass=$(_se_class "$cur" "$plugged" "$units")
+    conf=low
+    { [ "$units" != unknown ] && [ "$cur" != null ]; } && conf=medium
+
     {
       printf '{"schemaVersion":1,"ts":%s,' "$ts"
       _se_meta
@@ -97,10 +147,12 @@ write_state() {
         "$(_se_esc "${capacity[*]-}")" "$(_se_esc "${temperature[*]-}")" \
         "$(_se_esc "${chargingSwitch[*]-}")" "$(_se_esc "${allowIdleAbovePcap-}")" \
         "$(_se_esc "${prioritizeBattIdleMode-}")"
-      # sensing / switch-class slots are filled by subsystem C; honest "unknown" until then
-      printf ',"sensing":{"currentUnits":"unknown","polarity":"unknown","statusTrust":"unknown","confidence":"low"}'
-      printf ',"switch":{"locked":"%s","userLocked":%s,"measuredClass":"unknown"}' \
-        "$(_se_esc "${chargingSwitch[*]-}")" "$userLocked"
+      # smart sensing, measured live for any SoC
+      printf ',"plugged":%s' "$plugged"
+      printf ',"sensing":{"currentUnits":"%s","polarity":"%s","statusTrust":"unknown","confidence":"%s"}' \
+        "$units" "$polarity" "$conf"
+      printf ',"switch":{"locked":"%s","userLocked":%s,"measuredClass":"%s"}' \
+        "$(_se_esc "${chargingSwitch[*]-}")" "$userLocked" "$mclass"
       printf '}\n'
     } > "$t" 2>/dev/null && mv -f "$t" "$f" 2>/dev/null
   ) 2>/dev/null || :

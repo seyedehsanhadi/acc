@@ -1,3 +1,11 @@
+**v2025.5.18-stable.6-rc4 (202505195)** — PRE-RELEASE
+- `acca --state` now reports **smart sensing, measured live for ANY SoC** (not Tensor-only):
+  `plugged` (any */online=1), `currentUnits` (uA/mA auto-detected from magnitude),
+  `polarity` (status vs current sign), and `switch.measuredClass` (bypass / idle /
+  charging / discharging from plug + unit-aware current band). The app can now read the
+  plugged/unplugged reality and classify what the charger is doing on every device.
+- Still additive; no charging-behavior change.
+
 **v2025.5.18-stable.6-rc2 (202505194)** — PRE-RELEASE
 - Fixes three bugs in the rc1 `acca --state` export (found on a Pixel 9a):
   - **acc version/versionCode were empty** on the daemon/front-end path (`accVer` is only
