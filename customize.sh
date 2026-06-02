@@ -50,8 +50,62 @@ magisk_busybox="$(ls /data/adb/*/bin/busybox /data/adb/magisk/busybox 2>/dev/nul
   for f in $bin_dir/busybox $magisk_busybox /system/*bin/busybox*; do
     [ -x $f ] && eval $f --install -s $busybox_dir/ && break || :
   done
+
+  # Self-healing fallbacks: many install failures (e.g. issues #215 #216 #222 #223
+  # #228 #247) are just "busybox not found" on roots/ROMs that stash it elsewhere
+  # (KernelSU, APatch, MIUI, old Android) or whose `--install -s` symlinks are not
+  # honoured under /dev. Only if the quick path above produced no usable applet do
+  # we cast a much wider net before giving up. Everything here is additive: it never
+  # runs when the original loop already succeeded.
   [ -x $busybox_dir/ls ] || {
-    echo "Install busybox or simply place it in $bin_dir/"
+
+    # try `--install -s` (symlinks), then `--install` (hardlinks/copies, for setups
+    # where symlinks into /dev fail), then -- last resort -- manually symlink the
+    # applets the binary reports, for multicall binaries lacking a working --install.
+    _bb_try() {
+      [ -x "$1" ] || return 1
+      eval "$1" --install -s $busybox_dir/ 2>/dev/null || :
+      [ -x $busybox_dir/ls ] && return 0
+      eval "$1" --install $busybox_dir/ 2>/dev/null || :
+      [ -x $busybox_dir/ls ] && return 0
+      # manual applet linking (works for busybox AND toybox multicall binaries)
+      for _ap in $("$1" --list 2>/dev/null); do
+        ln -sf "$1" "$busybox_dir/$_ap" 2>/dev/null || :
+      done
+      unset _ap
+      [ -x $busybox_dir/ls ] && return 0
+      return 1
+    }
+
+    # Widest candidate set, most-trusted first. Globs that match nothing simply
+    # expand to a non-existent path and are skipped by the -x test in _bb_try.
+    for f in \
+      $bin_dir/busybox \
+      /data/adb/magisk/busybox \
+      /data/adb/ksu/bin/busybox \
+      /data/adb/ap/bin/busybox \
+      /data/adb/*/bin/busybox \
+      /data/adb/*/busybox \
+      "$(command -v busybox 2>/dev/null || :)" \
+      /system/xbin/busybox \
+      /system/bin/busybox \
+      /system/*bin/busybox* \
+      /vendor/*bin/busybox* \
+      "$(command -v toybox 2>/dev/null || :)" \
+      /system/xbin/toybox \
+      /system/bin/toybox \
+      /system/*bin/toybox* \
+    ; do
+      _bb_try "$f" && break || :
+    done
+    unset _bb_try
+  }
+
+  [ -x $busybox_dir/ls ] || {
+    echo "ERROR: a usable busybox/toybox could not be found or installed."
+    echo "Tried $bin_dir/, Magisk/KernelSU/APatch, and /system. Install busybox"
+    echo "(or place a static busybox binary at $bin_dir/busybox) and retry."
+    echo "Details: $data_dir/logs/install.log"
     echo
     exit 3
   }
@@ -356,7 +410,36 @@ esac
 
 # initialize $id
 rm $data_dir/disable 2>/dev/null
-/data/adb/$domain/$id/service.sh --init
+
+# Start the daemon. service.sh's last line is `exec start-stop-daemon ... || exit 12`,
+# so on roots/ROMs lacking start-stop-daemon (a common cause of install reports) the
+# daemon would simply never come up. We are running under `set +eu` here, so a failure
+# cannot abort the install -- but a non-running daemon defeats the install, so guard it:
+# run the normal init when start-stop-daemon exists, otherwise reproduce the same setup
+# and launch accd.sh detached via setsid/nohup (the exact fallback acca.sh already uses).
+if command -v start-stop-daemon >/dev/null 2>&1; then
+  /data/adb/$domain/$id/service.sh --init || \
+    echo "Note: service.sh --init returned nonzero; see $data_dir/logs/install.log"
+else
+  echo "Note: start-stop-daemon not found; starting $id daemon via setsid/nohup fallback."
+  (
+    set +eu
+    id=$id
+    domain=$domain
+    execDir=/data/adb/$domain/$id
+    dataDir=$data_dir
+    TMPDIR=/dev/.$domain/$id
+    mkdir -p $TMPDIR $dataDir 2>/dev/null || :
+    export dataDir domain execDir id TMPDIR
+    [ ! -f $execDir/setup-busybox.sh ] || . $execDir/setup-busybox.sh 2>/dev/null || :
+    [ ! -f $execDir/release-lock.sh ] || . $execDir/release-lock.sh 2>/dev/null || :
+    if command -v setsid >/dev/null 2>&1; then
+      setsid $execDir/${id}d.sh --init </dev/null >/dev/null 2>&1 &
+    else
+      nohup $execDir/${id}d.sh --init </dev/null >/dev/null 2>&1 &
+    fi
+  ) || echo "Note: daemon fallback launch failed; see $data_dir/logs/install.log"
+fi
 
 
 # magic_overlayfs support

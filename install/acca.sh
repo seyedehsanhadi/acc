@@ -97,15 +97,20 @@ case "$@" in
   # set multiple properties
   -s\ *=*|--set\ *=*)
 
-    ${async:-false} || {
-      async=true setsid $0 $config "$@" > /dev/null 2>&1 < /dev/null
-      exit 0
-    }
-
-    set +o sh 2>/dev/null || :
-    exec 4<>$0
-    flock 0 <&4
+    # Apply synchronously. accd re-reads config.txt on every loop, so the writer
+    # does not need to be detached. The old `setsid $0 ...` re-exec silently
+    # no-opped the write whenever setsid was missing (common on minimal busybox
+    # -- the write returned 127 before write-config ran), and `exec 4<>$0`
+    # failed on read-only module dirs. Writing here directly is robust and gives
+    # front-ends (AccA) a real exit code.
     shift
+
+    # Best-effort serialization of concurrent writers; never fatal. Locks a
+    # tmpfs file (always writable, never $0), and is skipped cleanly when flock
+    # is unavailable.
+    if command -v flock >/dev/null 2>&1; then
+      exec 9>"$TMPDIR/.acca-set.lock" && flock -w 5 9 2>/dev/null || :
+    fi
 
     . $defaultConfig
     . $config
