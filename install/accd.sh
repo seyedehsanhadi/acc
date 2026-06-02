@@ -191,6 +191,13 @@ if ! $_INIT; then
 
     if not_charging; then
       unsolicitedResumes=0
+      # rc16: charging is NOT happening (paused at limit, idle, or UNPLUGGED). Reset
+      # the whole auto-lock campaign so a transient plug/unplug blip is never mistaken
+      # for "charging past the limit", and the next real charge starts a clean detect.
+      # (Deliberately keeps $TMPDIR/.sw-blacklist so a proven-bad switch stays excluded
+      # for the session.)
+      rm $TMPDIR/.autolock-tried $TMPDIR/.autolock-count $TMPDIR/.autolock-gaveup \
+         $TMPDIR/.lockfail-count $TMPDIR/.breach 2>/dev/null || :
     else
       isCharging=true
       # [auto mode] change the charging switch if charging has not been enabled by acc (if behavior repeats 3 times in a row)
@@ -363,37 +370,61 @@ if ! $_INIT; then
             # reset battery stats on pause
             resetbs
           }
-          # fix9: breach watchdog (notify-only, throttled). If we are at/above the
-          # capacity limit and charging still has not stopped, surface it so a cap
-          # that is not holding is never silent again. Self-clears once stopped.
-          if _ge_pause_cap && ! not_charging; then
-            # rc15: auto scan+lock. At/above the limit but still charging = no
-            # switch is actually stopping charge on this phone. If auto-lock is
-            # enabled (no $dataDir/.no-autolock opt-out) and the user has not
-            # already locked a switch (trailing " --"), trigger the tested scanner
-            # ONCE per breach episode. It detaches, briefly stops us, tests every
-            # switch, writes charging_switch=<best> -- (persists across reboot —
-            # ACC owns config.txt), and restarts us (self-healing cleanup trap).
-            # When the config is reset or ACC reinstalled the lock is gone, so the
-            # next over-limit charge re-runs this automatically. Falls back to the
-            # notify-only nudge when the scanner is absent or auto-lock is off.
-            if [ -f $execDir/acc-switch-scan.sh ] && [ ! -f $dataDir/.no-autolock ] \
-              && [[ "${chargingSwitch[*]-}" != *\ -- ]] && [ ! -f $TMPDIR/.autolock-tried ]
-            then
-              touch $TMPDIR/.autolock-tried
-              notif "🔍 ACC: auto-detecting a charging switch that holds your ${capacity[3]:-?}% limit…"
-              if command -v setsid >/dev/null 2>&1; then
-                setsid sh $execDir/acc-switch-scan.sh --apply </dev/null >/dev/null 2>&1 &
-              else
-                nohup sh $execDir/acc-switch-scan.sh --apply </dev/null >/dev/null 2>&1 &
+          # ── rc16: auto scan+lock + runtime contract monitor ──────────────────
+          # We just tried to stop charging (above). If we are PLUGGED IN, at/above
+          # the limit, and STILL charging -- confirmed over a short debounce so a
+          # transient plug/unplug blip can never be mistaken for "charging past the
+          # limit" -- then whatever switch is active is not holding the cap.
+          if online && _ge_pause_cap && ! not_charging \
+             && sleep 2 && online && _ge_pause_cap && ! not_charging
+          then
+            if [[ "${chargingSwitch[*]-}" = *\ -- ]]; then
+              # CONTRACT MONITOR: a switch is LOCKED yet the cap is breached anyway
+              # (firmware drift, OS-renamed node, partial multi-path). After a few
+              # confirmed loops, unlock it, blacklist it for this session, and let
+              # auto-detect pick a different one. This is what makes the X..Y range a
+              # guarantee rather than a one-shot guess.
+              lf=$(cat $TMPDIR/.lockfail-count 2>/dev/null || echo 0); lf=$((lf + 1))
+              echo $lf > $TMPDIR/.lockfail-count
+              if [ $lf -ge 3 ]; then
+                echo "${chargingSwitch[*]% --}" >> $TMPDIR/.sw-blacklist
+                notif "⚠️ ACC: the locked charging switch stopped holding your ${capacity[3]:-?}% limit — re-detecting another."
+                $TMPDIR/acca $config --set charging_switch= 2>/dev/null || :
+                chargingSwitch=()
+                rm $TMPDIR/.autolock-tried $TMPDIR/.lockfail-count 2>/dev/null || :
               fi
-            elif [ ! -f $TMPDIR/.breach ] && [ ! -f $TMPDIR/.autolock-tried ]; then
-              # only nudge when auto-lock did NOT just fire (else messages contradict)
-              notif "⚠️ Battery at/above your ${capacity[3]:-?}% limit but still charging — in AccA open Scripts and run a 'Scan & lock' script"
+            elif [ -f $execDir/acc-switch-scan.sh ] && [ ! -f $dataDir/.no-autolock ] \
+                 && [ ! -f $TMPDIR/.autolock-tried ]
+            then
+              # AUTO-DETECT: nothing locked yet. BOUNDED to 3 attempts per episode so a
+              # phone with no working switch can never loop or go silently uncapped.
+              ac=$(cat $TMPDIR/.autolock-count 2>/dev/null || echo 0)
+              if [ $ac -lt 3 ]; then
+                echo $((ac + 1)) > $TMPDIR/.autolock-count
+                touch $TMPDIR/.autolock-tried
+                # mode passed to the scanner: Hold@Limit (bypass) iff idle-above-pcap
+                # is enabled, else the default Range Cycle.
+                if $allowIdleAbovePcap; then _m=--hold; else _m=--cycle; fi
+                notif "🔍 ACC: auto-detecting a switch that holds your ${capacity[3]:-?}% limit (try $((ac + 1))/3)…"
+                if command -v setsid >/dev/null 2>&1; then
+                  setsid sh $execDir/acc-switch-scan.sh --apply $_m </dev/null >/dev/null 2>&1 &
+                else
+                  nohup sh $execDir/acc-switch-scan.sh --apply $_m </dev/null >/dev/null 2>&1 &
+                fi
+              elif [ ! -f $TMPDIR/.autolock-gaveup ]; then
+                # give up loudly, ONCE -- never silently uncapped (the audit bug).
+                touch $TMPDIR/.autolock-gaveup
+                notif "⚠️ ACC: no reliable charging switch found automatically after 3 tries. Open AccA → Scripts to test manually; this phone may not expose a supported switch."
+              fi
+            elif [ ! -f $execDir/acc-switch-scan.sh ] && [ ! -f $TMPDIR/.breach ]; then
+              notif "⚠️ Battery at/above your ${capacity[3]:-?}% limit but still charging — run a 'Scan & lock' script in AccA."
               touch $TMPDIR/.breach
             fi
           else
-            rm $TMPDIR/.breach $TMPDIR/.autolock-tried 2>/dev/null || :
+            # not breaching (stopped at the limit, below it, or UNPLUGGED): clear the
+            # per-loop markers. The full campaign reset happens in is_charging when
+            # charging genuinely stops.
+            rm $TMPDIR/.breach $TMPDIR/.lockfail-count 2>/dev/null || :
           fi 2>/dev/null || :
           _nap ${loopDelay[1]}
           rm $TMPDIR/.minCapMax 2>/dev/null || :
@@ -637,7 +668,12 @@ if ! $_INIT; then
 
   apply_on_boot
   touch $TMPDIR/.minCapMax
-  rm $TMPDIR/.testingsw $TMPDIR/.sw-strict-done $TMPDIR/.breach 2>/dev/null || :
+  # rc16: clear TRANSIENT auto-lock markers on (re)start so a crash mid-scan can never
+  # lock the scanner out forever (the audit bug). The attempt-count, give-up flag and
+  # blacklist are intentionally NOT cleared here so reruns stay bounded across the
+  # scanner's own daemon restart; they reset when charging stops (see is_charging).
+  rm $TMPDIR/.testingsw $TMPDIR/.sw-strict-done $TMPDIR/.breach \
+     $TMPDIR/.autolock-tried $TMPDIR/.lockfail-count 2>/dev/null || :
   ctrl_charging
   exit $?
 

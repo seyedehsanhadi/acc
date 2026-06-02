@@ -30,7 +30,7 @@ PATH=/data/adb/$domain/bin:$PATH
 MAX_S=4                            # max seconds to wait per switch before "no effect"
 STEP_MS=300                        # poll interval (ms)
 APPLY=0                            # --apply: lock the best switch automatically
-METHOD=hold                        # which method to lock: hold (park at limit, DEFAULT) | cycle (discharge<->recharge)
+METHOD=cycle                       # which method to lock: cycle (range X..Y, DEFAULT) | hold (Hold@Limit / bypass)
 for _a in "$@"; do
   case "$_a" in
     --apply) APPLY=1;;
@@ -54,6 +54,13 @@ nap() { if [ -n "$BB" ]; then "$BB" usleep $(( STEP_MS * 1000 )); else sleep 1; 
 
 [ "$(id -u 2>/dev/null)" = 0 ] || { warn "must run as root (su)"; exit 1; }
 cd /sys/class/power_supply/ 2>/dev/null || { warn "no /sys/class/power_supply"; exit 1; }
+
+# rc16: single-instance mutex. The daemon may auto-trigger this scan while the user
+# also taps a "Scan & lock" script -- two scanners toggling switches at once is chaos.
+# flock a tmpfs lock; if another scan holds it, exit cleanly. (No-op if flock absent.)
+if command -v flock >/dev/null 2>&1; then
+  exec 8>"$TMPDIR/.scan.lock" 2>/dev/null && { flock -n 8 || { warn "another switch scan is already running; aborting this one"; exit 0; }; }
+fi
 
 # fix7: resolve the "pcap" off-token (used by limit-type switches like
 # charge_stop_level) to the configured pause_capacity, falling back to the live
@@ -131,15 +138,28 @@ raw() { c=$(cat "$currFile" 2>/dev/null); echo "${c:-0}"; }
 abs() { a=${1#-}; echo "${a:-0}"; }
 to_mA() { awk "BEGIN{printf \"%d\", $1/($ampFactor_/1000)}" 2>/dev/null || echo "?"; }
 
+# rc16: INPUT (charger-side) current, used to tell a true bypass/hold (charger still
+# feeding the phone => battery idle, no drain) from a passthrough-BLOCKING switch
+# (charger dead => battery powers the phone => DRAINS while plugged, e.g. some Sony
+# Xperia). Best-effort: if no input node is found, classification falls back to "clean".
+inFile=
+for _f in usb/current_now usb/input_current_now main-charger/current_now \
+          */input_current_now */input_cur usb/current_max; do
+  [ -f "$_f" ] && { inFile=$_f; break; }
+done
+in_raw() { [ -n "$inFile" ] && { c=$(cat "$inFile" 2>/dev/null); echo "${c:-0}"; } || echo 0; }
+
 # ---------- per-switch fast test ----------
-# echoes: "ok <ms> <idle|discharging>" | "fail" | "skip"
+# echoes: "ok <ms> <idle|discharging> <bypass|clean|drain> <rok 0|1>" | "fail" | "skip"
+#   class:  bypass = stopped & charger still feeds phone (true hold, no drain)
+#           drain  = stopped & charger dead & battery sourcing load (DRAINS plugged!)
+#           clean  = stopped, input indeterminate (fine for Range Cycle)
+#   rok:    1 = charging verifiably RESUMED after re-arm (guarantees the X..Y cycle)
 test_switch() {
-  local line=$1 base nr now i ms st mode lim
-  # fix10: a previous test may have left the charger idle/bypassed; wait briefly for
-  # charging to resume so this switch is measured from a charging baseline. Without
-  # this, a switch tested right after a stopping one (e.g. the pcap variant) falsely
-  # reads as "skip / not charging" and never gets evaluated.
-  i=0; while [ "$(abs "$(raw)")" -le "$THR" ] 2>/dev/null && [ "$i" -lt 14 ]; do nap; i=$((i+1)); done
+  local line=$1 base nr now i ms mode lim klass inb rok
+  # widened 14->20 polls: some chargers renegotiate USB-PD on each toggle and take
+  # longer to resume to the charging baseline; do not falsely "skip" them.
+  i=0; while [ "$(abs "$(raw)")" -le "$THR" ] 2>/dev/null && [ "$i" -lt 20 ]; do nap; i=$((i+1)); done
   base=$(abs "$(raw)")
   [ "$base" -gt "$THR" ] 2>/dev/null || { echo skip; return; }
   cur_line=$line
@@ -151,10 +171,23 @@ test_switch() {
     nr=$(raw); now=$(abs "$nr")
     # "stopped" = current went negative (discharging) OR magnitude fell under 1/3 baseline
     if [ "$nr" -lt 0 ] 2>/dev/null || [ "$now" -lt $(( base / 3 )) ] 2>/dev/null; then
-      mode=idle
-      [ "$nr" -lt 0 ] 2>/dev/null && mode=discharging
+      mode=idle; [ "$nr" -lt 0 ] 2>/dev/null && mode=discharging
+      # classify hold-quality from the CHARGER-side current
+      inb=$(abs "$(in_raw)")
+      if [ -n "$inFile" ] && [ "$nr" -lt 0 ] 2>/dev/null && [ "$inb" -le "$THR" ] 2>/dev/null; then
+        klass=drain          # battery sourcing load AND no charger input = passthrough blocked
+      elif [ -n "$inFile" ] && [ "$now" -le "$THR" ] 2>/dev/null && [ "$inb" -gt "$THR" ] 2>/dev/null; then
+        klass=bypass         # battery idle AND charger still feeding = true hold
+      else
+        klass=clean
+      fi
+      # RESUME verify: re-arm and confirm charging actually comes back, so a locked
+      # switch is guaranteed able to recharge from X. Best-effort (cannot resume when
+      # already at/above the limit) -> rok=0 just downranks, never hard-fails.
       restore_on "$line"; cur_line=
-      echo "ok $ms $mode"; return
+      rok=0; i=0
+      while [ "$i" -lt 14 ]; do nap; i=$((i+1)); [ "$(abs "$(raw)")" -gt "$THR" ] 2>/dev/null && { rok=1; break; }; done
+      echo "ok $ms $mode $klass $rok"; return
     fi
   done
   restore_on "$line"; cur_line=
@@ -169,8 +202,20 @@ SW=$TMPDIR/ch-switches
 say "== ACC fast switch scan =="
 say "device : $(getprop ro.product.device 2>/dev/null)"
 say "current: $(to_mA "$(raw)") mA  (source: ${currFile})"
-[ "$APPLY" = 1 ] && say "lock   : $([ "$METHOD" = cycle ] && echo 'discharge-cycle (battery-idle OFF)' || echo 'hold at limit / battery-idle (DEFAULT)')"
+[ "$APPLY" = 1 ] && say "lock   : $([ "$METHOD" = cycle ] && echo 'Range Cycle (DEFAULT)' || echo 'Hold@Limit / bypass')"
 [ "$(abs "$(raw)")" -gt "$THR" ] 2>/dev/null || { warn "Not charging now. Plug in the charger and rerun."; exit 1; }
+
+# rc16: thermal guard. A baseline captured while the charger is thermally throttled is
+# unreliable (a switch can look like "no effect" only because current was already low).
+# Warn but proceed -- never block capping on a warm battery.
+_tf=
+for _t in battery/temp $(echo "$battStatus" | sed 's,/[^/]*$,/temp,') bms/temp; do
+  [ -f "$_t" ] && { _tf=$_t; break; }
+done
+if [ -n "$_tf" ]; then
+  _tc=$(cat "$_tf" 2>/dev/null || echo 0)
+  [ "$_tc" -ge 400 ] 2>/dev/null && warn "battery warm ($(( _tc / 10 ))C): charger may be throttling; results can be less reliable."
+fi
 
 [ -n "$ACCA" ] && "$ACCA" -D stop >/dev/null 2>&1 || :
 nap
@@ -180,28 +225,41 @@ say "testing $total switches (max ${MAX_S}s each)..."
 say ""
 
 results=
+drained=0
 n=0
+BL=$TMPDIR/.sw-blacklist
 while IFS= read -r line; do
   case "$line" in ''|'#'*) continue;; esac
+  # rc16: skip switches the runtime monitor parked as non-holding for this session
+  [ -f "$BL" ] && grep -qxF "$line" "$BL" 2>/dev/null && continue
   n=$((n+1))
   printf '  %2d. %-56.56s ' "$n" "$line"
   r=$(test_switch "$line")
   set -- $r
   case "${1:-}" in
-    ok)   say "STOPS ${2}ms [${3}]"
-          # fix12: rank by the METHOD the user chose to lock, decided by the switch
-          # LINE itself (measured idle/discharging is unreliable on devices that
-          # slow-drain even at the limit). "<node> pcap pcap" = hold-at-cap;
-          # "<node> pcap 5" = discharge-cycle. Default (hold) -> pcap-pcap first;
-          # --cycle -> pcap-5 first. Plain (non-pcap) switches: idle above discharging.
-          P=4
-          case "$line" in
-            *\ pcap\ pcap) [ "$METHOD" = cycle ] && P=2 || P=0;;
-            *\ pcap\ 5)    [ "$METHOD" = cycle ] && P=0 || P=2;;
-            *)             case "$3" in idle) P=1;; *) P=3;; esac;;
-          esac
-          results="${results}${P} ${2} ${3} ${line}
-";;
+    ok)   klass=${4:-clean}; rok=${5:-0}
+          say "STOPS ${2}ms [${3}/${klass}/$([ "$rok" = 1 ] && echo resumes || echo no-resume)]"
+          if [ "$klass" = drain ]; then
+            # NEVER lock a switch that kills charger passthrough -> drains while plugged
+            say "        ^ rejected: blocks passthrough (battery would DRAIN while plugged)"
+            drained=$((drained + 1))
+          else
+            # rank: pcap-pcap=hold, pcap-5=cycle (ordered by chosen METHOD); plain
+            # switches by mode; in Hold mode a bypass-classified switch wins. A switch
+            # whose RESUME was not verified gets +4 so resume-verified ones (the real
+            # X..Y guarantee) always sort ahead. Lowest score wins.
+            P=4
+            case "$line" in
+              *\ pcap\ pcap) [ "$METHOD" = cycle ] && P=2 || P=0;;
+              *\ pcap\ 5)    [ "$METHOD" = cycle ] && P=0 || P=2;;
+              *) if [ "$METHOD" = hold ] && [ "$klass" = bypass ]; then P=0
+                 else case "$3" in idle) P=1;; *) P=3;; esac; fi;;
+            esac
+            [ "$rok" = 1 ] || P=$((P + 4))
+            results="${results}${P} ${2} ${3} ${line}
+"
+          fi
+          ;;
     skip) say "(not charging — rerun while charging)";;
     *)    say "no effect";;
   esac
@@ -210,30 +268,39 @@ done < "$SW"
 say ""
 say "================ RESULT ================"
 if [ -n "$results" ]; then
-  say "Working switches (best first -- $([ "$METHOD" = cycle ] && echo 'discharge-cycle' || echo 'hold-at-limit') method preferred, then fastest):"
+  say "Working switches (best first -- $([ "$METHOD" = cycle ] && echo 'Range Cycle' || echo 'Hold@Limit'), resume-verified, then fastest):"
   printf '%s' "$results" | sort -n -k1,1 -k2,2n | while read prio ms mode rest; do
     say "  [${ms}ms ${mode}]  $rest"
   done
   best=$(printf '%s' "$results" | sort -n -k1,1 -k2,2n | head -n1 | cut -d' ' -f4-)
+  rm $TMPDIR/.autolock-noswitch 2>/dev/null || :
   say ""
   say "BEST=${best}"
   if [ "$APPLY" = 1 ] && [ -n "$best" ]; then
     [ -n "$ACCA" ] && "$ACCA" -s "s=${best} --" >/dev/null 2>&1 || :
     say "APPLIED=1   method=${METHOD}   (locked in: acc -s s='${best} --')"
   else
-    say "Recommended ($([ "$METHOD" = cycle ] && echo 'discharge-cycle' || echo 'hold-at-limit')) -- lock it in (stops ACC auto-cycling):"
+    say "Recommended ($([ "$METHOD" = cycle ] && echo 'Range Cycle' || echo 'Hold@Limit')) -- lock it in (stops ACC auto-cycling):"
     say "  acc -s s='${best} --'"
-    say "  (re-run the scan with --apply to lock it; add --cycle for the discharge-cycle method)"
+    say "  (re-run with --apply to lock it; --hold for Hold@Limit/bypass, --cycle for Range Cycle)"
   fi
   say ""
-  say "hold-at-limit = parks the battery at your limit (pcap pcap);  discharge-cycle ="
-  say "drops to your resume level then recharges to the limit, repeating (pcap 5)."
+  say "Range Cycle = charge to your limit, discharge to resume, repeat (pcap 5)."
+  say "Hold@Limit  = park/bypass at your limit, no charge or discharge (pcap pcap)."
 else
-  say "NO switch stopped charging on this device."
-  say "Almost always the OS is overriding ACC. Do this, then rerun:"
-  say "  Settings > Battery > turn OFF Adaptive Charging / charge optimization"
-  say "If it STILL finds nothing, this device needs a charge node ACC doesn't"
-  say "know yet — send this whole output back."
+  # rc16: leave a marker the daemon reads so a no-switch device is surfaced, never silent
+  touch $TMPDIR/.autolock-noswitch 2>/dev/null || :
+  if [ "$drained" -gt 0 ]; then
+    say "NO SAFE switch found: the $drained switch(es) that stopped charging also block"
+    say "charger passthrough here, so locking them would DRAIN the battery while plugged."
+    say "Not locking any. This phone needs a bypass-capable node ACC does not have yet."
+  else
+    say "NO switch stopped charging on this device."
+    say "Almost always the OS is overriding ACC. Do this, then rerun:"
+    say "  Settings > Battery > turn OFF Adaptive Charging / charge optimization"
+    say "If it STILL finds nothing, this device needs a charge node ACC doesn't"
+    say "know yet — send this whole output back."
+  fi
 fi
 say "======================================="
 # daemon restart is handled by the EXIT trap

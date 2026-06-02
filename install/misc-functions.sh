@@ -90,6 +90,11 @@ cycle_switches() {
     # on a previous boot is on the persistent blacklist -- never touch it again.
     ! journal_blacklisted "${chargingSwitch[*]}" || continue
 
+    # rc16 contract blacklist: a switch the runtime monitor caught NOT holding the
+    # limit (firmware drift / partial multi-path) is parked for this session so the
+    # daemon's own locker never immediately re-picks the same failing switch.
+    ! grep -qxF "${chargingSwitch[*]}" $TMPDIR/.sw-blacklist 2>/dev/null || continue
+
     [ ! -f ${chargingSwitch[0]:-//} ] || {
 
       # Write-ahead journal ONLY around the risky pause (off) write. If flip_sw off

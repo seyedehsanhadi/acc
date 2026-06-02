@@ -37,6 +37,14 @@ battery_ext/smart_charging_interruption 0 1
 idt/pin_enabled 1 0
 battery/siop_level 100 0
 
+# OnePlus/OPPO (some ColorOS builds expose ONLY this) -- rc16 coverage gap fix
+/sys/oplus/battery/mmi_charging_enable 1 0
+oplus_chg/battery/mmi_charging_enable 1 0
+
+# Samsung One UI charge-limit node (SOC-relative): on=100 (charge up), off=pcap so
+# the firmware holds at your limit. rc16 coverage gap fix.
+*/batt_full_capacity 100 pcap
+
 battery/charging_enabled 0 0 battery/op_disable_charge 0 1 battery/charging_enabled 1 1
 battery/input_suspend 0 1 /proc/mtk_battery_cmd/en_power_path 1 1
 
