@@ -119,6 +119,32 @@ if ! $_INIT; then
   }
 
 
+  _nap_idle() {
+    # fix#293 (deep sleep): when the device is UNPLUGGED and nothing is actionable,
+    # waking the CPU every few seconds keeps it out of deep sleep and drains the
+    # battery. Wait much longer here, but stay fully interruptible:
+    #   - break within ~1s of a charger being plugged in (online polled each second),
+    #   - break within ~1s of a config edit (config mtime watched, same as _nap),
+    # so plugging in / changing settings still responds fast. The discharge-side
+    # shutdown_capacity check is unaffected: the caller only takes this longer path
+    # when no shutdown action is pending, and re-reads config + re-checks every wake.
+    # Degrades safely to a plain countdown if stat/online are unavailable.
+    local left=${1:-60} ts
+    case $left in ''|*[!0-9]*) left=60;; esac
+    ts=$(stat -c %Y $config 2>/dev/null || echo x)
+    while [ $left -gt 0 ]; do
+      sleep 1
+      left=$((left - 1))
+      # charger plugged in -> wake now so charging logic runs immediately.
+      # written as "! online || break" (not "online && break") so the common
+      # unplugged case returns 0 under set -e, exactly like _nap's mtime guard.
+      ! online || break
+      # config changed -> wake now so AccA edits apply live
+      [ "$(stat -c %Y $config 2>/dev/null || echo x)" = "$ts" ] || break
+    done
+  }
+
+
   cap_idle_threshold() {
     if [ ${capacity[3]} -gt 3000 ]; then
       [ ${capacity[3]} -gt 3900 ] && [ $(volt_now) -gt $(( ${capacity[3]} + 50 )) ]
@@ -419,7 +445,19 @@ if ! $_INIT; then
             fi
           fi
         fi
-        _nap ${loopDelay[1]}
+        # fix#293 (deep sleep): if genuinely unplugged and no shutdown action is
+        # pending, wait much longer (interruptible) so the CPU can deep-sleep instead
+        # of polling every ${loopDelay[1]}s. "No action pending" = shutdown_capacity
+        # disabled (capacity[0] < 1) OR battery not yet near it (not _le_shutdown_cap);
+        # in those cases the normal short nap bought us nothing but wakeups. Plug-in
+        # and config edits still break the wait within ~1s (see _nap_idle). Anything
+        # actionable (charger present, or at/below the shutdown threshold) keeps the
+        # original short nap so shutdown/resume timing is never weakened.
+        if ! online && { ! _le_shutdown_cap || [ "${capacity[0]:-0}" -lt 1 ] 2>/dev/null; }; then
+          _nap_idle ${idleDelay:-120}
+        else
+          _nap ${loopDelay[1]}
+        fi
       fi
       rm $TMPDIR/.minCapMax 2>/dev/null || :
     done
@@ -566,6 +604,12 @@ if ! $_INIT; then
   . $config
   currentWorkaround0=$currentWorkaround
 
+
+  # fix#305/#308: boot blacklist. If a charging node kernel-panicked / hard-rebooted
+  # the device on a prior boot, journal_check (defined in probe-journal.sh, sourced via
+  # misc-functions.sh) blacklists it here so it is never re-probed and cannot loop-panic
+  # the device again. Guarded: a no-op if the probe is absent, and never fatal.
+  command -v journal_check >/dev/null 2>&1 && { journal_check || :; } || :
 
   apply_on_boot
   touch $TMPDIR/.minCapMax

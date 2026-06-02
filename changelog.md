@@ -1,3 +1,15 @@
+**v2025.5.18-stable.6-rc12 (202505203)** — PRE-RELEASE
+- **Brick-safe switch probing (#305/#308).** A write-ahead journal records a candidate switch
+  before the risky pause-write; if it kernel-panics/reboots the device, accd blacklists that
+  exact node on next boot and never touches it again. Blacklisted nodes are skipped.
+- **No more 2-second phantom "Charging" on unplug** — the daemon no longer flips the switch
+  back ON while the charger is offline.
+- **Deep sleep (#293)** — when unplugged and idle, the daemon waits up to ~120 s (interruptible:
+  plugging in or editing a setting wakes it within ~1 s) instead of polling every few seconds.
+- **Install robustness (#216/#223/#247/#228/#222/#215)** — busybox discovery now tries Magisk/
+  KSU/APatch/system/toybox fallbacks (and manual applet symlinks); a missing start-stop-daemon
+  falls back to setsid/nohup; clearer failure messages with the log path.
+
 **v2025.5.18-stable.6-rc11 (202505202)** — PRE-RELEASE
 - **"Cut current to 0 = stop" switches for ALL SoCs.** The method proven on the A16 Pixel
   (`usb/current_max …0`) is now generic in the switch DB via wildcards

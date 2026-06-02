@@ -86,9 +86,24 @@ cycle_switches() {
 
   while read -A chargingSwitch; do
 
+    # Brick-safe guard (GitHub #305/#308): a switch that panicked the kernel mid-write
+    # on a previous boot is on the persistent blacklist -- never touch it again.
+    ! journal_blacklisted "${chargingSwitch[*]}" || continue
+
     [ ! -f ${chargingSwitch[0]:-//} ] || {
 
-      flip_sw $1 || :
+      # Write-ahead journal ONLY around the risky pause (off) write. If flip_sw off
+      # kernel-panics and reboots the device, the pending record survives and accd's
+      # boot-time journal_check blacklists this exact switch line. The resume (on) write
+      # is not journalled -- re-arming charging never bricks, and arming there would
+      # falsely blacklist a perfectly good switch.
+      if [ "$1" = on ]; then
+        flip_sw $1 || :
+      else
+        journal_arm "${chargingSwitch[*]}"
+        flip_sw $1 || :
+        journal_disarm
+      fi
 
       if [ "$1" = on ]; then
         not_charging || break
@@ -256,11 +271,23 @@ disable_charging() {
 
 enable_charging() {
 
-    [ ! -f $TMPDIR/.sw ] || (. $TMPDIR/.sw; rm $TMPDIR/.sw; flip_sw on) 2>/dev/null || :
+    # Same unplug-blip guard as below: restore the saved switch config, but only
+    # physically flip it ON when actually plugged in (online); otherwise just clear the
+    # saved state so the next plug-in restores cleanly without a phantom "Charging" flash.
+    [ ! -f $TMPDIR/.sw ] || (. $TMPDIR/.sw; rm $TMPDIR/.sw; ! online || flip_sw on) 2>/dev/null || :
 
     if ! $ghostCharging || { $ghostCharging && online; }; then
 
-      flip_sw on || cycle_switches on
+      # Unplug blip fix: do NOT physically flip the switch ON while the charger is
+      # offline. On unplug the daemon still calls enable_charging to leave the switch
+      # in the "resume" state ready for the next plug-in, but actually re-arming the
+      # node makes the UI flash ~2s of phantom "Charging". online=0 means there is no
+      # power anyway, so skipping the flip changes nothing electrically -- it only
+      # suppresses the cosmetic blip. State is still made correct below
+      # (chDisabledByAcc=false), and the next real plug-in re-runs this and flips on.
+      if online; then
+        flip_sw on || cycle_switches on
+      fi
 
       # detect and block ghost charging
       # if ! $ghostCharging && ! not_charging && ! online \
@@ -525,6 +552,7 @@ trap exxit EXIT
 . $execDir/set-ch-curr.sh
 . $execDir/set-ch-volt.sh
 . $execDir/state-export.sh
+. $execDir/probe-journal.sh
 
 # wait for accd initialization
 if ! ${isAccd:-false} && [ ! -f $TMPDIR/.batt-interface.sh ]; then
