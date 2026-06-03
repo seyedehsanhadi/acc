@@ -1,3 +1,20 @@
+**v2025.5.18-stable.6 (202505211)** — STABLE
+Promotes stable.6-rc22 to final (identical, tested code). Stable.6 line highlights:
+- **Native Pixel/Tensor charge limit** (`charge_stop_level`/`charge_start_level`) — holds the
+  battery flat at your cap with no overshoot and true battery-idle (no 100%/5% sawtooth).
+- **All-paths group switch** zeroes every Pixel charge path at once; auto-lock locks the group
+  so no single path can keep charging.
+- **Brick-safe switch probing** (#305/#308): a write-ahead journal blacklists any node that
+  panics/reboots the device, so it is never retried.
+- **Atomic config writes** (no partial-read/truncate on a failed write) and **safety bounds**
+  from a final audit (no div-by-zero, no inverted limits; every param coerces garbage to a safe
+  default before the daemon's arithmetic).
+- **Deep sleep** when unplugged/idle (#293); **no 2-second phantom "Charging"** on unplug.
+- **Install robustness** — busybox / start-stop-daemon fallbacks across more roots and ROMs.
+- `acca --state` export (real version + derived charging status + fresh snapshot).
+- Temperature band cooldown 45 < max 50 (resume 40, shutdown 55); a collapsed 45/45 auto-repairs.
+- ACC is fully standalone (uninstalling the AccA app never removes it); configs auto-migrate.
+
 **v2025.5.18-stable.6-rc13 (202505204)** — PRE-RELEASE
 - **Tensor hard-pause now actually applies** (fresh `.stable-defaults7` marker re-runs the
   migration that the stale `.6` marker skipped: `allowIdleAbovePcap=false` +
