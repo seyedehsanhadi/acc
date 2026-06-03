@@ -168,12 +168,18 @@ in_raw() { [ -n "$inFile" ] && { c=$(cat "$inFile" 2>/dev/null); echo "${c:-0}";
 #           clean  = stopped, input indeterminate (fine for Range Cycle)
 #   rok:    1 = charging verifiably RESUMED after re-arm (guarantees the X..Y cycle)
 test_switch() {
-  local line=$1 base nr now i ms mode lim klass inb rok
+  local line=$1 base baseRaw chgNeg revd nr now i ms mode lim klass inb rok
   # widened 14->20 polls: some chargers renegotiate USB-PD on each toggle and take
   # longer to resume to the charging baseline; do not falsely "skip" them.
   i=0; while [ "$(abs "$(raw)")" -le "$THR" ] 2>/dev/null && [ "$i" -lt 20 ]; do nap; i=$((i+1)); done
-  base=$(abs "$(raw)")
+  baseRaw=$(raw); base=$(abs "$baseRaw")
   [ "$base" -gt "$THR" ] 2>/dev/null || { echo skip; return; }
+  # Some kernels (e.g. certain Motorola) report current_now with the INVERTED sign
+  # (charging negative / discharging positive). Anchor "stopped" to a reversal vs THIS
+  # baseline's sign so the scan is correct on either convention (a plain `nr < 0` test
+  # false-positives every switch on an inverted-sign device, since charging is already
+  # negative there). chgNeg=1 means this device reports charging as negative.
+  chgNeg=0; [ "$baseRaw" -lt 0 ] 2>/dev/null && chgNeg=1
   cur_line=$line
   write_off "$line"
   lim=$(( MAX_S * 1000 / STEP_MS )); [ "$lim" -lt 1 ] && lim=1
@@ -181,12 +187,19 @@ test_switch() {
   while [ "$i" -lt "$lim" ]; do
     nap; i=$((i+1)); ms=$(( i * STEP_MS ))
     nr=$(raw); now=$(abs "$nr")
-    # "stopped" = current went negative (discharging) OR magnitude fell under 1/3 baseline
-    if [ "$nr" -lt 0 ] 2>/dev/null || [ "$now" -lt $(( base / 3 )) ] 2>/dev/null; then
-      mode=idle; [ "$nr" -lt 0 ] 2>/dev/null && mode=discharging
+    # current REVERSED vs the charging baseline (sign-agnostic; handles inverted-sign kernels)
+    revd=0
+    if [ "$chgNeg" = 1 ]; then
+      [ "$nr" -gt 0 ] 2>/dev/null && revd=1
+    else
+      [ "$nr" -lt 0 ] 2>/dev/null && revd=1
+    fi
+    # "stopped" = current reversed direction (now discharging) OR magnitude fell under 1/3 baseline
+    if [ "$revd" = 1 ] || [ "$now" -lt $(( base / 3 )) ] 2>/dev/null; then
+      mode=idle; [ "$revd" = 1 ] && mode=discharging
       # classify hold-quality from the CHARGER-side current
       inb=$(abs "$(in_raw)")
-      if [ -n "$inFile" ] && [ "$nr" -lt 0 ] 2>/dev/null && [ "$inb" -le "$THR" ] 2>/dev/null; then
+      if [ -n "$inFile" ] && [ "$revd" = 1 ] && [ "$inb" -le "$THR" ] 2>/dev/null; then
         klass=drain          # battery sourcing load AND no charger input = passthrough blocked
       elif [ -n "$inFile" ] && [ "$now" -le "$THR" ] 2>/dev/null && [ "$inb" -gt "$THR" ] 2>/dev/null; then
         klass=bypass         # battery idle AND charger still feeding = true hold

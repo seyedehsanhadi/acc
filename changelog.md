@@ -1,3 +1,11 @@
+**v2025.5.18-stable.6.1 (202505212)**
+- **Switch scan now works on inverted-sign kernels.** Some devices (e.g. certain Motorola)
+  report `current_now` with the opposite sign — charging negative, discharging positive. The
+  scan's "stopped = current went negative" test false-positived every switch on those phones.
+  Stop-detection is now anchored to a *reversal vs the charging baseline's own sign*, so it is
+  correct on both conventions (Pixel's negative-discharge hold is unchanged). Scan-only fix;
+  charge-limiting was never affected (it is capacity/online based).
+
 **v2025.5.18-stable.6 (202505211)** — STABLE
 Promotes stable.6-rc22 to final (identical, tested code). Stable.6 line highlights:
 - **Native Pixel/Tensor charge limit** (`charge_stop_level`/`charge_start_level`) — holds the
