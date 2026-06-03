@@ -1,10 +1,24 @@
-**v2025.5.18-stable.6.1 (202505212)**
-- **Switch scan now works on inverted-sign kernels.** Some devices (e.g. certain Motorola)
-  report `current_now` with the opposite sign — charging negative, discharging positive. The
-  scan's "stopped = current went negative" test false-positived every switch on those phones.
-  Stop-detection is now anchored to a *reversal vs the charging baseline's own sign*, so it is
-  correct on both conventions (Pixel's negative-discharge hold is unchanged). Scan-only fix;
-  charge-limiting was never affected (it is capacity/online based).
+**v2025.5.18-stable.6.1 (202505212)** — all-phones auto-detection hardening
+Makes automatic switch selection/locking correct across SoCs, kernels and current conventions,
+without manual config. All changes preserve the Pixel/Tensor and normal-Qualcomm paths exactly.
+- **Curated switch priority is no longer alphabetized.** The switch list was de-duped with
+  `sort -u`, which reordered ACC's hand-tuned priority and let auto-select/auto-lock grab a worse
+  switch first (e.g. a current-cut before a clean on/off) on non-Pixel devices. De-dup is now
+  order-preserving, so the curated order survives.
+- **Switch scan + daemon auto-lock work on inverted-sign kernels** (e.g. some Motorola report
+  `current_now` positive while discharging / negative while charging). "Stopped" is now anchored
+  to a *reversal vs the charging baseline's own sign* (scan) and the daemon's anti-flicker check
+  is sign-agnostic and **unit-scaled** (µA vs mA), so milliamp-reporting devices (older Exynos)
+  and inverted-sign devices no longer false-lock a non-working switch. Pixel discharge-hold
+  (current reverses) is correctly accepted.
+- **Scan hold-quality classification fixed** — dropped the static `usb/current_max` ceiling from
+  the charger-input probe (it read constant and mislabeled paused switches as "bypass"); added
+  `dc`/`wireless` live input nodes for DC/wireless charging.
+- **Broader charger-online detection** — recognizes `main-charger`, OnePlus/Oppo `oplus_*chg`,
+  and Qualcomm `pmic_glink` charger supplies (additive; never matches fewer nodes).
+- **Spurious-shutdown guard** — a garbage/empty `shutdown_temp` in a hand-edited config can no
+  longer trigger a shutdown (it now coerces to the 55 °C default).
+- Charge-limiting itself was never affected by any of the above (it is capacity/online based).
 
 **v2025.5.18-stable.6 (202505211)** — STABLE
 Promotes stable.6-rc22 to final (identical, tested code). Stable.6 line highlights:

@@ -571,7 +571,7 @@ case "${1-}" in
       rm $TMPDIR/.testingsw 2>/dev/null || :
       if [ -n "$parsed" ]; then
         cat $TMPDIR/ch-switches $_parsed 2>/dev/null > $parsed \
-          && sort -u $parsed | sed 's/ $//; /^$/d' > $TMPDIR/ch-switches
+          && awk '!seen[$0]++' $parsed | sed 's/ $//; /^$/d' > $TMPDIR/ch-switches
       fi
       cp -f $logF $logF_ 2>/dev/null
       ! $daemonWasUp || start-stop-daemon -bx $TMPDIR/.accdt -S --
@@ -626,7 +626,7 @@ case "${1-}" in
       fi
       swCount=1
       swTotal=$(wc -l ${1-$TMPDIR/ch-switches} | cut -d ' ' -f 1)
-      sort -u $TMPDIR/ch-switches > $TMPDIR/ch-switches_
+      awk '!seen[$0]++' $TMPDIR/ch-switches > $TMPDIR/ch-switches_
       mv -f $TMPDIR/ch-switches_ $TMPDIR/ch-switches
       while read _chargingSwitch; do
         echo "x$_chargingSwitch" | grep -Eq '^x$|^x#' && continue

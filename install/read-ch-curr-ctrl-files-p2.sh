@@ -46,7 +46,7 @@ if [ ! -f $TMPDIR/.mcc-read ]; then
     sed -Ee 's/::.*::/ /' -e 's/([0-9])$/\1 3600mV/' $TMPDIR/ch-volt-ctrl-files >> $TMPDIR/ch-switches
 
     cat $TMPDIR/ch-switches > $TMPDIR/.ctrl
-    grep / $TMPDIR/.ctrl | sort -u > $TMPDIR/ch-switches
+    grep / $TMPDIR/.ctrl | awk '!seen[$0]++' > $TMPDIR/ch-switches
   fi
 fi
 
