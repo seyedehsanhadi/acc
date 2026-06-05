@@ -339,6 +339,13 @@ if ! $_INIT; then
       # publish the state export (subsystem A) -- best-effort, never blocks the loop
       write_state || :
 
+      # rc24: shared plug-transition tracker. freshPlug is true on the loop where the
+      # charger goes offline->online; it drives native_unlatch (Pixel) and generic_rearm
+      # (everything else) so a real re-plug re-arms charging exactly once -- no sawtooth,
+      # and wasOnline clears on unplug.
+      freshPlug=false
+      if online; then $wasOnline || freshPlug=true; wasOnline=true; else wasOnline=false; fi
+
       # rc20: native firmware limit -- just keep the levels synced and let the firmware
       # hold/resume. Re-source $config so AccA limit changes apply live. No switch toggle,
       # no current-cut, no overshoot/drain. (Low-battery shutdown + thermal are handled by
@@ -471,6 +478,9 @@ if ! $_INIT; then
 
       else
 
+        # rc24: generic (non-Pixel) fresh-plug re-arm -- resume on re-plug without a reboot.
+        generic_rearm || :
+
         if $xIdle && _le_pause_cap; then
           enable_charging
           disable_charging
@@ -580,17 +590,35 @@ if ! $_INIT; then
     # firmware -- a phone whose driver resumes correctly is left completely untouched).
     # Fail-safe: a spurious pulse can only let the cell charge a little toward the limit
     # that sync_native_limit still enforces -- it can never overcharge or disable the cap.
-    online || { wasOnline=false; return 0; }
-    local fresh=false
-    $wasOnline || fresh=true
-    wasOnline=true
-    if { $fresh && _lt_pause_cap; } || _le_resume_cap; then
+    # rc24: $freshPlug is computed once per loop by the shared plug-transition tracker.
+    online || return 0
+    if { $freshPlug && _lt_pause_cap; } || _le_resume_cap; then
       [ "$(read_status)" = Charging ] && return 0 || :
       chmod 0644 $gcsl 2>/dev/null || :
       echo 100 > $gcsl 2>/dev/null || :
       sleep ${loopDelay[0]}
       sync_native_limit
     fi
+  }
+
+
+  generic_rearm() {
+    # rc24 (stable.6.3): generic (non-Pixel) counterpart to native_unlatch. Some charging
+    # switches (input_suspend, */current_max 0, */charging_enabled 0, etc.) hold their
+    # "off" state across an unplug/replug, so after the limit is hit, re-plugging does not
+    # resume charging until capacity falls to resume_capacity -- or, on switches that latch,
+    # until a REBOOT (the reported Motorola/Qualcomm symptom: stops correctly at the limit,
+    # then will not resume on re-plug). On a genuine plug-in (freshPlug) below the limit we
+    # re-arm at once via enable_charging, which writes the switch ON value and is itself
+    # online-gated. Skipped on the boot loop (.minCapMax present) so it never fights
+    # off_mid_charge, and one-shot per plug (freshPlug) so it cannot sawtooth. Native
+    # (google,charger) devices use native_unlatch instead and are excluded here.
+    $nativeLimit && return 0 || :
+    $freshPlug || return 0
+    [ ! -f $TMPDIR/.minCapMax ] || return 0
+    _lt_pause_cap || return 0
+    online || return 0
+    enable_charging
   }
 
 

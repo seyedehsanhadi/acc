@@ -1,3 +1,14 @@
+**v2025.5.18-stable.6.3 (202505214)** — HOTFIX: resume-after-limit on ALL phones (generic_rearm)
+Extends 6.2's Pixel/Tensor fix to non-Pixel devices (Motorola/Qualcomm/etc.). Some charging switches
+(input_suspend, */current_max 0, */charging_enabled 0) hold their "off" state across an unplug/replug,
+so after the limit was hit, re-plugging did nothing until capacity fell to resume_capacity — or, on
+switches that latch, until a reboot. New `generic_rearm`: on a genuine plug-in (offline→online) below
+the limit, re-arm the switch at once via `enable_charging`. A shared loop-top plug tracker (`freshPlug`/
+`wasOnline`) now drives both `native_unlatch` (Pixel) and `generic_rearm` (everything else). One-shot
+per plug (no sawtooth); skipped on the boot loop (`.minCapMax` present, so it never fights
+off_mid_charge); online-gated; cannot overcharge (the pause/limit logic is unchanged). Verified by a
+13-case mock-sysfs harness (plug tracker, native refactor, generic re-arm, boot-skip, sawtooth guard).
+
 **v2025.5.18-stable.6.2 (202505213)** — HOTFIX: Pixel/Tensor resume-after-limit without reboot
 The rc20 native firmware path (charge_stop_level + charge_start_level) trusted the Tensor driver to
 resume at the start level, but that driver latches "stopped" and ignores it (an upstream Google bug,
