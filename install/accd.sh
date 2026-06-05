@@ -347,6 +347,7 @@ if ! $_INIT; then
       if $nativeLimit; then
         . $config 2>/dev/null || :
         sync_native_limit
+        native_unlatch || :
         _nap ${loopDelay[1]:-9}
         continue
       fi
@@ -561,6 +562,38 @@ if ! $_INIT; then
   }
 
 
+  native_unlatch() {
+    # rc23 (stable.6.2): the Tensor google,charger driver LATCHES "stopped" once
+    # charge_stop_level is reached and does NOT reliably re-arm at charge_start_level
+    # (an upstream Google/Tensor bug -- reproduced on Pixel 6..10 and even with no ACC
+    # installed; only a reboot or a write of exactly 100 to charge_stop_level clears it).
+    # rc20 delegated resume to that firmware, so after the limit was hit the battery would
+    # not resume on re-plug and the user had to REBOOT. Here we detect the latched state
+    # and pulse charge_stop_level=100 (the only value that re-arms the FET), then let
+    # sync_native_limit restore the real stop on the very next line, so we never linger at
+    # 100 (no overshoot). Re-arm only on:
+    #   (a) a FRESH plug-in (offline->online this loop) while below the limit -- the user
+    #       just connected the charger and expects a top-up to the limit; or
+    #   (b) capacity at/below resume_capacity -- where the firmware SHOULD have resumed.
+    # NEVER in the steady [resume..pause] idle band (no sawtooth -- hysteresis preserved),
+    # and NEVER when the kernel already reports Charging (self-disabling on healthy
+    # firmware -- a phone whose driver resumes correctly is left completely untouched).
+    # Fail-safe: a spurious pulse can only let the cell charge a little toward the limit
+    # that sync_native_limit still enforces -- it can never overcharge or disable the cap.
+    online || { wasOnline=false; return 0; }
+    local fresh=false
+    $wasOnline || fresh=true
+    wasOnline=true
+    if { $fresh && _lt_pause_cap; } || _le_resume_cap; then
+      [ "$(read_status)" = Charging ] && return 0 || :
+      chmod 0644 $gcsl 2>/dev/null || :
+      echo 100 > $gcsl 2>/dev/null || :
+      sleep ${loopDelay[0]}
+      sync_native_limit
+    fi
+  }
+
+
   pause_now() {
     capacity[3]=$(batt_cap)
     capacity[2]=$((capacity[3] - 5))
@@ -658,6 +691,8 @@ if ! $_INIT; then
   restrictCurr=false
   shutdownWarnings=true
   unsolicitedResumes=0
+  wasOnline=false  # rc23: native_unlatch plug-transition tracker (false at start so a
+                   # latched-from-before state is recovered on the first loop)
   versionCode=$(sed -n s/versionCode=//p $execDir/module.prop 2>/dev/null || :)
 
 

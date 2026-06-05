@@ -1,3 +1,17 @@
+**v2025.5.18-stable.6.2 (202505213)** — HOTFIX: Pixel/Tensor resume-after-limit without reboot
+The rc20 native firmware path (charge_stop_level + charge_start_level) trusted the Tensor driver to
+resume at the start level, but that driver latches "stopped" and ignores it (an upstream Google bug,
+reproduced on Pixel 6..10 and even with no ACC installed). Result: once the limit was hit, re-plugging
+the charger did nothing and only a reboot restored charging. New `native_unlatch` detects the latched
+state (plugged in, at/below your resume level, or a fresh plug-in below the limit, while the kernel
+still reports not-charging) and briefly pulses charge_stop_level=100 — the only value that re-arms the
+FET — then immediately restores your real stop level, so there is no overshoot. It self-disables on
+phones whose firmware already resumes correctly, never fires inside the [resume..limit] idle band
+(no sawtooth), and can only ever charge toward the limit `sync_native_limit` still enforces (cannot
+overcharge). Non-Pixel devices are unaffected (native mode only runs on google,charger hardware).
+Verified by an 8-case mock-sysfs regression harness (latched-resume, no-sawtooth, self-disable,
+plug-transition, clamp, thermal).
+
 **v2025.5.18-stable.6.1 (202505212)** — all-phones auto-detection hardening
 Makes automatic switch selection/locking correct across SoCs, kernels and current conventions,
 without manual config. All changes preserve the Pixel/Tensor and normal-Qualcomm paths exactly.
