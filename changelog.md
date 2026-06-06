@@ -1,3 +1,20 @@
+**v2025.5.18-stable.6.3.1 (202505215)** — SAFE bug-fix batch (resume logic from 6.2/6.3 unchanged)
+- **MediaTek battery-IDLE auto-selected.** The MTK `current_cmd 0 1` bypass (stops the cell while the
+  charger keeps feeding the system = true idle, `*/online` stays up, resumes on its own) is now tried
+  **before** `input_suspend` (which cuts the input → battery discharges + online drops → no-charge-til-
+  reboot). Fixes the Xiaomi/MTK "discharges at the limit" + "won't resume til reboot" reports. MTK-only
+  (`/proc/mtk_battery_cmd/*` absent elsewhere → no-op), still current-verified by `cycle_switches`, so a
+  kernel where it doesn't actually cut falls through to `input_suspend` exactly as before. Non-MTK devices
+  are byte-for-byte unaffected.
+- **`en_power_path` polarity fixed** (`1 0`→`1 1`): the power path stays ON while paused (idle), not OFF
+  (which forced discharge — "idle mode but battery still drains").
+- **Out-of-range capacity clamp** in write-config: a corrupted numeric pause/resume (e.g. `99999999`,
+  `150`) is all-digits so it passed the non-numeric fail-safe but was read as mV → never-pause/always-
+  resume = overcharge. Now clamped to a safe default (valid = 0–100 % or 3001–5000 mV).
+- **Scheduler `at()` is leading-zero/octal-safe** (`10#`): an `08:`/`09:` time no longer aborts under set -e.
+- **`cap_idle_threshold` + `parse_switches`** corrupted-config / uppercase-`DISABLED` guards.
+- Verified: 13/13 native+generic spec, 17/17 logic, 82-case sensitivity all unchanged; adversarial diff review GO.
+
 **v2025.5.18-stable.6.3 (202505214)** — HOTFIX: resume-after-limit on ALL phones (generic_rearm)
 Extends 6.2's Pixel/Tensor fix to non-Pixel devices (Motorola/Qualcomm/etc.). Some charging switches
 (input_suspend, */current_max 0, */charging_enabled 0) hold their "off" state across an unplug/replug,

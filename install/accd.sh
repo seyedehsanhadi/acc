@@ -146,6 +146,9 @@ if ! $_INIT; then
 
 
   cap_idle_threshold() {
+    # rc(6.3.1): guard unset/garbage pause_capacity (hand-corrupted config) -- return 1
+    # (do not special-case idle) rather than let an unset ${capacity[3]} abort under set -u.
+    case ${capacity[3]-} in ''|*[!0-9]*) return 1;; esac
     if [ ${capacity[3]} -gt 3000 ]; then
       [ ${capacity[3]} -gt 3900 ] && [ $(volt_now) -gt $(( ${capacity[3]} + 50 )) ]
     else
@@ -800,6 +803,12 @@ else
   filter_sw() {
     local over3=false
     [ $# -gt 3 ] && over3=true
+    # rc(6.3.1): the MTK current_cmd idle switch is promoted above input_suspend, but it can
+    # only be trusted where cycle_switches can read real current to verify it actually cuts.
+    # On a device with NO current sensor (currFile is the dummy), verification is blind, so
+    # drop current_cmd here and let input_suspend (which physically cuts the input) be chosen
+    # instead -- never blind-lock a non-cutting idle switch. Real-sensor devices keep it.
+    case "$1" in *mtk_battery_cmd/current_cmd*) [ "${currFile-}" != "${TMPDIR-}/.dummy-mcc" ] || return 1;; esac
     for f in $(echo $1); do
       if [ -f "$f" ] && chmod a+r $f 2>/dev/null \
         && {

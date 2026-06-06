@@ -71,6 +71,13 @@ case ${cm-} in true|false) :;; *) cm=false;; esac
 : ${pc:=75}
 : ${rc:=70}
 
+# rc(6.3.1): clamp out-of-range NUMERIC pause/resume to a safe default. A corrupted value
+# (e.g. 99999999, or 150) is all-digits so it passes the daemon's non-numeric fail-safe, but
+# it is then read as millivolts and makes the daemon NEVER pause / ALWAYS resume = overcharge.
+# Valid: 0-100 (percent) or 3001-5000 (mV). Anything else -> documented defaults.
+case $pc in *[!0-9]*) ;; *) { [ $pc -le 100 ] || { [ $pc -gt 3000 ] && [ $pc -le 5000 ]; }; } || pc=80;; esac
+case $rc in *[!0-9]*) ;; *) { [ $rc -le 100 ] || { [ $rc -gt 3000 ] && [ $rc -le 5000 ]; }; } || rc=75;; esac
+
 [ $rc -lt $pc ] || {
   [ $pc -gt 3000 ] && rc=$((pc - 150)) || rc=$((pc - 5))
 }

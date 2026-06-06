@@ -24,6 +24,18 @@ battery/constant_charge_current 5000000 0 main-charger/current_max 5000000 0 usb
 */charger_control 1 0
 */charging_state enabled disabled
 */enable_charg* 1 0
+
+# rc(6.3.1): MediaTek battery-idle, tried BEFORE input_suspend. current_cmd "0 1" stops the
+# CELL charge while the charger keeps feeding the system (TRUE idle: battery held flat,
+# */online stays 1) -- the same bypass Scene uses. input_suspend below instead CUTS the input
+# (battery discharges + */online drops to 0, which masks plug-state and blocks resume until a
+# reboot). current-verification in cycle_switches still gates this, so a kernel where it does
+# not actually stop charging simply falls through to input_suspend. MTK-only: absent on every
+# other SoC, so the line no-ops there (zero effect on non-MTK devices). The en_power_path
+# variant keeps the power path ON while paused (off-value 1, NOT 0 -- 0 would force discharge).
+/proc/mtk_battery_cmd/current_cmd 0::0 0::1
+/proc/mtk_battery_cmd/current_cmd 0::0 0::1 /proc/mtk_battery_cmd/en_power_path 1 1
+
 */input_suspend 0 1
 battery/batt_slate_mode 0 1
 battery/battery_input_suspend 0 1
@@ -89,8 +101,7 @@ battery/input_suspend 0 1 /proc/mtk_battery_cmd/en_power_path 1 1
 /proc/driver/charger_limit_enable 0 1 /proc/driver/charger_limit 100 pcap
 /proc/driver/charger_limit_enable 0 1 /proc/driver/charger_limit 100 battery/capacity
 /proc/driver/charger_limit_enable 0 1 /proc/driver/charger_limit 100 5
-/proc/mtk_battery_cmd/current_cmd 0::0 0::1
-/proc/mtk_battery_cmd/current_cmd 0::0 0::1 /proc/mtk_battery_cmd/en_power_path 1 0
+# (MediaTek current_cmd idle switches were promoted above input_suspend -- see rc6.3.1 note.)
 /sys/class/qcom-battery/batt_protect_en 0 1
 /sys/class/qcom-battery/night_charging 0 1
 /sys/module/lge_battery/parameters/charge_stop_level 100 battery/capacity battery/input_suspend 0 0

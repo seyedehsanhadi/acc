@@ -219,7 +219,7 @@ parse_switches() {
       enable) n="$n disable";;
       enabled) n="$n disabled";;
       DISABLE) n="$n ENABLE";;
-      DISABLED) n="$n DISABLED";;
+      DISABLED) n="$n ENABLED";;
       ENABLE) n="$n DISABLE";;
       ENABLED) n="$n DISABLED";;
       *) continue;;

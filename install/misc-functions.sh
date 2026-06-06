@@ -60,12 +60,20 @@ apply_on_plug() {
 at() {
   ${isAccd:-false} || return 0
   local file=$TMPDIR/schedules/${1/:}
-  if [ ! -f $file ] && [ $(date +%H%M) -ge ${file##*/} ] && [ $(date +%H) -eq ${1%:*} ]; then
+  # rc(6.3.1): reject a malformed schedule time BEFORE the arithmetic below -- an empty or
+  # non-numeric hour/HHMM ('at :30', 'at 8x:30') would make $((10#...)) abort under set -e
+  # (and $config is sourced unguarded), so guard it like the rest of the config fail-safes.
+  case ${1%:*} in ''|*[!0-9]*) return 0;; esac
+  case ${file##*/} in ''|*[!0-9]*) return 0;; esac
+  # rc(6.3.1): force base-10 -- a leading-zero clock (e.g. 08xx/09xx from date +%H%M, or an
+  # 08:/09: schedule) is parsed as invalid octal by the arithmetic test and aborts at() under
+  # set -e. 10# makes every comparison decimal regardless of leading zeros.
+  if [ ! -f $file ] && [ $((10#$(date +%H%M))) -ge $((10#${file##*/})) ] && [ $((10#$(date +%H))) -eq $((10#${1%:*})) ]; then
     mkdir -p ${file%/*}
     shift
     echo "$@" | sed 's/,/\;/g; s|^acc|/dev/acc|g; s| acc| /dev/acc|g' > $file
     . $file || :
-  elif [ $(date +%H%M) -lt ${file##*/} ]; then
+  elif [ $((10#$(date +%H%M))) -lt $((10#${file##*/})) ]; then
     rm $file 2>/dev/null || :
   fi
 }
