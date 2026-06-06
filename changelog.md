@@ -1,3 +1,22 @@
+**v2025.5.18-stable.6.3.3 (202505217)** — SAFETY ROLLBACK of the 6.3.2 MTK idle change (overcharge fix)
+6.3.2 auto-migrated MediaTek devices onto the `current_cmd` switch to get true idle. On some kernels
+(e.g. Xiaomi klee / HyperOS) `current_cmd` PASSES the 3-second scan check but does NOT actually hold
+the limit, so the battery charged past the cap = OVERCHARGE. Root lesson: never auto-move a device off
+a switch that is currently holding the limit, and a 3s current-drop check is not proof a switch holds.
+- **Reverted** the `current_cmd` promotion: it is no longer preferred over `input_suspend`, which on these
+  phones DOES stop charging. (`ctrl-files.sh` restored to the stable.6.3 ordering — `input_suspend` high,
+  `current_cmd` a low fallback.)
+- **Removed** the 6.3.2 auto-migration that cleared a locked `input_suspend`.
+- **Added** a one-shot, MTK-only revert that clears any switch 6.3.2 locked onto `current_cmd`
+  (`chargingSwitch=(...current_cmd...--) -> ()`), so already-affected devices re-scan and re-lock
+  `input_suspend`. Never left uncapped (empty switch re-scans on the next charge).
+- **KEPT** the safe input-cut resume fix from 6.3.2: `input_suspend`/`bypass`/`vbus` switches now resume
+  without a reboot (this only affects the RESUME path, never whether the switch holds, so it can't
+  overcharge). Also kept all 6.3.1 hardening (out-of-range clamp, scheduler octal-safety, guards).
+Net on affected MediaTek phones: the limit holds (no overcharge) AND charging resumes on re-plug without
+a reboot. True idle is left off where `current_cmd` is unreliable — safety beats idle. Non-MediaTek and
+non-input-cut devices are byte-for-byte unchanged; accd.sh untouched.
+
 **v2025.5.18-stable.6.3.2 (202505216)** — MediaTek TRUE-IDLE fix (idle, not discharge; resume w/o reboot)
 6.3.1 added the MTK `current_cmd` switch but it didn't take effect for existing users, for two
 reasons now fixed: (1) on mt6375-class MTK, `current_cmd` toggles only the charge FET, so the bare
