@@ -1,3 +1,25 @@
+**v2025.5.18-stable.6.3.2 (202505216)** — MediaTek TRUE-IDLE fix (idle, not discharge; resume w/o reboot)
+6.3.1 added the MTK `current_cmd` switch but it didn't take effect for existing users, for two
+reasons now fixed: (1) on mt6375-class MTK, `current_cmd` toggles only the charge FET, so the bare
+variant stops charging but the system runs off the BATTERY (discharge). True idle needs
+`current_cmd 0 1` PLUS `en_power_path 1` (keep the buck/power-path ON → charger feeds the system,
+battery flat, `*/online` stays up → charging resumes on its own). The `en_power_path` idle combo is
+now ordered BEFORE the bare `current_cmd` (scanner locks the first switch that stops charging, so
+the idle variant must come first; bare stays as the fallback where `en_power_path` is absent).
+(2) An upgrade never re-scans, and the daemon honors a LOCKED switch (`--`), so MTK users stayed on
+their old locked `input_suspend`. A one-shot, marker-guarded, MTK-only (`/proc/mtk_battery_cmd/
+current_cmd` present) migration clears a stale locked `input_suspend` so the daemon re-scans and
+picks the idle combo; if it doesn't verify, the scan re-locks a working switch (never left
+uncapped). Non-MTK devices and any other locked switch are untouched. Root cause + node/register
+mapping confirmed from the mt6375 kernel driver (F_CHG_EN vs F_BUCK_EN).
+- **input_suspend no-charge-til-reboot FIX (all input_suspend-only devices, e.g. MTK Moto).** An
+  `input_suspend` switch CUTS the charger input, so while paused `*/online` reads 0 -- meaning the
+  resume re-arm (gated on `online`) could NEVER fire and charging stayed off until a reboot. For
+  input_suspend-type switches the online signal is now treated as unreliable and the resume value
+  is written regardless of `online` (harmless when truly unplugged -- no VBUS, no phantom -- and it
+  un-masks online when actually plugged). The pause path still enforces the limit, so it can never
+  overcharge. All other switch types keep the online gate (no cosmetic unplug blip).
+
 **v2025.5.18-stable.6.3.1 (202505215)** — SAFE bug-fix batch (resume logic from 6.2/6.3 unchanged)
 - **MediaTek battery-IDLE auto-selected.** The MTK `current_cmd 0 1` bypass (stops the cell while the
   charger keeps feeding the system = true idle, `*/online` stays up, resumes on its own) is now tried

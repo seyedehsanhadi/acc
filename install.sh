@@ -276,6 +276,21 @@ cp -f $srcDir/README.* $data_dir/
 }
 
 
+# rc(6.3.2): MTK battery-idle re-scan. An existing MediaTek user can have a `battery/input_suspend`
+# switch LOCKED (trailing " --") in config from before -- the daemon honors the lock and never
+# re-scans, so the new current_cmd+en_power_path idle switch is never picked up on upgrade
+# (charging_switch="...input_suspend... --" persists). One-shot, marker-guarded, and ONLY when
+# (a) this device exposes the MTK idle node AND (b) the locked switch is input_suspend: clear
+# charging_switch so the next charge cycle re-scans and locks the idle combo. If that combo does
+# not verify, the scan simply re-locks a working switch -- never left uncapped. Non-MTK devices
+# and any other locked switch are untouched.
+[ -f $data_dir/.mtk-idle-rescan ] || {
+  { [ -e /proc/mtk_battery_cmd/current_cmd ] && [ -f $config ]; } && \
+    sed -i 's/^chargingSwitch=(.*input_suspend.*--.*)$/chargingSwitch=()/' $config 2>/dev/null || :
+  touch $data_dir/.mtk-idle-rescan 2>/dev/null || :
+}
+
+
 # KaiOS patches
 [ ! -d /data/usbmsc_mnt/ ] || {
   for i in $installDir/$id/*.sh; do

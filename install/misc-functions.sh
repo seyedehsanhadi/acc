@@ -316,7 +316,16 @@ enable_charging() {
       # power anyway, so skipping the flip changes nothing electrically -- it only
       # suppresses the cosmetic blip. State is still made correct below
       # (chDisabledByAcc=false), and the next real plug-in re-runs this and flips on.
-      if online; then
+      # rc(6.3.2): an input-CUT switch (input_suspend, *_suspend, *bypass*, vbus_disable) cuts
+      # the charger input, so while paused */online reads 0 -- meaning `online` can NEVER become
+      # true to re-arm it, and charging is stuck off until a reboot (the no-charge-til-reboot bug
+      # on these devices, e.g. MTK Moto). For these switches the online signal is unreliable, so
+      # flip ON regardless:
+      # writing the resume value (input_suspend=0) is harmless when truly unplugged (no VBUS =
+      # no current = no phantom "Charging") and un-masks online when actually plugged. The
+      # pause path still enforces the limit, so this can never overcharge. All OTHER switch
+      # types keep the online gate (avoids the cosmetic unplug blip).
+      if online || { case "${chargingSwitch[*]-}" in *suspend*|*bypass*|*vbus*) true;; *) false;; esac; }; then
         flip_sw on || cycle_switches on
       fi
 
