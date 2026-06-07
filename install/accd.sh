@@ -28,12 +28,19 @@ if ! $_INIT; then
   }
 
 
+  # rc(6.4): a capacity value is valid ONLY as 0-100 (percent) or 3001-5000 (mV). A
+  # numeric-but-out-of-range value (a hand-edited 99999999, or 150) passes the non-numeric
+  # guard, is then read as mV, and makes the daemon NEVER pause / ALWAYS resume = overcharge.
+  # write-config clamps on write, but the daemon re-sources the raw config every loop, so each
+  # comparator below range-guards INLINE (kept self-contained -- no shared helper to extract).
+
   _ge_pause_cap() {
     # fail safe: an empty/unset OR non-numeric pause_capacity must read as "at or
     # above the limit" so charging is paused, never left running above an unknown
     # or garbage limit -- a malformed value would otherwise make the numeric test
     # below error out and silently skip the pause (overcharge).
     case ${capacity[3]-} in ''|*[!0-9]*) return 0;; esac
+    { [ ${capacity[3]} -le 100 ] || { [ ${capacity[3]} -gt 3000 ] && [ ${capacity[3]} -le 5000 ]; }; } || return 0
     if [ ${capacity[3]} -gt 3000 ]; then
       [ $(volt_now) -ge ${capacity[3]} ]
     else
@@ -44,6 +51,7 @@ if ! $_INIT; then
 
   _le_pause_cap() {
     case ${capacity[3]-} in ''|*[!0-9]*) return 1;; esac
+    { [ ${capacity[3]} -le 100 ] || { [ ${capacity[3]} -gt 3000 ] && [ ${capacity[3]} -le 5000 ]; }; } || return 1
     if [ ${capacity[3]} -gt 3000 ]; then
       [ $(volt_now) -le ${capacity[3]} ]
     else
@@ -54,6 +62,7 @@ if ! $_INIT; then
 
   _lt_pause_cap() {
     case ${capacity[3]-} in ''|*[!0-9]*) return 1;; esac
+    { [ ${capacity[3]} -le 100 ] || { [ ${capacity[3]} -gt 3000 ] && [ ${capacity[3]} -le 5000 ]; }; } || return 1
     if [ ${capacity[3]} -gt 3000 ]; then
       [ $(volt_now) -lt ${capacity[3]} ]
     else
@@ -64,6 +73,7 @@ if ! $_INIT; then
 
   _gt_resume_cap() {
     case ${capacity[2]-} in ''|*[!0-9]*) return 0;; esac
+    { [ ${capacity[2]} -le 100 ] || { [ ${capacity[2]} -gt 3000 ] && [ ${capacity[2]} -le 5000 ]; }; } || return 0
     if [ ${capacity[2]} -gt 3000 ]; then
       [ $(volt_now) -gt ${capacity[2]} ]
     else
@@ -79,6 +89,7 @@ if ! $_INIT; then
     # fail safe: an empty/unset OR non-numeric resume_capacity must read as "do
     # not resume", so a bad/garbage config can never re-enable charging on its own
     case ${capacity[2]-} in ''|*[!0-9]*) return 1;; esac
+    { [ ${capacity[2]} -le 100 ] || { [ ${capacity[2]} -gt 3000 ] && [ ${capacity[2]} -le 5000 ]; }; } || return 1
     if [ ${capacity[2]} -gt 3000 ]; then
       [ $(volt_now) -le ${capacity[2]} ]
     else
@@ -406,8 +417,13 @@ if ! $_INIT; then
           # scan ("another scan already running"). Two auto-lockers also raced. Now the
           # in-process locker is the ONLY auto path; below we just monitor + surface it.
           # Debounced so a transient plug/unplug blip is never mistaken for charging.
-          if online && _ge_pause_cap && ! not_charging \
-             && sleep 2 && online && _ge_pause_cap && ! not_charging
+          # rc(6.4): gate on present (cable attached), NOT online. An input-cut switch
+          # (input_suspend, current_max 0) drives */online to 0 while still plugged, so the
+          # old online gate made this monitor BLIND on exactly the cut-switch devices that
+          # most need it (Xiaomi/HyperOS): a non-holding cut would read online=0 -> treated
+          # as "unplugged" -> breach cleared -> overcharge undetected. present stays 1.
+          if present && _ge_pause_cap && ! not_charging \
+             && sleep 2 && present && _ge_pause_cap && ! not_charging
           then
             if [[ "${chargingSwitch[*]-}" = *\ -- ]]; then
               # CONTRACT MONITOR: a LOCKED switch is not holding the limit. After a few
@@ -809,6 +825,16 @@ else
     # drop current_cmd here and let input_suspend (which physically cuts the input) be chosen
     # instead -- never blind-lock a non-cutting idle switch. Real-sensor devices keep it.
     case "$1" in *mtk_battery_cmd/current_cmd*) [ "${currFile-}" != "${TMPDIR-}/.dummy-mcc" ] || return 1;; esac
+    # rc(6.4): drop pure throttle / feature-toggle nodes that scan-OK-but-never-HOLD --
+    # they reduce current or re-flag a mode, they do not stop charging, so locking one
+    # only overcharges-then-recovers. cycle_switches' sustained current check would reject
+    # them anyway; excluding up front avoids the lock window + test latency. NOTE: only the
+    # unambiguous throttles are listed. Device-dependent stops (siop_level on Samsung,
+    # night_charging on Xiaomi) are NOT excluded -- the sustained current check validates
+    # those per device, so we never remove a switch that genuinely holds somewhere.
+    case "$1" in
+      *step_charging*|*restricted_charging*|*cool_mode*|*cool_down*|*system_temp_level*|*temp_cool*|*hmt_ta_charge*) return 1;;
+    esac
     for f in $(echo $1); do
       if [ -f "$f" ] && chmod a+r $f 2>/dev/null \
         && {

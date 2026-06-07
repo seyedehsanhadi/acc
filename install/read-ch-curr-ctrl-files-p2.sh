@@ -20,7 +20,11 @@ if [ ! -f $TMPDIR/.mcc-read ]; then
       case "$defaultValue" in
         ""|-*|*" "*|[01]|*[a-zA-Z]*) continue;;
         [1-9]*)
-          if [ "$defaultValue" -lt 10000 ]; then
+          # rc(6.4): unit cutoff unified to 16000 to MATCH batt-interface.sh (was 10000 here,
+          # 16000 there -> in the 10000-15999 band one read it as uA and the other as mA, a
+          # 1000x current misclassification). Real uA charge currents are >=~100000 and real
+          # mA are <=~9999, so the 10000-15999 gap is treated as mA everywhere.
+          if [ "$defaultValue" -lt 16000 ]; then
             # milliamps
             echo ${file}::v::$defaultValue >> ${currCtrl}_
           else

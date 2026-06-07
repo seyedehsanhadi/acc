@@ -114,7 +114,8 @@ battery/input_suspend 0 1 /proc/mtk_battery_cmd/en_power_path 1 1
 /sys/devices/platform/soc/soc:qcom,pmic_glink/soc:qcom,pmic_glink:mmi,qti-glink-charger/force_usb_suspend 0 1
 /sys/kernel/debug/google_charger/chg_mode 0 1
 /sys/kernel/fast_charge/force_fast_charge 1 0
-/sys/module/qpnp_adaptive_charge/parameters/blocking 0 1
+# rc(6.4): removed /sys/module/qpnp_adaptive_charge/parameters/blocking -- it is a READ-ONLY
+# status node (kernel set handler returns -EINVAL), so 0/1 writes are no-ops: a dead switch.
 #/sys/module/qpnp_fg/parameters/batt_range_pct 0 1
 #/sys/module/qpnp_smbcharger/parameters/dynamic_icl_wipower_en 0 1
 #battery/charge_control_limit 0 1
@@ -147,6 +148,12 @@ battery/ChargerEnable 1 0
 
 # deprecated
 battery/op_disable_charge 0 1 battery/input_suspend 0 0
+
+# rc(6.4): OnePlus/Oppo/Realme (OPLUS) -- the /sys/class/oplus_chg/ symlink path, distinct
+# from the relative oplus_chg/ and absolute /sys/oplus/ spellings already above. Verified in
+# GPL kernel (oplus_configfs.c store() -> oplus_chg_turn_off_charging() on 0). on=1/off=0.
+# Appended at END so every existing device keeps its current switch (order = selection priority).
+/sys/class/oplus_chg/battery/mmi_charging_enable 1 0
 "
 }
 

@@ -89,7 +89,7 @@ cycle_switches() {
   local on=
   local off=
   local strict=${3:-false}
-  local _cc= _cbase= _thr= _mag= _bs= _cs= _rej=
+  local _cc= _cbase= _thr= _mag= _bs= _cs= _rej= _chg_n= _chg_last= _this= _s=
 
   touch $TMPDIR/.testingsw
 
@@ -131,32 +131,35 @@ cycle_switches() {
           # pass; cycle_switches_off runs a lenient fallback afterwards, so a
           # device whose ONLY working switch flickers is still capped (no regression).
           if $strict; then
-            sleep ${loopDelay[0]}
-            # Verify the switch actually STOPPED current flow, not just that status reads
-            # "not charging". A level/trap node (e.g. Tensor charging_state) reports stopped
-            # while current keeps flowing -- reject it if |current| is still clearly nonzero
-            # (>50mA on a uA-reporting kernel; lenient/no-op on mA kernels, so no regression).
-            # Judge by CURRENT only, not the status filter ($2). A switch "works" if current
-            # is no longer strongly positive (charging) -- whether it idles (~0) or discharges
-            # (negative). The old "must be Idle" filter rejected discharge-only devices (e.g.
-            # Pixel/Tensor charge_stop_level 100 5), so the working switch never locked. An
-            # unreadable current is treated as "still charging" (cautious -- don't lock blind).
-            _cc=$(cat "$currFile" 2>/dev/null)
-            # Sign-agnostic + unit-scaled anti-flicker. Reject (treat as "still charging") only if
-            # current still flows in the SAME direction as the pre-pause baseline at a clearly
-            # non-zero magnitude. Strips sign for the magnitude gate (uA vs mA via ampFactor_) and
-            # compares direction to the baseline, so an inverted-current kernel is judged correctly
-            # AND a Pixel/Tensor discharge-hold (current reverses) is NOT misread as still-charging.
-            # Unreadable current -> cautious reject (never lock blind), matching the old default.
+            # SUSTAINED-HOLD verify (6.4-rc1). The old check sampled current ONCE after a
+            # single settle: a switch that stops current for that one read then lets the
+            # firmware re-arm charging (MediaTek current_cmd on Xiaomi HyperOS/klee: passes
+            # a 3s check, then bounces back -> overcharge) was accepted and LOCKED. Now sample
+            # the SIGNED current 3x across the settle window; reject the switch if current is
+            # charging-direction in the LAST sample OR in a majority of samples. Judged ONLY on
+            # current delta vs the pre-pause baseline -- NEVER status/online, which both read
+            # "stopped" on an input-cut switch while current still flows. A switch that settles
+            # INTO a hold (charging early, stopped late) is still accepted (last sample stopped),
+            # so slow USB-PD re-negotiation is not falsely rejected. Unreadable current counts as
+            # "still charging" (cautious -- never lock blind). Sign-agnostic + unit-scaled (uA/mA
+            # via ampFactor_), so inverted-current kernels and discharge-holds are judged right.
             _thr=50000; [ "${ampFactor_:-1000000}" -ge 1000000 ] 2>/dev/null || _thr=50
-            _rej=true
-            case "${_cc:-x}" in
-              ''|x|*[!0-9-]*) _rej=true ;;
-              *) _mag=${_cc#-}; _bs=p; _cs=p
-                 case "${_cbase:-0}" in -*) _bs=n ;; esac
-                 case "$_cc" in -*) _cs=n ;; esac
-                 if [ "${_mag:-0}" -gt "$_thr" ] 2>/dev/null && [ "$_cs" = "$_bs" ]; then _rej=true; else _rej=false; fi ;;
-            esac
+            _chg_n=0; _chg_last=1
+            for _s in 1 2 3; do
+              sleep ${loopDelay[0]}
+              _cc=$(cat "$currFile" 2>/dev/null)
+              _this=1
+              case "${_cc:-x}" in
+                ''|x|*[!0-9-]*) _this=1 ;;
+                *) _mag=${_cc#-}; _bs=p; _cs=p
+                   case "${_cbase:-0}" in -*) _bs=n ;; esac
+                   case "$_cc" in -*) _cs=n ;; esac
+                   if [ "${_mag:-0}" -gt "$_thr" ] 2>/dev/null && [ "$_cs" = "$_bs" ]; then _this=1; else _this=0; fi ;;
+              esac
+              [ "$_this" = 1 ] && _chg_n=$((_chg_n + 1))
+              _chg_last=$_this
+            done
+            if [ "$_chg_last" = 1 ] || [ "$_chg_n" -ge 2 ]; then _rej=true; else _rej=false; fi
             if $_rej; then
               # resumed on its own -> flicker; keep charging OFF (never pulse it
               # back on while we are trying to pause at/above the limit), then
@@ -418,7 +421,7 @@ flip_sw() {
     # cap (60), so it can only cap low, never charge on. The ON (resume) value is 100,
     # NOT pcap: charge_stop_level latches "stopped", and only a higher value (100)
     # re-arms the charger -- writing the limit value back would leave it frozen.
-    [ "$2" != pcap ] || case ${capacity[3]-} in ''|*[!0-9]*) on=60;; *) on=${capacity[3]};; esac
+    [ "$2" != pcap ] || on=100
     if [ $3 = 3600mV ]; then
       off=$(cat $1)
       [ $off -lt 10000 ] && off=3600 || off=3600000

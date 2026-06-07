@@ -83,6 +83,26 @@ online_f() {
 }
 
 
+# rc(6.4): "is the cable physically attached" -- distinct from online() ("is the
+# charge path energized"). An input-cut switch (input_suspend / current_max 0)
+# drives */online to 0 WHILE the cable is still plugged, which blinded the breach
+# watchdog (it read online=0 -> "unplugged" -> cleared the breach). POWER_SUPPLY_PRESENT
+# stays 1 across an input cut. Falls back to online() on kernels with no present node.
+present_f() {
+  ls -1 */present 2>/dev/null | grep -Ei '^ac/|^dc/|^mains/|^main-?charger/|^mtk\-.*(chg|charger)/|^pc_port/|^smb[0-9]{3}\-usb/|^usb/|ucsi.*pmic|oplus.*chg|.*glink.*charg|^wireless/' || :
+}
+
+present() {
+  local i= seen=false
+  for i in $(present_f); do
+    seen=true
+    case "$(cat $i 2>/dev/null)" in 1) return 0;; esac
+  done
+  # no usable present node -> defer to online (a path that is energized is plugged)
+  $seen && return 1 || online
+}
+
+
 read_status() {
   local status="$(cat $battStatus)"
   case "$status" in

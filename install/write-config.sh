@@ -78,14 +78,25 @@ case ${cm-} in true|false) :;; *) cm=false;; esac
 case $pc in *[!0-9]*) ;; *) { [ $pc -le 100 ] || { [ $pc -gt 3000 ] && [ $pc -le 5000 ]; }; } || pc=80;; esac
 case $rc in *[!0-9]*) ;; *) { [ $rc -le 100 ] || { [ $rc -gt 3000 ] && [ $rc -le 5000 ]; }; } || rc=75;; esac
 
+# rc(6.4): pause and resume MUST be in the same unit domain (both percent <=3000, or both
+# mV >3000). A mixed config (e.g. pause=5000mV, resume=80%) passes the rc<pc test below
+# (80<5000) but the daemon then reads pause as mV -> volt_now never reaches 5000 -> it
+# NEVER pauses = overcharge. Coerce resume into pause's domain before the ordering guard.
+if [ $pc -gt 3000 ]; then
+  [ $rc -gt 3000 ] || rc=$((pc - 150))
+else
+  [ $rc -le 3000 ] || rc=$((pc - 5))
+fi
+
 [ $rc -lt $pc ] || {
   [ $pc -gt 3000 ] && rc=$((pc - 150)) || rc=$((pc - 5))
 }
 
-# ensure shutdown_capacity < resume_capacity. Without this an inverted config (e.g.
-# shutdown >= resume) could make the daemon shut the phone down at a high level or never
-# pause. Only meaningful in %-mode (pc <= 3000); skip in mV-mode.
-[ $pc -gt 3000 ] || { [ ${sc:-5} -lt $rc ] || sc=$(( rc > 1 ? rc - 1 : 0 )); }
+# ensure shutdown_capacity < resume_capacity. Without this an inverted config (shutdown >=
+# resume) could make the daemon shut the phone down ABOVE the resume level.
+# rc(6.4): enforce in BOTH percent and mV modes (was percent-only -- a mV config such as
+# shutdown=4000mV resume=4100mV slipped through and shut the phone down at 4.0V / ~60%).
+[ ${sc:-5} -lt $rc ] || sc=$(( rc > 1 ? rc - 1 : 0 ))
 
 : ${mt:=50}
 : ${rt:=40}
