@@ -833,7 +833,7 @@ else
     # night_charging on Xiaomi) are NOT excluded -- the sustained current check validates
     # those per device, so we never remove a switch that genuinely holds somewhere.
     case "$1" in
-      *step_charging*|*restricted_charging*|*cool_mode*|*cool_down*|*system_temp_level*|*temp_cool*|*hmt_ta_charge*) return 1;;
+      *step_charging*|*restricted_charging*|*cool_mode*|*cool_down*|*system_temp*level*|*temp_cool*|*hmt_ta_charge*) return 1;;
     esac
     for f in $(echo $1); do
       if [ -f "$f" ] && chmod a+r $f 2>/dev/null \

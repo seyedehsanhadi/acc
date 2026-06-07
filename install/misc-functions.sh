@@ -145,21 +145,33 @@ cycle_switches() {
             # via ampFactor_), so inverted-current kernels and discharge-holds are judged right.
             _thr=50000; [ "${ampFactor_:-1000000}" -ge 1000000 ] 2>/dev/null || _thr=50
             _chg_n=0; _chg_last=1
-            for _s in 1 2 3; do
-              sleep ${loopDelay[0]}
-              _cc=$(cat "$currFile" 2>/dev/null)
-              _this=1
-              case "${_cc:-x}" in
-                ''|x|*[!0-9-]*) _this=1 ;;
-                *) _mag=${_cc#-}; _bs=p; _cs=p
-                   case "${_cbase:-0}" in -*) _bs=n ;; esac
-                   case "$_cc" in -*) _cs=n ;; esac
-                   if [ "${_mag:-0}" -gt "$_thr" ] 2>/dev/null && [ "$_cs" = "$_bs" ]; then _this=1; else _this=0; fi ;;
-              esac
-              [ "$_this" = 1 ] && _chg_n=$((_chg_n + 1))
-              _chg_last=$_this
-            done
-            if [ "$_chg_last" = 1 ] || [ "$_chg_n" -ge 2 ]; then _rej=true; else _rej=false; fi
+            # If the pre-pause baseline current is unreadable, the charging DIRECTION is
+            # unknown, so a hold cannot be judged on an inverted-sign kernel -> reject
+            # (never lock blind). Otherwise sample 3x.
+            case "${_cbase:-x}" in
+              ''|x|*[!0-9-]*) _chg_last=1; _chg_n=3 ;;
+              *)
+                for _s in 1 2 3; do
+                  sleep ${loopDelay[0]}
+                  _cc=$(cat "$currFile" 2>/dev/null)
+                  _this=1
+                  case "${_cc:-x}" in
+                    ''|x|*[!0-9-]*) _this=1 ;;
+                    *) _mag=${_cc#-}; _bs=p; _cs=p
+                       case "$_cbase" in -*) _bs=n ;; esac
+                       case "$_cc" in -*) _cs=n ;; esac
+                       if [ "${_mag:-0}" -gt "$_thr" ] 2>/dev/null && [ "$_cs" = "$_bs" ]; then _this=1; else _this=0; fi ;;
+                  esac
+                  [ "$_this" = 1 ] && _chg_n=$((_chg_n + 1))
+                  _chg_last=$_this
+                done ;;
+            esac
+            # reject if the LAST sample is still charging-direction, OR all three are. A
+            # switch that settles INTO a hold (charging early, stopped late) is accepted
+            # (honours slow USB-PD re-negotiation); klee/MTK current_cmd bounces back and
+            # STAYS charging -> last sample charging -> rejected. The rare "charges then dips
+            # only at the final sample" non-holder is caught by the runtime breach watchdog.
+            if [ "$_chg_last" = 1 ] || [ "$_chg_n" -ge 3 ]; then _rej=true; else _rej=false; fi
             if $_rej; then
               # resumed on its own -> flicker; keep charging OFF (never pulse it
               # back on while we are trying to pause at/above the limit), then
