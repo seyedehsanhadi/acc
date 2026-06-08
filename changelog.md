@@ -1,3 +1,21 @@
+**v2025.5.18-6.4-rc1 (202505218)** — SAFETY + DIAGNOSTICS (pre-release)
+No change to the 6.2/6.3 resume logic or to how charging is controlled on a working device; every change is
+stricter, append-only, a clamp, or diagnostic-only.
+- **Sustained-hold switch lock.** A switch is locked only after current stays stopped across 3 samples, in
+  BOTH the daemon auto-locker (`cycle_switches`) and the manual scanner (`acc-switch-scan.sh`). A switch that
+  stops then re-arms (MediaTek `current_cmd` on Xiaomi/HyperOS klee) is rejected — overcharge stopped at the
+  source, not after a breach.
+- **Breach watchdog on `present`, not `online`.** An input-cut switch drives `*/online` to 0 while the cable
+  is attached, blinding the old watchdog on those devices; it now uses `POWER_SUPPLY_PRESENT`.
+- **Fail-safe config.** Out-of-range pause/resume/shutdown values fail safe; pause/resume forced into one
+  unit domain (no mixed mV/% never-pause); µA/mA unit threshold unified to 16000.
+- **Throttle nodes excluded** as switch candidates (`step_charging`, `restricted_charging`, `cool_mode/down`,
+  `system_temp_level`, `temp_cool`, `hmt_ta_charge`) — they scan-OK but never hold.
+- **`acca --state`** reads `battery/uevent` atomically and reports a real `statusTrust` (was always "unknown")
+  plus a `native` block for Pixel/Tensor (where an empty `chargingSwitch` is normal, not a fault).
+- `flip_sw` on=100 re-arm; dropped the dead read-only qpnp `blocking` node; added the OPLUS `oplus_chg`
+  `mmi_charging_enable` path. Existing configs unchanged.
+
 **v2025.5.18-stable.6.3.3 (202505217)** — SAFETY ROLLBACK of the 6.3.2 MTK idle change (overcharge fix)
 6.3.2 auto-migrated MediaTek devices onto the `current_cmd` switch to get true idle. On some kernels
 (e.g. Xiaomi klee / HyperOS) `current_cmd` PASSES the 3-second scan check but does NOT actually hold
