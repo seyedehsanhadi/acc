@@ -26,8 +26,10 @@ fi
 ! _grep '^chargingSwitch=./sys/module/lge_battery/parameters/charge_stop_level' \
   || loopCmd='[ $(cat battery/input_suspend) != 1 ] || echo 0 > battery/input_suspend'
 
-# idle mode - sony xperia
-echo 1 > battery_ext/smart_charging_activation 2>/dev/null || :
+# idle mode - sony xperia: enable the firmware smart-charging gate ONLY when the Sony
+# charge-interruption node actually exists (rc(6.4): was unconditional every accd init, which
+# could enable a competing firmware charge manager on any non-Sony device exposing the node).
+[ -e battery_ext/smart_charging_interruption ] && echo 1 > battery_ext/smart_charging_activation 2>/dev/null || :
 
 # mt6795, exclude ChargerEnable switches (troublesome)
 ! getprop | grep '\[mt6795\]' > /dev/null || {

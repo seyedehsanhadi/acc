@@ -168,7 +168,7 @@ in_raw() { [ -n "$inFile" ] && { c=$(cat "$inFile" 2>/dev/null); echo "${c:-0}";
 #           clean  = stopped, input indeterminate (fine for Range Cycle)
 #   rok:    1 = charging verifiably RESUMED after re-arm (guarantees the X..Y cycle)
 test_switch() {
-  local line=$1 base baseRaw chgNeg revd nr now i ms mode lim klass inb rok
+  local line=$1 base baseRaw chgNeg revd nr now i ms mode lim klass inb rok held ci cnr cnow crev
   # widened 14->20 polls: some chargers renegotiate USB-PD on each toggle and take
   # longer to resume to the charging baseline; do not falsely "skip" them.
   i=0; while [ "$(abs "$(raw)")" -le "$THR" ] 2>/dev/null && [ "$i" -lt 20 ]; do nap; i=$((i+1)); done
@@ -196,6 +196,18 @@ test_switch() {
     fi
     # "stopped" = current reversed direction (now discharging) OR magnitude fell under 1/3 baseline
     if [ "$revd" = 1 ] || [ "$now" -lt $(( base / 3 )) ] 2>/dev/null; then
+      # rc(6.4): SUSTAINED-hold confirm (mirrors the daemon's cycle_switches). The detection
+      # above fires on a SINGLE sample -- a switch that stops current for one read then lets
+      # the firmware re-arm (MTK current_cmd on Xiaomi/HyperOS klee) would otherwise be
+      # accepted and --apply-LOCKED here. Re-sample a few times; if current returns to the
+      # charging direction above THR, it did NOT hold -> fail (do not lock a non-holding switch).
+      held=1; ci=0
+      while [ "$ci" -lt 3 ]; do
+        nap; ci=$((ci+1)); cnr=$(raw); cnow=$(abs "$cnr"); crev=0
+        if [ "$chgNeg" = 1 ]; then [ "$cnr" -gt 0 ] 2>/dev/null && crev=1; else [ "$cnr" -lt 0 ] 2>/dev/null && crev=1; fi
+        [ "$crev" = 0 ] && [ "$cnow" -ge $(( base / 3 )) ] 2>/dev/null && { held=0; break; }
+      done
+      [ "$held" = 1 ] || { restore_on "$line"; cur_line=; echo fail; return; }
       mode=idle; [ "$revd" = 1 ] && mode=discharging
       # classify hold-quality from the CHARGER-side current
       inb=$(abs "$(in_raw)")
