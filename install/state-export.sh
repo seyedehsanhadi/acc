@@ -53,15 +53,18 @@ _se_meta() {
 }
 
 
-# Status: prefer the daemon-computed _status; otherwise derive a best-effort value from
-# the current sign so the field is meaningful even on the front-end/on-demand path that
-# never calls read_status. (Low-confidence -- sensing.statusTrust stays "unknown" until
-# subsystem C calibrates polarity/units.)
+# Status source priority: daemon-computed _status > kernel uevent POWER_SUPPLY_STATUS
+# (read atomically with current, so they are coherent) > current-sign derivation. $1=current,
+# $2=uevent status string. "Not charging" maps to Idle (same as read_status).
 _se_status() {
   local s="${_status:-}"
   case "$s" in
     ''|unknown) ;;
     *) printf '%s' "$s"; return 0;;
+  esac
+  case "${2:-}" in
+    Charging|Discharging|Full) printf '%s' "$2"; return 0;;
+    Not\ charging) printf 'Idle'; return 0;;
   esac
   case "${1:-null}" in
     null|'') printf 'unknown';;
@@ -114,29 +117,82 @@ _se_class() {
 }
 
 
+# statusTrust: does the kernel status AGREE with the current-measured class?
+#   trusted    = kernel status matches the measured current direction (reliable)
+#   measured   = they DISAGREE -> the kernel status is lying (e.g. Tensor reports a status
+#                that does not match current); trust the CURRENT, not the status node
+#   unverified = not enough signal (current unreadable, or status Unknown)
+# $1=status $2=measuredClass $3=current
+_se_trust() {
+  case "${3:-null}" in null|'') echo unverified; return;; esac
+  local sc=
+  case "$1" in
+    Charging) sc=charging;;
+    Discharging) sc=discharging;;
+    Idle|Full|Not*charging) sc=idle;;
+    *) echo unverified; return;;
+  esac
+  case "$2" in
+    bypass|idle)  [ "$sc" = idle ]        && echo trusted || echo measured;;
+    charging)     [ "$sc" = charging ]    && echo trusted || echo measured;;
+    discharging)  [ "$sc" = discharging ] && echo trusted || echo measured;;
+    *) echo unverified;;
+  esac
+}
+
+
+# Native firmware charge-limit block. On Pixel/Tensor (google,charger) and similar, ACC
+# controls charging via charge_stop_level/charge_start_level, NOT a chargingSwitch -- so an
+# empty chargingSwitch is normal there. Expose it so the front-end can show "native mode"
+# instead of "no switch".
+_se_native() {
+  local d sl st
+  for d in /sys/devices/platform/google,charger /sys/devices/platform/soc/soc:google,charger; do
+    [ -e "$d/charge_stop_level" ] || continue
+    sl=$(cat "$d/charge_stop_level" 2>/dev/null); st=$(cat "$d/charge_start_level" 2>/dev/null)
+    printf '"native":{"enabled":true,"stopLevel":%s,"startLevel":%s}' "$(_se_num "$sl")" "$(_se_num "$st")"
+    return
+  done
+  printf '"native":{"enabled":false}'
+}
+
+
 # Build and atomically publish $TMPDIR/state.json. Best-effort; never propagates failure.
 write_state() {
   ( set +eu
     local f="$TMPDIR/state.json"
     local t="$TMPDIR/.state.json.tmp"
     local lvl volt cur tmp status ts userLocked
+    local ue ue_st ue_cur ue_cap ue_volt ue_temp
 
-    lvl=$(_se_num "$(batt_cap 2>/dev/null)")
-    volt=$(_se_num "$(volt_now 2>/dev/null)")
-    cur=$(_se_num "$(cat "$currFile" 2>/dev/null)")
-    tmp=$(_se_num "$(cat "$temp" 2>/dev/null)")
-    status=$(_se_status "$cur")
+    # ONE atomic read of battery/uevent so status+current+... are coherent (separate cats can
+    # straddle a state change -- the root reason statusTrust was perpetually "unknown"). Fall
+    # back to the individual nodes for any field the uevent does not carry.
+    ue=$(cat /sys/class/power_supply/battery/uevent 2>/dev/null)
+    ue_st=$(printf '%s\n' "$ue"   | sed -n 's/^POWER_SUPPLY_STATUS=//p'      | head -1)
+    ue_cur=$(printf '%s\n' "$ue"  | sed -n 's/^POWER_SUPPLY_CURRENT_NOW=//p' | head -1)
+    ue_cap=$(printf '%s\n' "$ue"  | sed -n 's/^POWER_SUPPLY_CAPACITY=//p'    | head -1)
+    ue_volt=$(printf '%s\n' "$ue" | sed -n 's/^POWER_SUPPLY_VOLTAGE_NOW=//p' | head -1)
+    ue_temp=$(printf '%s\n' "$ue" | sed -n 's/^POWER_SUPPLY_TEMP=//p'        | head -1)
+
+    lvl=$(_se_num "${ue_cap:-$(batt_cap 2>/dev/null)}")
+    volt=$(_se_num "${ue_volt:-$(volt_now 2>/dev/null)}")
+    cur=$(_se_num "${ue_cur:-$(cat "$currFile" 2>/dev/null)}")
+    tmp=$(_se_num "${ue_temp:-$(cat "$temp" 2>/dev/null)}")
+    status=$(_se_status "$cur" "$ue_st")
     ts=$(_se_num "$(date +%s 2>/dev/null)")
     userLocked=false
     case "${chargingSwitch[*]-}" in *" --"*) userLocked=true;; esac
 
-    local plugged units polarity mclass conf
+    local plugged units polarity mclass conf trust
     plugged=$(_se_plugged)
     units=$(_se_units "$cur")
     polarity=$(_se_polarity "$status" "$cur")
     mclass=$(_se_class "$cur" "$plugged" "$units")
+    trust=$(_se_trust "$status" "$mclass" "$cur")
     conf=low
     { [ "$units" != unknown ] && [ "$cur" != null ]; } && conf=medium
+    [ "$trust" = trusted ] && conf=high
 
     {
       printf '{"schemaVersion":1,"ts":%s,' "$ts"
@@ -149,8 +205,9 @@ write_state() {
         "$(_se_esc "${prioritizeBattIdleMode-}")"
       # smart sensing, measured live for any SoC
       printf ',"plugged":%s' "$plugged"
-      printf ',"sensing":{"currentUnits":"%s","polarity":"%s","statusTrust":"unknown","confidence":"%s"}' \
-        "$units" "$polarity" "$conf"
+      printf ',%s' "$(_se_native)"
+      printf ',"sensing":{"currentUnits":"%s","polarity":"%s","statusTrust":"%s","confidence":"%s"}' \
+        "$units" "$polarity" "$trust" "$conf"
       printf ',"switch":{"locked":"%s","userLocked":%s,"measuredClass":"%s"}' \
         "$(_se_esc "${chargingSwitch[*]-}")" "$userLocked" "$mclass"
       printf '}\n'
