@@ -380,7 +380,7 @@ if ! $_INIT; then
 
         # disable charging after a reboot, if min < capacity < max
         if $offMid && [ -f $TMPDIR/.minCapMax ] && _lt_pause_cap && _gt_resume_cap; then
-          disable_charging
+          disable_charging || :
           force_off
           sleep ${loopDelay[1]}
           rm $TMPDIR/.minCapMax 2>/dev/null || :
@@ -400,7 +400,14 @@ if ! $_INIT; then
             chDisabledByAcc=true
             [ $_status != Discharging ] || xIdle=true
           else
-            disable_charging
+            # rc(6.4-rc2): "|| :" -- disable_charging returns 7 on TOTAL switch failure
+            # (no node could stop charging). The daemon runs under "set -eu", so an
+            # unguarded plain call here EXITS the daemon (verified on mksh), which fires
+            # exxit -> re-enables charging -> the limit is gone AND the rc19 give-up
+            # monitor below never runs. Swallow the failure so the loop continues to that
+            # monitor and keeps retrying. (Calls inside is_charging are if-suppressed and
+            # safe; only these then-body call sites needed guarding.)
+            disable_charging || :
             force_off
           fi
           ! ${resetBattStats[0]} || {
@@ -476,7 +483,7 @@ if ! $_INIT; then
 
           if [ -z "${cooldownCurrent-}" ]; then
             dsys_batt set ac 1
-            disable_charging
+            disable_charging || :
             sleep ${cooldownRatio[1]:-${loopDelay[0]}}
             enable_charging
             sleep ${cooldownRatio[0]:-${loopDelay[0]}}
@@ -502,7 +509,7 @@ if ! $_INIT; then
 
         if $xIdle && _le_pause_cap; then
           enable_charging
-          disable_charging
+          disable_charging || :
           xIdle=false
           xIdleCount=$((xIdleCount + 1))
         # enable charging under <conditions>
@@ -613,7 +620,14 @@ if ! $_INIT; then
     online || return 0
     if { $freshPlug && _lt_pause_cap; } || _le_resume_cap; then
       [ "$(read_status)" = Charging ] && return 0 || :
-      chmod 0644 $gcsl 2>/dev/null || :
+      # rc(6.4-rc2): stop=100 ALONE re-arms the Tensor FET only SLOWLY (1-3 min via the
+      # charger state machine + PD renegotiation -- measured on Pixel 9a/tegu, where the
+      # cell stayed not-charging for minutes). The firmware resumes immediately when its
+      # own condition capacity <= charge_start_level is met, so also raise start_level
+      # above the current SOC for the pulse; sync_native_limit restores the real start on
+      # the next line, so there is no overshoot and the cap is never disabled.
+      chmod 0644 $gcsl $gcst 2>/dev/null || :
+      echo 100 > $gcst 2>/dev/null || :
       echo 100 > $gcsl 2>/dev/null || :
       sleep ${loopDelay[0]}
       sync_native_limit
@@ -840,7 +854,7 @@ else
         && {
           ! cat $f > /dev/null 2>&1 \
           || [ -z "$(cat $f 2>/dev/null)" ] \
-          || grep -Eiq '^([0-9]+|0 0|0 1|(en|dis)abl(e|ed))$' $f
+          || grep -Eiq '^([0-9]+|0 0|0 1|on|off|(en|dis)abl(e|ed))$' $f
         }
       then
         $over3 && printf "$f $2 $3 " || printf "$f $2 $3\n"

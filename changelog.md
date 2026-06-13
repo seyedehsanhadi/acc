@@ -1,3 +1,18 @@
+**v2025.5.18-6.4-rc2 (202505219)** — field-driven fixes (pre-release)
+Driven by real reports from the acc-compat companion tester. All changes are additive or stricter; existing
+configs are untouched.
+- **Daemon survives "no switch works".** `disable_charging` returns 7 on total switch failure and the daemon
+  runs under `set -eu`; the three unguarded then-body call sites (`accd.sh`) used to EXIT the daemon — which
+  fired `exxit`, re-enabled charging, and skipped the rc19 "no switch holds — scan in AccA" notice. They are
+  now `disable_charging || :`, so the loop keeps retrying and reaches that monitor. (mksh-verified.)
+- **Pixel/Tensor native-limit resumes instantly.** `native_unlatch` now raises `charge_start_level` to 100
+  alongside `charge_stop_level=100`; `sync_native_limit` restores the real levels on the next line. Pulsing
+  only the stop level re-armed the FET 1–3 min late on current Pixel firmware (measured on Pixel 9a/tegu).
+- **String-valued switches kept.** `filter_sw` now accepts `on`/`off` node values (e.g. nubia
+  `charger_bypass`), which the auto-detect value filter previously dropped.
+- **New node layout.** `qcom-battery/odm_battery/{input_suspend,charging_enabled,hq_test_input_suspend}`
+  added to `ctrl-files.sh` (newer Xiaomi/HyperOS); field-verified to hold + resume.
+
 **v2025.5.18-6.4-rc1 (202505218)** — SAFETY + DIAGNOSTICS (pre-release)
 No change to the 6.2/6.3 resume logic or to how charging is controlled on a working device; every change is
 stricter, append-only, a clamp, or diagnostic-only.
