@@ -53,31 +53,51 @@ rm -rf \
   /data/data/com.termux/files/home/.termux/boot/${id}-init.sh
 
 [ "${1:-}" = install ] || {
-  # restore normal charging before removal -- enable direction only, cannot overcharge
+  # restore normal charging before removal -- ENABLE direction only, can never overcharge.
+  # (a) re-enable cut/suspend/drain switches
   if cd /sys/class/power_supply 2>/dev/null; then
     for f in */charging_enabled */battery_charging_enabled */charge_enabled */charging_enable */enable_charging */enable_charger; do
       [ -w "$f" ] && echo 1 > "$f" 2>/dev/null || :
     done
-    for f in */input_suspend */batt_slate_mode */op_disable_charge */night_charging */charge_disable */disable_charging */smart_charging_interruption; do
+    for f in */input_suspend */batt_slate_mode */op_disable_charge */night_charging */charge_disable */disable_charging */smart_charging_interruption */store_mode; do
       [ -w "$f" ] && echo 0 > "$f" 2>/dev/null || :
     done
     for f in */charge_control_limit; do
       [ -w "$f" ] && echo 0 > "$f" 2>/dev/null || :
     done
-    [ -w /proc/mtk_battery_cmd/current_cmd ] && echo "0 0" > /proc/mtk_battery_cmd/current_cmd 2>/dev/null || :
     cd / 2>/dev/null || :
   fi
-  # remove resolved target + (possibly dangling) symlink + data dir + ACC's busybox bin, then the parent
+  # (b) clear any NATIVE %-limit so the battery is not left capped (Pixel/Tensor charge_stop_level,
+  #     Samsung batt_full_capacity, generic charge_control_*_threshold) -- 100 = charge fully, 0 = no floor
+  for f in /sys/devices/platform/google,charger/charge_stop_level \
+           /sys/devices/platform/soc/soc:google,charger/charge_stop_level \
+           /sys/class/power_supply/*/charge_stop_level \
+           /sys/class/power_supply/*/batt_full_capacity \
+           /sys/class/power_supply/*/charge_control_end_threshold; do
+    [ -w "$f" ] && echo 100 > "$f" 2>/dev/null || :
+  done
+  for f in /sys/devices/platform/google,charger/charge_start_level \
+           /sys/devices/platform/soc/soc:google,charger/charge_start_level \
+           /sys/class/power_supply/*/charge_start_level \
+           /sys/class/power_supply/*/charge_control_start_threshold; do
+    [ -w "$f" ] && echo 0 > "$f" 2>/dev/null || :
+  done
+  # (c) MediaTek pair
+  [ -w /proc/mtk_battery_cmd/current_cmd ] && echo "0 0" > /proc/mtk_battery_cmd/current_cmd 2>/dev/null || :
+  [ -w /proc/mtk_battery_cmd/en_power_path ] && echo 1 > /proc/mtk_battery_cmd/en_power_path 2>/dev/null || :
+
+  # remove EVERY ACC path: the module dir (resolved + explicit), KSU staging, the systemless tree,
+  # the data dir, ACC's busybox bin, then the parent and the KSU/APatch PATH symlinks (rc3).
   rm -rf $(readlink -f /data/adb/$domain/$id) \
+    "/data/adb/modules/$id" \
+    "/data/adb/modules_update/$id" \
     "/data/adb/$domain/$id" \
     "/data/adb/$domain/${id}-data" \
     "/data/adb/$domain/bin"
   rmdir "/data/adb/$domain" 2>/dev/null || :
-  # remove the KSU/APatch PATH symlinks (rc3) + leftover KSU module staging
   for b in /data/adb/ksu/bin /data/adb/ap/bin; do
     rm -f $b/$id $b/${id}a $b/${id}d 2>/dev/null
   done
-  rm -rf /data/adb/modules_update/$id 2>/dev/null
 }
 
 exit 0

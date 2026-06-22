@@ -19,6 +19,9 @@ jobs:
       - name: Build flashable zip + tarball
         run: |
           chmod +x build.sh check-syntax.sh 2>/dev/null || true
+          # force a fresh uninstaller zip from the current uninstall.sh (git checkout equalizes mtimes,
+          # so build.sh's "-ot" staleness check would otherwise skip regenerating it on CI)
+          rm -f bin/acc_flashable_uninstaller.zip
           sh build.sh
 
       - name: Show outputs
