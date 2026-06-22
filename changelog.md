@@ -1,3 +1,11 @@
+**v2025.5.18-6.4-rc5 (202505222)**
+Charging-resume reliability — daemon bug-hunt + on-device validation (Mi A3). Extends the rc4 apsd_rerun fix to every input-cut and current-cap switch class.
+- **Charging now reliably RESUMES on current-cap switches.** On devices where ACC caps charging via `constant_charge_current[_max]`, `*/current_max` or `input_current` (common on Pixel/Qualcomm), restoring the cap at resume left `online`=1 but the charge current at 0 — so charging stayed stuck until a reboot. ACC now re-runs APSD/AICL for these classes too (gated on "present and not charging", not only `online`=0), and the resume flip-on is no longer skipped when the node masks `online`. Validated end-to-end on a real charger.
+- **Resume watchdog — no more silent stalls.** Symmetric to the over-limit breach monitor: if the phone is at/below the resume level but still not charging, ACC re-kicks the charger, then reselects the switch and notifies. A stuck resume can no longer go unnoticed.
+- **Daemon robustness.** A garbage `current_workaround` value can no longer abort the control loop (nor re-exec the daemon every cycle); `online()` falls back to charge status on devices whose charger node isn't in the known list; `flip_sw` guards a malformed 2-field switch; a non-numeric encore profile and very-low-SOC resume math no longer break.
+- **Switch scanner.** Tests switches even at trickle / high SOC instead of falsely reporting "no switch found", and `--apply` no longer auto-locks a switch whose charging RESUME was not verified.
+- All additive/stricter; existing configs unchanged. The write-config sanitizer was re-verified (18/18 edge cases safe), and two reported issues were investigated and confirmed NOT bugs.
+
 **v2025.5.18-6.4-rc4 (202505221)**
 Device-verified daemon hardening (Mi A3) on top of rc3's install/uninstall layer.
 - **Daemon survives a corrupt or hand-edited config.** Temperature, capacity, voltage and battery-cap are coerced to clean integers every loop, so garbage values can no longer abort the control loop under `set -eu`.

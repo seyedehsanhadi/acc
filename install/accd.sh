@@ -237,7 +237,11 @@ if ! $_INIT; then
       fi
     fi
 
-    [ $currentWorkaround0 = $currentWorkaround ] || exec $TMPDIR/accd --init
+    # rc5 (#5): coerce a garbage/empty currentWorkaround to the baseline FIRST, then quote both
+    # operands. Unquoted + empty made "[ false = ]" a syntax error -> set -e abort (exxit re-enables
+    # charging), and a garbage value would re-exec the daemon every loop.
+    case ${currentWorkaround-} in true|false) :;; *) currentWorkaround=$currentWorkaround0;; esac
+    [ "$currentWorkaround0" = "$currentWorkaround" ] || exec $TMPDIR/accd --init
     (set +eu; eval '${loopCmd-}') || :
 
     # N1: coerce temperature[]/capacity[] to safe numeric defaults EACH loop. The daemon re-sources
@@ -353,7 +357,9 @@ if ! $_INIT; then
       && dumpsys activity top | sed -En 's/(.*ACTIVITY )(.*)(\/.*)/\2/p' \
       | tail -n 1 | grep -E "$(echo ${idleApps[*]} | sed 's/ /|/g; s/,/|/g')" >/dev/null \
       && pause_now || :
-    [ $(cat /dev/encore_mode 2>/dev/null || cat /data/adb/.config/encore/current_profile 2>/dev/null || print 0) -ne 1 ] || pause_now
+    _enc=$(cat /dev/encore_mode 2>/dev/null || cat /data/adb/.config/encore/current_profile 2>/dev/null || print 0)
+    case ${_enc:-0} in *[!0-9]*|'') _enc=0;; esac   # rc5 (#11): coerce non-numeric encore profile -> no "-ne" abort
+    [ $_enc -ne 1 ] || pause_now
     set -u
 
     # log buffer reset
@@ -533,6 +539,24 @@ if ! $_INIT; then
         elif _le_resume_cap && [ $(cat $temp) -le $(( ${temperature[2]} * 10 )) ]; then
           rm $TMPDIR/.forceoff* 2>/dev/null && sleep ${loopDelay[0]} || :
           enable_charging
+          # rc5 (#7): RESUME-side watchdog, symmetric to the rc19 breach monitor. enable_charging
+          # wrote the switch ON value (+ the D8 rerun for current-cap), but on some current-cap
+          # switches charging may STILL not restart -- an otherwise SILENT stall. If present and
+          # at/below resume but still not_charging after a debounce, re-kick AICL/APSD; on
+          # persistence, blacklist + reselect + notify. The first not_charging short-circuits the
+          # whole test when charging is healthy, so there is zero latency on the happy path.
+          if present && _le_resume_cap && not_charging && sleep 2 && present && not_charging; then
+            for _rn in */apsd_rerun */rerun_aicl; do [ -w "$_rn" ] && echo 1 > "$_rn" 2>/dev/null || :; done
+            rf=$(cat $TMPDIR/.resumefail 2>/dev/null || echo 0); rf=$((rf + 1)); echo $rf > $TMPDIR/.resumefail
+            if [ $rf -ge 4 ] && [[ "${chargingSwitch[*]-}" = *\ -- ]]; then
+              echo "${chargingSwitch[*]% --}" >> $TMPDIR/.sw-blacklist
+              notif "⚠️ ACC: charging is not resuming at your ${capacity[2]:-?}% limit — selecting another switch."
+              $TMPDIR/acca $config --set charging_switch= 2>/dev/null || :; chargingSwitch=()
+              rm $TMPDIR/.resumefail 2>/dev/null || :
+            fi
+          else
+            rm $TMPDIR/.resumefail 2>/dev/null || :
+          fi
         fi
 
         # auto-shutdown
@@ -675,6 +699,7 @@ if ! $_INIT; then
   pause_now() {
     capacity[3]=$(batt_cap)
     capacity[2]=$((capacity[3] - 5))
+    [ ${capacity[2]} -ge 0 ] || capacity[2]=0   # rc5 (#11): clamp resume_capacity >=0 at very low SOC
   }
 
 

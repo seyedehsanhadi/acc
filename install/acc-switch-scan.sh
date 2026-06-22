@@ -145,6 +145,7 @@ fi
 ampFactor_=${ampFactor_:-1000000}
 # "charging" threshold ~60 mA, in this device's current units
 [ "$ampFactor_" -ge 1000000 ] && THR=60000 || THR=60
+anyResume=0   # rc5 (#15): set when any switch is resume-verified (rok=1); --apply refuses a no-resume-only result
 
 raw() { c=$(cat "$currFile" 2>/dev/null); echo "${c:-0}"; }
 abs() { a=${1#-}; echo "${a:-0}"; }
@@ -173,7 +174,7 @@ test_switch() {
   # longer to resume to the charging baseline; do not falsely "skip" them.
   i=0; while [ "$(abs "$(raw)")" -le "$THR" ] 2>/dev/null && [ "$i" -lt 20 ]; do nap; i=$((i+1)); done
   baseRaw=$(raw); base=$(abs "$baseRaw")
-  [ "$base" -gt "$THR" ] 2>/dev/null || { echo skip; return; }
+  [ "$base" -gt "$((THR / 2))" ] 2>/dev/null || { echo skip; return; }   # rc5 (#14): skip only at near-zero baseline; trickle/high-SOC still tests (reversal-based detection below)
   # Some kernels (e.g. certain Motorola) report current_now with the INVERTED sign
   # (charging negative / discharging positive). Anchor "stopped" to a reversal vs THIS
   # baseline's sign so the scan is correct on either convention (a plain `nr < 0` test
@@ -303,6 +304,7 @@ while IFS= read -r line; do
                  else case "$3" in idle) P=1;; *) P=3;; esac; fi;;
             esac
             [ "$rok" = 1 ] || P=$((P + 4))
+            [ "$rok" = 1 ] && anyResume=1 || :
             results="${results}${P} ${2} ${3} ${line}
 "
           fi
@@ -326,9 +328,13 @@ if [ -n "$results" ]; then
   { echo ""; echo "BEST(${METHOD})=${best}"; } >> $RESLOG 2>/dev/null || :
   say ""
   say "BEST=${best}"
-  if [ "$APPLY" = 1 ] && [ -n "$best" ]; then
+  if [ "$APPLY" = 1 ] && [ -n "$best" ] && [ "$anyResume" = 1 ]; then
     [ -n "$ACCA" ] && "$ACCA" -s "s=${best} --" >/dev/null 2>&1 || :
     say "APPLIED=1   method=${METHOD}   (locked in: acc -s s='${best} --')"
+  elif [ "$APPLY" = 1 ] && [ -n "$best" ]; then
+    # rc5 (#15): --apply but NO switch verified that charging RESUMES (all stop-only). Locking one
+    # could leave charging stuck off. Recommend instead of auto-locking.
+    say "NOT auto-locked: no switch verified that charging RESUMES. Confirm resume first, then: acc -s s='${best} --'"
   else
     say "Recommended ($([ "$METHOD" = cycle ] && echo 'Range Cycle' || echo 'Hold@Limit')) -- lock it in (stops ACC auto-cycling):"
     say "  acc -s s='${best} --'"

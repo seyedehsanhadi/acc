@@ -320,7 +320,15 @@ enable_charging() {
     # Same unplug-blip guard as below: restore the saved switch config, but only
     # physically flip it ON when actually plugged in (online); otherwise just clear the
     # saved state so the next plug-in restores cleanly without a phantom "Charging" flash.
-    [ ! -f $TMPDIR/.sw ] || (. $TMPDIR/.sw; rm $TMPDIR/.sw; ! online || flip_sw on) 2>/dev/null || :
+    # rc5 (#4/#18): restore the idle-avoidance switch. Source in the CURRENT shell so the parent
+    # chargingSwitch is actually updated (the old subshell discarded it), and re-arm input-cut /
+    # current-cap switches even while online=0 (same name exception as the resume gate below).
+    if [ -f $TMPDIR/.sw ]; then
+      . $TMPDIR/.sw 2>/dev/null || :; rm -f $TMPDIR/.sw 2>/dev/null || :
+      if online || { case "${chargingSwitch[*]-}" in *suspend*|*bypass*|*vbus*|*current_max*|*input_current*|*constant_charge_current*) true;; *) false;; esac; }; then
+        flip_sw on 2>/dev/null || :
+      fi
+    fi
 
     if ! $ghostCharging || { $ghostCharging && online; }; then
 
@@ -340,16 +348,24 @@ enable_charging() {
       # no current = no phantom "Charging") and un-masks online when actually plugged. The
       # pause path still enforces the limit, so this can never overcharge. All OTHER switch
       # types keep the online gate (avoids the cosmetic unplug blip).
-      if online || { case "${chargingSwitch[*]-}" in *suspend*|*bypass*|*vbus*) true;; *) false;; esac; }; then
+      if online || { case "${chargingSwitch[*]-}" in *suspend*|*bypass*|*vbus*|*current_max*|*input_current*|*constant_charge_current*) true;; *) false;; esac; }; then
         flip_sw on || cycle_switches on
-        # D8: an input-cut switch (input_suspend/bypass/vbus/current_max 0) suspends VBUS; on some
-        # chargers (Qualcomm qpnp-smb5) merely clearing it does NOT re-run source detection, so
-        # */online stays 0 and charging is stuck off until a reboot/replug -- the field
-        # "won't charge till reboot". If the cable is still PRESENT but the path is not energized
-        # after we un-cut, re-run APSD / AICL to force input re-negotiation. Harmless when already
-        # online (no-op re-detect); only for input-cut switch types, only when present && !online.
+        # D8 (rc5: extended to current-cap classes): after un-cutting, re-run APSD/AICL so the
+        # charger re-negotiates. Input-cut switches (input_suspend/bypass/vbus) mask */online to 0
+        # -> fire when present && !online. CURRENT-CAP switches (constant_charge_current[_max],
+        # */current_max, */input_current) keep */online=1 but the CHARGE CURRENT can stay 0 after
+        # the cap is restored -> fire while the cable is present and charging has NOT actually
+        # resumed (not_charging), regardless of online. Harmless when already charging (no-op
+        # re-detect); self-limits once current flows. (rc4 D8 missed both: the *constant_charge_
+        # current* (no _max) name, and the !online gate that a current-cap never satisfies.)
         case "${chargingSwitch[*]-}" in
-          *suspend*|*bypass*|*vbus*|*current_max*|*input_current*)
+          *current_max*|*input_current*|*constant_charge_current*)
+            if present && not_charging; then
+              for _rn in */apsd_rerun */rerun_aicl; do
+                [ -w "$_rn" ] && echo 1 > "$_rn" 2>/dev/null || :
+              done
+            fi ;;
+          *suspend*|*bypass*|*vbus*)
             if present && ! online; then
               for _rn in */apsd_rerun */rerun_aicl; do
                 [ -w "$_rn" ] && echo 1 > "$_rn" 2>/dev/null || :
@@ -441,6 +457,7 @@ flip_sw() {
 
   while [ -f ${1:-//} ]; do
 
+    [ $# -ge 3 ] || return 2   # rc5 (#10): a 2-field / malformed switch has no OFF value -> $3 empty -> "[ = 3600mV ]" abort
     on="$(parse_value "$2")"
     # "pcap" resolves to pause_capacity -- used as the OFF (stop) value so charging
     # stops AT your limit. Numeric-safe: empty/garbage pause_capacity -> a safe low

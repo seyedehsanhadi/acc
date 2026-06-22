@@ -70,11 +70,15 @@ not_charging() {
 
 
 online() {
-  local i=
+  local i= seen=false
   for i in $(online_f); do
+    seen=true
     grep -q 0 $i || return 0
   done
-  return 1
+  # rc5 (#6): if NO */online node matched the regex (a device with an unlisted charger-node
+  # name), do NOT blindly report offline -- that silently breaks generic_rearm/native_unlatch,
+  # the resume flip-ON gate, and enters idle-nap while plugged. Defer to the charge status.
+  $seen && return 1 || [ "$(read_status)" = Charging ]
 }
 
 
