@@ -1,0 +1,30 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # build.sh runs check-syntax.sh (bash -n on every *.sh) first, then packages the
+      # flashable zip + tarball and regenerates the flashable uninstaller zip. Pure shell:
+      # needs zip/tar/gzip/sed/find, all present on ubuntu-latest. No JDK/SDK required.
+      - name: Build flashable zip + tarball
+        run: |
+          chmod +x build.sh check-syntax.sh 2>/dev/null || true
+          sh build.sh
+
+      - name: Show outputs
+        run: ls -R _builds bin 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acc-flashable-zip
+          path: |
+            _builds/**/*.zip
+            _builds/**/*.tgz
+            bin/acc_flashable_uninstaller.zip
