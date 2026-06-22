@@ -174,7 +174,12 @@ status() {
 
 
 volt_now() {
-  grep -o '^....' $voltNow
+  # N1: a transiently-empty/garbage voltage_now read used to emit nothing -> "[ -ge NN ]" syntax
+  # error -> daemon abort under set -eu (charging limit lost). Coerce an unreadable node to a
+  # fail-safe HIGH value (forces a pause, never a false shutdown) so the loop survives.
+  local v=$(grep -o '^....' $voltNow 2>/dev/null)
+  case $v in ''|*[!0-9]*) v=9999;; esac
+  echo $v
 }
 
 
@@ -268,6 +273,11 @@ fi
 batt_cap() {
   local l=$(dsys_batt get level)
   local l2=$(cat $battCapacity)
-  ${capacity[4]} && echo $l2 && return 0 || :
-  [ -n "$l" ] && echo $l || echo $l2
+  local r=
+  # N1: never emit empty/garbage -- a blank capacity makes "[ -ge NN ]" a syntax error and aborts
+  # the loop under set -eu (limit lost). capacity_mask(=[4]) -> kernel level; else prefer Android's
+  # level, fall back to kernel; coerce an unreadable result to 100 (fail-safe pause, never overcharge).
+  ${capacity[4]:-false} && r=$l2 || { [ -n "$l" ] && r=$l || r=$l2; }
+  case $r in ''|*[!0-9]*) r=100;; esac
+  echo $r
 }

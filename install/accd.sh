@@ -240,6 +240,19 @@ if ! $_INIT; then
     [ $currentWorkaround0 = $currentWorkaround ] || exec $TMPDIR/accd --init
     (set +eu; eval '${loopCmd-}') || :
 
+    # N1: coerce temperature[]/capacity[] to safe numeric defaults EACH loop. The daemon re-sources
+    # $config RAW, so a hand-edited / partially-written / corrupt value would otherwise make a
+    # downstream "$(( N * 10 ))" or "[ -ge N ]" abort the loop under set -eu and DROP the limit.
+    # write-config sanitizes on WRITE; this guards the READ side for every arithmetic site below.
+    case "${temperature[0]-}" in ''|*[!0-9]*) temperature[0]=45;; esac
+    case "${temperature[1]-}" in ''|*[!0-9]*) temperature[1]=50;; esac
+    case "${temperature[2]-}" in ''|*[!0-9]*) temperature[2]=40;; esac
+    case "${temperature[3]-}" in ''|*[!0-9]*) temperature[3]=55;; esac
+    case "${capacity[0]-}" in ''|*[!0-9]*) capacity[0]=5;; esac
+    case "${capacity[1]-}" in ''|*[!0-9]*) capacity[1]=101;; esac
+    case "${capacity[2]-}" in ''|*[!0-9]*) capacity[2]=70;; esac
+    case "${capacity[3]-}" in ''|*[!0-9]*) capacity[3]=80;; esac
+
     # shutdown if battery temp >= shutdown_temp
     # Coerce a garbage/empty shutdown-temp so a hand-edited / partially-migrated config cannot
     # trigger a SPURIOUS shutdown (non-numeric -> arithmetic 0 -> the -lt test fails -> shutdown).
@@ -247,11 +260,15 @@ if ! $_INIT; then
     [ $(cat $temp) -lt $(( _st * 10 )) ] || shutdown
 
     [ -z "${cooldownCurrent-}" ] || {
-      if [ $(cat $temp) -le $(( ${temperature[2]} * 10 )) ] && ! _ge_cooldown_cap; then
+      # N1: coerce cooldown(=[0])/resume(=[2]) temps so a corrupt/hand-edited value can't abort
+      # the loop under set -eu (same hardening as the shutdown-temp read above).
+      _ct0=${temperature[0]}; case "$_ct0" in ''|*[!0-9]*) _ct0=45;; esac
+      _rt2=${temperature[2]}; case "$_rt2" in ''|*[!0-9]*) _rt2=40;; esac
+      if [ $(cat $temp) -le $(( _rt2 * 10 )) ] && ! _ge_cooldown_cap; then
         restrictCurr=false
       fi
-      if _ge_cooldown_cap || [ $(cat $temp) -ge $(( ${temperature[0]} * 10 )) ] \
-        || { ! $isCharging && [ $(cat $temp) -ge $(( ${temperature[2]} * 10 )) ]; }
+      if _ge_cooldown_cap || [ $(cat $temp) -ge $(( _ct0 * 10 )) ] \
+        || { ! $isCharging && [ $(cat $temp) -ge $(( _rt2 * 10 )) ]; }
       then
         restrictCurr=true
       fi

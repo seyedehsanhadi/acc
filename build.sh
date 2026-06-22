@@ -107,8 +107,10 @@ set +e
 
 
 # unify installers for flashable zip (customize.sh and update-binary are copies of install.sh)
-{ cp -u install.sh customize.sh
-cp -u install.sh META-INF/com/google/android/update-binary; } 2>/dev/null
+# N3: force-copy (not -u) -- customize.sh and update-binary ARE install.sh; a stale mtime
+# (fresh clone, revert, editor preserving mtime) must never ship old install logic in the zip.
+{ cp -f install.sh customize.sh
+cp -f install.sh META-INF/com/google/android/update-binary; } 2>/dev/null
 
 
 if [ bin/${id}_flashable_uninstaller.zip -ot install/uninstall.sh ] || [ ! -f bin/${id}_flashable_uninstaller.zip ]; then

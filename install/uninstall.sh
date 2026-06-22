@@ -46,8 +46,14 @@ mkdir -p $TMPDIR
 }) <>$TMPDIR/${id}.lock
 
 # uninstall
+# D2: clean ACC's own tmp files but PRESERVE the acc-compat tester artifact -- acc-compat-verified
+# is the tester->AccA handoff (a separate tool), not ACC's; the broad acc[-_]* glob used to wipe it.
+for f in /data/local/tmp/${id}[-_]*; do
+  [ -e "$f" ] || continue
+  case "$f" in *compat*) continue;; esac
+  rm -rf "$f"
+done
 rm -rf \
-  /data/local/tmp/${id}[-_]* \
   /data/adb/service.d/${id}-*.sh \
   /data/data/mattecarra.accapp/files/$id \
   /data/data/com.termux/files/home/.termux/boot/${id}-init.sh
@@ -64,6 +70,19 @@ rm -rf \
     done
     for f in */charge_control_limit; do
       [ -w "$f" ] && echo 0 > "$f" 2>/dev/null || :
+    done
+    # (a3) D5: un-cap charge voltage -- a voltage-cap switch lowers */voltage_max to stop charge;
+    #      restore each to its design max so charging is never left voltage-limited.
+    for f in */voltage_max; do
+      [ -w "$f" ] || continue
+      d="${f%voltage_max}voltage_max_design"
+      [ -r "$d" ] && cat "$d" > "$f" 2>/dev/null || :
+    done
+    # (a4) D5/D8: re-run USB source detection / input-current arbitration so a charger left
+    #      input-cut (online=0, */current_max=0 by an input_suspend-type switch) re-negotiates.
+    #      Harmless when already online. Qualcomm: usb/apsd_rerun, battery/rerun_aicl.
+    for f in */apsd_rerun */rerun_aicl; do
+      [ -w "$f" ] && echo 1 > "$f" 2>/dev/null || :
     done
     cd / 2>/dev/null || :
   fi

@@ -247,7 +247,7 @@ In interactive mode, it also asks the user whether they want to download and ins
 
 configVerCode=202505180
 
-allowIdleAbovePcap=true
+allowIdleAbovePcap=false
 ampFactor=
 battStatusWorkaround=true
 capacity=(5 101 70 75 false)

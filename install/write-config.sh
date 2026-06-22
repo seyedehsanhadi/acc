@@ -92,6 +92,22 @@ fi
   [ $pc -gt 3000 ] && rc=$((pc - 150)) || rc=$((pc - 5))
 }
 
+# rc(6.4.1 / N5): shutdown_capacity must share pc/rc's unit domain. A leftover percent sc
+# (e.g. 5) in an mV config (pc>3000) means "shut down at 5 mV" -- never reached -- silently
+# disabling low-battery shutdown protection. Coerce into the active domain BEFORE the sc<rc
+# guard (mirrors the pc/rc domain coercion above).
+sc=${sc:-5}
+# sc < 1 is the documented "disable auto-shutdown" sentinel (accd.sh gates on capacity[0] < 1).
+# Preserve it in BOTH domains -- only domain-coerce an ENABLED (>=1) level, else a user's sc=0
+# would become a live mV threshold in an mV config and silently re-arm shutdown.
+if [ $sc -ge 1 ]; then
+  if [ $pc -gt 3000 ]; then
+    [ $sc -gt 3000 ] || sc=$((rc - 150))
+  else
+    [ $sc -le 3000 ] || sc=5
+  fi
+fi
+
 # ensure shutdown_capacity < resume_capacity. Without this an inverted config (shutdown >=
 # resume) could make the daemon shut the phone down ABOVE the resume level.
 # rc(6.4): enforce in BOTH percent and mV modes (was percent-only -- a mV config such as
@@ -109,9 +125,16 @@ fi
 # and never let cooldown_temp fall below resume_temp.
 [ $ct -lt $mt ] || ct=$((mt - 5))
 [ $ct -ge $rt ] || ct=$rt
+# D3: the incremental clamps above can collapse a GARBAGE band into a near-max one (e.g.
+# (40 60 90 65) -> (59 60 59 65)) where cooldown_temp ~= max_temp and the cooldown stage never
+# throttles. If the cooldown->max gap collapsed (<3 C), the input was garbage -> reset to the
+# proven default band rather than ship a dead cooldown stage.
+[ $((mt - ct)) -ge 3 ] || { ct=45; mt=50; rt=40; }
 
 
 # reset switch (in auto-mode) if pbim has changed and another switch is not being set
+# (coerce pbim FIRST -- a corrupt value here must not spuriously wipe a working chargingSwitch -- I9)
+case ${pbim-} in true|false|no) :;; *) pbim=true;; esac
 ! [[ "${chargingSwitch[*]}" != *\ -- && -z "$s0" && ".$pbim" != ".$prioritizeBattIdleMode" ]] || s=
 
 

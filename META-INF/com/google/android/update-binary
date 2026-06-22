@@ -418,7 +418,7 @@ _echo() {
 
 
 printf "\n\n"
-printf "$version ($versionCode) installed and running!\n\nRollback with acc -b if not satisfied.\n\n" | tee $tmpd/.install-notes
+printf "$version ($versionCode) installed!\n\nRollback with acc -b if not satisfied.\n\n" | tee $tmpd/.install-notes
 if [ -x /sbin/${id}d ] || grep -q '#exec_wrapper' /system/bin/${id}d 2>/dev/null; then
   _echo "Rebooting is unnecessary."
 elif $KSU; then

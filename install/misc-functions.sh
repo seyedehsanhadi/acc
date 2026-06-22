@@ -342,6 +342,20 @@ enable_charging() {
       # types keep the online gate (avoids the cosmetic unplug blip).
       if online || { case "${chargingSwitch[*]-}" in *suspend*|*bypass*|*vbus*) true;; *) false;; esac; }; then
         flip_sw on || cycle_switches on
+        # D8: an input-cut switch (input_suspend/bypass/vbus/current_max 0) suspends VBUS; on some
+        # chargers (Qualcomm qpnp-smb5) merely clearing it does NOT re-run source detection, so
+        # */online stays 0 and charging is stuck off until a reboot/replug -- the field
+        # "won't charge till reboot". If the cable is still PRESENT but the path is not energized
+        # after we un-cut, re-run APSD / AICL to force input re-negotiation. Harmless when already
+        # online (no-op re-detect); only for input-cut switch types, only when present && !online.
+        case "${chargingSwitch[*]-}" in
+          *suspend*|*bypass*|*vbus*|*current_max*|*input_current*)
+            if present && ! online; then
+              for _rn in */apsd_rerun */rerun_aicl; do
+                [ -w "$_rn" ] && echo 1 > "$_rn" 2>/dev/null || :
+              done
+            fi ;;
+        esac
       fi
 
       # detect and block ghost charging

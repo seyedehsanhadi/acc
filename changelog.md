@@ -1,3 +1,10 @@
+**v2025.5.18-6.4-rc4 (202505221)**
+Device-verified daemon hardening (Mi A3) on top of rc3's install/uninstall layer.
+- **Daemon survives a corrupt or hand-edited config.** Temperature, capacity, voltage and battery-cap are coerced to clean integers every loop, so garbage values can no longer abort the control loop under `set -eu`.
+- **Recovers a de-negotiated charger.** After releasing an input-cut switch, if the charger is present but `online` stays 0, the daemon re-runs APSD/AICL to restore charging without a reboot.
+- **shutdown_capacity unit-domain fix.** A percent value left in a millivolt config no longer silently disables low-battery shutdown; it is coerced into the active domain (values below 1 still disable it).
+- Uninstall keeps the acc-compat tester artifact and un-caps voltage/current on removal; installer copies are force-synced from `install.sh`.
+
 **v2025.5.18-6.4-rc3 (202505220)**
 KernelSU/APatch install fixes; charging daemon unchanged from rc2.
 - KernelSU/APatch: `acc` works without a reboot or the full path -- the installer drops it in the root manager's bin (detected by directory) and the install note is root-solution-specific.
