@@ -217,7 +217,7 @@ cp -aH /data/adb/$domain/$id/* $config $data_dir/backup/ 2>/dev/null || :
 
 
 export KSU=${KSU:-false}
-$KSU || { [ ! -f /data/adb/*/bin/busybox ] || KSU=true; }
+$KSU || { [ -d /data/adb/ksu ] || [ -d /data/adb/ap ] || [ -f /data/adb/*/bin/busybox ]; } && KSU=true || :
 /system/bin/sh $srcDir/install/uninstall.sh install
 mkdir -p $installDir/$id
 cp -R $srcDir/install/* $installDir/$id/
@@ -273,6 +273,19 @@ cp -f $srcDir/README.* $data_dir/
   { [ -e /sys/devices/platform/google,charger/charge_stop_level ] && [ -f $config ]; } && \
     sed -i 's/^allowIdleAbovePcap=true$/allowIdleAbovePcap=false/; s/^prioritizeBattIdleMode=true$/prioritizeBattIdleMode=no/' $config 2>/dev/null || :
   touch $data_dir/.stable-defaults7 2>/dev/null || :
+}
+
+
+# rc(6.3.3): undo a bad 6.3.2 lock. 6.3.2 could auto-migrate an MTK device onto current_cmd,
+# which on some kernels (e.g. klee/HyperOS) PASSES the quick scan check but does NOT actually
+# hold the limit -> OVERCHARGE. current_cmd is no longer promoted (input_suspend, which holds,
+# is preferred again), so clear any switch 6.3.2 LOCKED onto current_cmd; the daemon then
+# re-scans and re-locks input_suspend. One-shot, MTK-only, idempotent; never leaves it uncapped
+# (an empty switch re-scans on the next charge). Non-MTK / non-current_cmd locks untouched.
+[ -f $data_dir/.mtk-currentcmd-revert ] || {
+  { [ -e /proc/mtk_battery_cmd/current_cmd ] && [ -f $config ]; } && \
+    sed -i 's|^chargingSwitch=(.*mtk_battery_cmd/current_cmd.*--.*)$|chargingSwitch=()|' $config 2>/dev/null || :
+  touch $data_dir/.mtk-currentcmd-revert 2>/dev/null || :
 }
 
 
@@ -375,6 +388,18 @@ esac
 }
 
 
+# KernelSU/APatch: expose acc on a bin that's already on PATH, pointing at the stable
+# install path so the plain `acc` command works immediately -- no reboot/overlay wait (B7).
+! $KSU || {
+  for kbin in /data/adb/ksu/bin /data/adb/ap/bin; do
+    [ -d $kbin ] || continue
+    ln -sf /data/adb/$domain/$id/${id}.sh $kbin/$id 2>/dev/null || :
+    ln -sf /data/adb/$domain/$id/${id}a.sh $kbin/${id}a 2>/dev/null || :
+    ln -sf /data/adb/$domain/$id/service.sh $kbin/${id}d 2>/dev/null || :
+  done
+}
+
+
 set +eu
 printf "Done\n\n\n"
 
@@ -396,6 +421,8 @@ printf "\n\n"
 printf "$version ($versionCode) installed and running!\n\nRollback with acc -b if not satisfied.\n\n" | tee $tmpd/.install-notes
 if [ -x /sbin/${id}d ] || grep -q '#exec_wrapper' /system/bin/${id}d 2>/dev/null; then
   _echo "Rebooting is unnecessary."
+elif $KSU; then
+  _echo "KernelSU/APatch: the 'acc' command works now via /data/adb/ksu/bin (or /data/adb/ap/bin). If your build lacks that dir, use the absolute path /data/adb/$domain/$id/acc.sh, or reboot once. AccA works either way."
 else
   _echo "Note: If you're not rebooting now, prefix all acc executables with /dev/ (as in /dev/acc -i, /dev/accd). Reasoning: Magisk, KernelSU and similar, don't [re]mount/update modules without a reboot."
 fi

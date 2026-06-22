@@ -1,3 +1,9 @@
+**v2025.5.18-6.4-rc3 (202505220)** — KernelSU/APatch install fixes; charging daemon unchanged from rc2.
+- KernelSU/APatch: `acc` works without a reboot or the full path -- the installer drops it in the root manager's bin (detected by directory) and the install note is root-solution-specific.
+- Uninstall now restores normal charging and removes the whole leftover `/data/adb/vr25` tree (and those PATH symlinks).
+- The start-up wait is capped, so the daemon can't hang on ROMs that never report boot-complete.
+- Installer scripts unified (customize.sh / update-binary regenerated from install.sh).
+
 **v2025.5.18-6.4-rc2 (202505219)** — field-driven fixes (pre-release)
 Driven by real reports from the acc-compat companion tester. All changes are additive or stricter; existing
 configs are untouched.

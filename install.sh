@@ -217,7 +217,7 @@ cp -aH /data/adb/$domain/$id/* $config $data_dir/backup/ 2>/dev/null || :
 
 
 export KSU=${KSU:-false}
-$KSU || { [ ! -f /data/adb/*/bin/busybox ] || KSU=true; }
+$KSU || { [ -d /data/adb/ksu ] || [ -d /data/adb/ap ] || [ -f /data/adb/*/bin/busybox ]; } && KSU=true || :
 /system/bin/sh $srcDir/install/uninstall.sh install
 mkdir -p $installDir/$id
 cp -R $srcDir/install/* $installDir/$id/
@@ -388,6 +388,18 @@ esac
 }
 
 
+# KernelSU/APatch: expose acc on a bin that's already on PATH, pointing at the stable
+# install path so the plain `acc` command works immediately -- no reboot/overlay wait (B7).
+! $KSU || {
+  for kbin in /data/adb/ksu/bin /data/adb/ap/bin; do
+    [ -d $kbin ] || continue
+    ln -sf /data/adb/$domain/$id/${id}.sh $kbin/$id 2>/dev/null || :
+    ln -sf /data/adb/$domain/$id/${id}a.sh $kbin/${id}a 2>/dev/null || :
+    ln -sf /data/adb/$domain/$id/service.sh $kbin/${id}d 2>/dev/null || :
+  done
+}
+
+
 set +eu
 printf "Done\n\n\n"
 
@@ -409,6 +421,8 @@ printf "\n\n"
 printf "$version ($versionCode) installed and running!\n\nRollback with acc -b if not satisfied.\n\n" | tee $tmpd/.install-notes
 if [ -x /sbin/${id}d ] || grep -q '#exec_wrapper' /system/bin/${id}d 2>/dev/null; then
   _echo "Rebooting is unnecessary."
+elif $KSU; then
+  _echo "KernelSU/APatch: the 'acc' command works now via /data/adb/ksu/bin (or /data/adb/ap/bin). If your build lacks that dir, use the absolute path /data/adb/$domain/$id/acc.sh, or reboot once. AccA works either way."
 else
   _echo "Note: If you're not rebooting now, prefix all acc executables with /dev/ (as in /dev/acc -i, /dev/accd). Reasoning: Magisk, KernelSU and similar, don't [re]mount/update modules without a reboot."
 fi

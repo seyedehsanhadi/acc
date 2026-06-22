@@ -13,10 +13,13 @@ dataDir=/data/adb/$domain/${id}-data
 
 # wait til the lock screen is ready and give some bootloop grace period
 slept=false
-until [ .$(getprop init.svc.bootanim 2>/dev/null) = .stopped ]; do
+_bootwait=0
+until [ .$(getprop init.svc.bootanim 2>/dev/null) = .stopped ] || [ $_bootwait -ge 30 ]; do
   [ -f $execDir/disable -o -f $dataDir/disable ] && exit 14
   sleep 10 && slept=true
+  _bootwait=$((_bootwait + 1))
 done
+unset _bootwait
 $slept && sleep 60
 unset slept
 
