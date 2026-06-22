@@ -42,8 +42,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create rc3 --prerelease --target "$GITHUB_SHA" \
-            --title "ACC v2025.5.18-6.4-rc3 (pre-release)" \
-            --notes "Auto-built flashable module + tarball + uninstaller. KernelSU/APatch acc-on-PATH, clean uninstall; charging daemon unchanged from rc2." 2>/dev/null || true
+          # Refresh the rolling pre-release on the fixed rc3 tag. Delete the release first
+          # (keep the tag, so no tag-recreation race) to clear any stale/phantom assets left
+          # by earlier failed uploads, then recreate it with the current build outputs.
+          # --clobber proved unreliable: a half-finished upload leaves an asset in GitHub's
+          # "starter" state that clobber's dedup won't delete, so re-upload hits HTTP 422.
+          gh release delete rc3 --yes 2>/dev/null || true
           assets=""; for f in _builds/*/*.zip _builds/*/*.tgz bin/acc_flashable_uninstaller.zip; do [ -f "$f" ] && assets="$assets $f"; done
-          [ -n "$assets" ] && gh release upload rc3 $assets --clobber
+          gh release create rc3 $assets --prerelease --target "$GITHUB_SHA" \
+            --title "ACC v2025.5.18-6.4-rc3 (pre-release)" \
+            --notes "Auto-built flashable module + tarball + uninstaller. KernelSU/APatch acc-on-PATH, clean uninstall; charging daemon unchanged from rc2."
