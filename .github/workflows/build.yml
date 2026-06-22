@@ -37,18 +37,31 @@ jobs:
 
       # Publish a single rolling pre-release (reuses the "rc3" tag, not a new tag each push)
       # so the flashable zip is downloadable from the Releases page.
-      - name: Publish rolling pre-release
+      # Refresh the rolling pre-release on the fixed rc3 tag (the tag is reused, not recreated).
+      # Step 1: delete the existing release for a clean slate -- this clears any stale or
+      # half-uploaded "phantom" assets and old timestamped zips left by previous runs. The tag
+      # is kept (no --cleanup-tag), so there is no tag-recreation race.
+      - name: Clear previous rolling release
         if: github.ref == 'refs/heads/6.4-rc2-wip'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          # Refresh the rolling pre-release on the fixed rc3 tag. Delete the release first
-          # (keep the tag, so no tag-recreation race) to clear any stale/phantom assets left
-          # by earlier failed uploads, then recreate it with the current build outputs.
-          # --clobber proved unreliable: a half-finished upload leaves an asset in GitHub's
-          # "starter" state that clobber's dedup won't delete, so re-upload hits HTTP 422.
-          gh release delete rc3 --yes 2>/dev/null || true
-          assets=""; for f in _builds/*/*.zip _builds/*/*.tgz bin/acc_flashable_uninstaller.zip; do [ -f "$f" ] && assets="$assets $f"; done
-          gh release create rc3 $assets --prerelease --target "$GITHUB_SHA" \
-            --title "ACC v2025.5.18-6.4-rc3 (pre-release)" \
-            --notes "Auto-built flashable module + tarball + uninstaller. KernelSU/APatch acc-on-PATH, clean uninstall; charging daemon unchanged from rc2."
+        run: gh release delete rc3 --yes 2>/dev/null || true
+
+      # Step 2: recreate the release and upload the current build outputs with the standard
+      # release action, which handles the create-then-upload propagation race and asset
+      # replacement internally. The hand-rolled gh create/upload path hit transient HTTP
+      # 422 (phantom asset) / 404 (release not yet propagated) on the uploads endpoint.
+      - name: Publish rolling pre-release
+        if: github.ref == 'refs/heads/6.4-rc2-wip'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rc3
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          name: "ACC v2025.5.18-6.4-rc3 (pre-release)"
+          body: "Auto-built flashable module + tarball + uninstaller. KernelSU/APatch acc-on-PATH, clean uninstall; charging daemon unchanged from rc2."
+          files: |
+            _builds/*/*.zip
+            _builds/*/*.tgz
+            bin/acc_flashable_uninstaller.zip
+          fail_on_unmatched_files: false
