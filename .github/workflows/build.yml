@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -28,3 +31,16 @@ jobs:
             _builds/**/*.zip
             _builds/**/*.tgz
             bin/acc_flashable_uninstaller.zip
+
+      # Publish a single rolling pre-release (reuses the "rc3" tag, not a new tag each push)
+      # so the flashable zip is downloadable from the Releases page.
+      - name: Publish rolling pre-release
+        if: github.ref == 'refs/heads/6.4-rc2-wip'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete rc3 --cleanup-tag --yes 2>/dev/null || true
+          gh release create rc3 --prerelease --target "$GITHUB_SHA" \
+            --title "ACC v2025.5.18-6.4-rc3 (pre-release)" \
+            --notes "Auto-built from ${GITHUB_SHA:0:7}. Flashable module + tarball + uninstaller. KernelSU/APatch acc-on-PATH, clean uninstall; charging daemon unchanged from rc2." \
+            _builds/*/*.zip _builds/*/*.tgz bin/acc_flashable_uninstaller.zip
