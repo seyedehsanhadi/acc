@@ -14,7 +14,12 @@ dataDir=/data/adb/$domain/${id}-data
 # wait til the lock screen is ready and give some bootloop grace period
 slept=false
 _bootwait=0
-until [ .$(getprop init.svc.bootanim 2>/dev/null) = .stopped ] || [ $_bootwait -ge 30 ]; do
+# rc6 (S2): also exit the wait when the framework reports boot complete. On ROMs where
+# init.svc.bootanim never reads "stopped" the old loop burned the full 30x10s=5min before starting,
+# leaving charging uncontrolled for minutes after every reboot. Cap lowered to 18x10s=3min too.
+until [ .$(getprop init.svc.bootanim 2>/dev/null) = .stopped ] \
+   || [ "$(getprop sys.boot_completed 2>/dev/null)" = 1 ] \
+   || [ $_bootwait -ge 18 ]; do
   [ -f $execDir/disable -o -f $dataDir/disable ] && exit 14
   sleep 10 && slept=true
   _bootwait=$((_bootwait + 1))

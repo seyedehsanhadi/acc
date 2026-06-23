@@ -28,6 +28,25 @@ exxit() {
   local e=$?
   set +eu
   rm -rf /dev/.$domain.${id}-install
+  # rc6 (B3): a FAILED install (abort under set -eu) used to leave charging cut -- the upgrade
+  # path runs `uninstall.sh install`, which kills the daemon and deliberately SKIPS charging-
+  # restore (mid-upgrade). If a later copy/perm step then aborts there is no daemon AND no
+  # restore = battery stuck not charging until reboot. On any nonzero exit re-enable charging
+  # (ENABLE direction only -- can never overcharge), mirroring the uninstaller's restore sweep.
+  [ $e -eq 0 ] || {
+    if cd /sys/class/power_supply 2>/dev/null; then
+      for _f in */charging_enabled */battery_charging_enabled */charge_enabled */charging_enable */enable_charging */enable_charger; do
+        [ -w "$_f" ] && echo 1 > "$_f" 2>/dev/null || :
+      done
+      for _f in */input_suspend */batt_slate_mode */op_disable_charge */charge_disable */disable_charging; do
+        [ -w "$_f" ] && echo 0 > "$_f" 2>/dev/null || :
+      done
+      for _f in */apsd_rerun */rerun_aicl; do
+        [ -w "$_f" ] && echo 1 > "$_f" 2>/dev/null || :
+      done
+      cd / 2>/dev/null || :
+    fi
+  }
   $KSU || {
     rm -rf /data/adb/modules_update/$id
     (abort) > /dev/null
@@ -217,7 +236,7 @@ cp -aH /data/adb/$domain/$id/* $config $data_dir/backup/ 2>/dev/null || :
 
 
 export KSU=${KSU:-false}
-$KSU || { [ -d /data/adb/ksu ] || [ -d /data/adb/ap ] || [ -f /data/adb/*/bin/busybox ]; } && KSU=true || :
+$KSU || { [ -d /data/adb/ksu ] || [ -d /data/adb/ap ] || [ -f /data/adb/ksu/bin/busybox ] || [ -f /data/adb/ap/bin/busybox ]; } && KSU=true || :   # rc6 (B2): match KSU/APatch bin ONLY, not the wildcard /data/adb/*/bin/busybox that also hit ACC's own vr25/bin (mis-flagged KSU on Magisk + 2+-match `[ -f a b ]` breakage)
 /system/bin/sh $srcDir/install/uninstall.sh install
 mkdir -p $installDir/$id
 cp -R $srcDir/install/* $installDir/$id/
@@ -480,7 +499,7 @@ if [ -f "/data/adb/modules/magisk_overlayfs/util_functions.sh" ] && \
   ui_print ""
   ui_print "- Add support for overlayfs"
   . /data/adb/modules/magisk_overlayfs/util_functions.sh
-  support_overlayfs && rm -rf "$MODPATH"/system
+  support_overlayfs && [ -n "${MODPATH:-}" ] && rm -rf "$MODPATH"/system   # rc6 (B1): guard MODPATH -- it is only set when Magisk sources customize.sh; a standalone `sh install.sh` left it unset, so this was `rm -rf /system`
 fi
 
 exit 0

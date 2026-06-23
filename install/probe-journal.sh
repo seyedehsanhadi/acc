@@ -73,6 +73,10 @@ journal_check() {
     if [ -f "$TMPDIR/ch-switches" ]; then
       sed -i "\|^${line}\$|d" "$TMPDIR/ch-switches" 2>/dev/null || :
     fi
+    # rc6 (C2): tell the user WHY a switch vanished. A node that panic-rebooted the device is now
+    # permanently blacklisted; without this the switch silently disappears and the phone can be left
+    # with no working limit and no explanation.
+    command -v notif >/dev/null 2>&1 && notif "⚠️ ACC: a charging switch crash-rebooted this phone and was permanently disabled for safety ($line). If charging no longer stops at your limit, run a switch scan in AccA → Scripts." || :
   fi
   rm -f "$probePending" 2>/dev/null || :
   sync 2>/dev/null || :

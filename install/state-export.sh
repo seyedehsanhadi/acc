@@ -77,8 +77,17 @@ _se_status() {
 
 # --- smart sensing, generalized for ALL SoCs (not Tensor-only) ---
 
-# plugged? any /sys/class/power_supply/*/online reads 1
+# plugged? rc9: present-first (cable attached), not online. An input-cut switch
+# (input_suspend / current_max 0) drives */online to 0 while the cable is still
+# attached, so the old online-only test returned plugged:false and _se_class then
+# misread the switch as discharging while plugged. Check charger-side */present
+# first (NOT battery/present, always 1), fall back to */online where no present node.
 _se_plugged() {
+  local _n
+  for _n in usb ac dc mains pc_port wireless; do
+    _n="/sys/class/power_supply/$_n/present"
+    [ -r "$_n" ] && [ "$(cat "$_n" 2>/dev/null)" = 1 ] && { echo true; return; }
+  done
   case "$(cat /sys/class/power_supply/*/online 2>/dev/null | tr -d ' \t\n\r')" in
     *1*) echo true;; *) echo false;; esac
 }
@@ -87,7 +96,7 @@ _se_plugged() {
 _se_units() {
   case "${1:-null}" in null|''|0) echo unknown; return;; esac
   local a="${1#-}"
-  if [ "$a" -gt 20000 ] 2>/dev/null; then echo uA; else echo mA; fi
+  if [ "$a" -gt 16000 ] 2>/dev/null; then echo uA; else echo mA; fi   # rc6 (D2): use the SAME 16000 uA/mA cutoff the control side uses (batt-interface / read-ch-curr-ctrl-files-p2), so AccA's reported units never disagree with control in the 16000-20000 band
 }
 
 # polarity: cross-check status vs current sign
@@ -103,8 +112,12 @@ _se_polarity() {
 # measured class from plug + current (unit-aware idle band), all SoCs:
 # plugged & ~0 -> bypass; unplugged & ~0 -> idle; >0 plugged -> charging; <0 -> discharging
 _se_class() {
-  local cur="$1" plugged="$2" units="$3" a thr
+  local cur="$1" plugged="$2" units="$3" polarity="$4" a thr
   case "$cur" in null|'') echo unknown; return;; esac
+  # rc9: normalize the current sign by polarity before classifying. On an inverted-polarity
+  # device (charging reads negative / discharging positive) the raw sign mislabeled a cut as
+  # "charging"; after this flip >0 always means charging, so a cut reads discharging correctly.
+  case "$polarity" in inverted) case "$cur" in -*) cur="${cur#-}";; *) cur="-$cur";; esac;; esac
   a="${cur#-}"
   [ "$units" = uA ] && thr=30000 || thr=30
   if [ "$a" -lt "$thr" ] 2>/dev/null; then
@@ -188,7 +201,7 @@ write_state() {
     plugged=$(_se_plugged)
     units=$(_se_units "$cur")
     polarity=$(_se_polarity "$status" "$cur")
-    mclass=$(_se_class "$cur" "$plugged" "$units")
+    mclass=$(_se_class "$cur" "$plugged" "$units" "$polarity")
     trust=$(_se_trust "$status" "$mclass" "$cur")
     conf=low
     { [ "$units" != unknown ] && [ "$cur" != null ]; } && conf=medium

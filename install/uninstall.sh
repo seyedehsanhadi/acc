@@ -84,6 +84,22 @@ rm -rf \
     for f in */apsd_rerun */rerun_aicl; do
       [ -w "$f" ] && echo 1 > "$f" 2>/dev/null || :
     done
+    # (a5) rc6 (B4): un-cap CURRENT-limit switches the daemon may have locked. The enable sweep
+    # above writes "1" to on/off nodes, but the current-cap class is OFF=0 and is NOT un-capped by
+    # that -- a device locked on */current_max, constant_charge_current[_max] or */input_current
+    # would be left charging at 0 mA. Restore each to a high value (kernel clamps to its own max);
+    # prefer the kernel's own _max for constant_charge_current. siop_level: 100 = full.
+    for f in */constant_charge_current; do
+      [ -w "$f" ] || continue
+      d="${f}_max"
+      [ -r "$d" ] && cat "$d" > "$f" 2>/dev/null || echo 5000000 > "$f" 2>/dev/null || :
+    done
+    for f in */current_max */input_current_limit */input_current */constant_charge_current_max; do
+      [ -w "$f" ] && echo 5000000 > "$f" 2>/dev/null || :
+    done
+    for f in */siop_level; do
+      [ -w "$f" ] && echo 100 > "$f" 2>/dev/null || :
+    done
     cd / 2>/dev/null || :
   fi
   # (b) clear any NATIVE %-limit so the battery is not left capped (Pixel/Tensor charge_stop_level,
@@ -117,6 +133,10 @@ rm -rf \
   for b in /data/adb/ksu/bin /data/adb/ap/bin; do
     rm -f $b/$id $b/${id}a $b/${id}d 2>/dev/null
   done
+  # rc9: also remove the tmpfs work dir (TMPDIR=/dev/.$domain/$id). The block above only
+  # cleared /data/adb/$domain/*, leaving /dev/.vr25/acc (stale .config/.cfg/locks) on a
+  # no-reboot uninstall. Leave /dev/.$domain/busybox (shared) intact.
+  rm -rf "$TMPDIR" 2>/dev/null || :
 }
 
 exit 0

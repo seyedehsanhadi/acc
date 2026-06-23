@@ -203,7 +203,11 @@ test_switch() {
       # accepted and --apply-LOCKED here. Re-sample a few times; if current returns to the
       # charging direction above THR, it did NOT hold -> fail (do not lock a non-holding switch).
       held=1; ci=0
-      while [ "$ci" -lt 3 ]; do
+      # rc6 (F4): confirm the hold for >~3s, not 0.9s. The firmware re-arm this guards against
+      # (MTK current_cmd on Xiaomi/HyperOS klee) bounces back at ~loopDelay[0]=3s, which a
+      # 3x300ms=0.9s window missed -> a non-holding switch got --apply-LOCKED. Sample across
+      # ~4.5s so a brief stop-then-rearm is caught here, like the daemon's own sustained check.
+      while [ "$(( ci * STEP_MS ))" -lt 4500 ]; do
         nap; ci=$((ci+1)); cnr=$(raw); cnow=$(abs "$cnr"); crev=0
         if [ "$chgNeg" = 1 ]; then [ "$cnr" -gt 0 ] 2>/dev/null && crev=1; else [ "$cnr" -lt 0 ] 2>/dev/null && crev=1; fi
         [ "$crev" = 0 ] && [ "$cnow" -ge $(( base / 3 )) ] 2>/dev/null && { held=0; break; }

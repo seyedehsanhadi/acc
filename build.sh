@@ -109,8 +109,12 @@ set +e
 # unify installers for flashable zip (customize.sh and update-binary are copies of install.sh)
 # N3: force-copy (not -u) -- customize.sh and update-binary ARE install.sh; a stale mtime
 # (fresh clone, revert, editor preserving mtime) must never ship old install logic in the zip.
-{ cp -f install.sh customize.sh
-cp -f install.sh META-INF/com/google/android/update-binary; } 2>/dev/null
+cp -f install.sh customize.sh
+cp -f install.sh META-INF/com/google/android/update-binary
+# rc6: verify the copies actually synced -- a silently-failed cp (read-only/locked file) used to
+# ship a STALE installer inside the flashable zip. Fail loudly instead of hiding it with 2>/dev/null.
+cmp -s install.sh customize.sh && cmp -s install.sh META-INF/com/google/android/update-binary \
+  || { echo "BUILD ERROR: customize.sh / update-binary did not sync from install.sh" >&2; exit 9; }
 
 
 if [ bin/${id}_flashable_uninstaller.zip -ot install/uninstall.sh ] || [ ! -f bin/${id}_flashable_uninstaller.zip ]; then

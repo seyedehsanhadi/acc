@@ -1,4 +1,4 @@
-set +u
+( set +u   # rc6 (S5): subshell so this 'set +u' (needed for the unguarded array reads below) does NOT leak into the sourcing caller (acc -s / set-prop) and silently disable its unset-var protection
 
 echo "acc_version=$(sed -n s/versionCode=//p $execDir/module.prop)
 
@@ -51,3 +51,4 @@ idle_apps=\"${idleApps[@]}\"
 run_cmd_on_pause=\"$runCmdOnPause\""
 
 [ "${1-.}" = ns ] || sed -n 's/^:/\n:/p' $config
+)

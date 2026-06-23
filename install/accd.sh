@@ -146,10 +146,12 @@ if ! $_INIT; then
     while [ $left -gt 0 ]; do
       sleep 1
       left=$((left - 1))
-      # charger plugged in -> wake now so charging logic runs immediately.
-      # written as "! online || break" (not "online && break") so the common
-      # unplugged case returns 0 under set -e, exactly like _nap's mtime guard.
-      ! online || break
+      # charger attached -> wake now so charging logic runs immediately. rc9: gate on
+      # present (cable attached), not online -- an input-cut switch holds online=0 while
+      # plugged, which kept the daemon in this 120s deep nap (delaying resume + config
+      # edits). present stays 1 whenever the cable is in. Written "! present || break"
+      # so the truly-unplugged case returns 0 under set -e, like _nap's mtime guard.
+      ! present || break
       # config changed -> wake now so AccA edits apply live
       [ "$(stat -c %Y $config 2>/dev/null || echo x)" = "$ts" ] || break
     done
@@ -205,13 +207,15 @@ if ! $_INIT; then
 
     if not_charging; then
       unsolicitedResumes=0
+      xIdleCount=0   # rc7 (A2): reset the idle-avoidance budget each time charging genuinely stops (new session), so allow_idle_above_pcap users keep it across days without a reboot
       # rc16: charging is NOT happening (paused at limit, idle, or UNPLUGGED). Reset
       # the whole auto-lock campaign so a transient plug/unplug blip is never mistaken
       # for "charging past the limit", and the next real charge starts a clean detect.
       # (Deliberately keeps $TMPDIR/.sw-blacklist so a proven-bad switch stays excluded
       # for the session.)
       rm $TMPDIR/.autolock-tried $TMPDIR/.autolock-count $TMPDIR/.autolock-gaveup \
-         $TMPDIR/.lockfail-count $TMPDIR/.breach 2>/dev/null || :
+         $TMPDIR/.lockfail-count $TMPDIR/.breach \
+         $TMPDIR/.lockwarned $TMPDIR/.resumewarned 2>/dev/null || :
     else
       isCharging=true
       # [auto mode] change the charging switch if charging has not been enabled by acc (if behavior repeats 3 times in a row)
@@ -456,17 +460,22 @@ if ! $_INIT; then
              && sleep 2 && present && _ge_pause_cap && ! not_charging
           then
             if [[ "${chargingSwitch[*]-}" = *\ -- ]]; then
-              # CONTRACT MONITOR: a LOCKED switch is not holding the limit. After a few
-              # confirmed loops, unlock + blacklist it so the in-process locker picks a
-              # different one next loop (cycle_switches honors $TMPDIR/.sw-blacklist).
+              # CONTRACT MONITOR: a LOCKED switch is not holding the limit. After a few confirmed
+              # loops: if the USER locked it (.user-locked), WARN them (rc8) -- NEVER auto-replace a
+              # manual lock; otherwise (an AUTO-locked switch) unlock + blacklist it so the in-process
+              # locker picks a different one next loop (cycle_switches honors $TMPDIR/.sw-blacklist).
               lf=$(cat $TMPDIR/.lockfail-count 2>/dev/null || echo 0); lf=$((lf + 1))
               echo $lf > $TMPDIR/.lockfail-count
               if [ $lf -ge 3 ]; then
-                echo "${chargingSwitch[*]% --}" >> $TMPDIR/.sw-blacklist
-                notif "⚠️ ACC: the locked charging switch stopped holding your ${capacity[3]:-?}% limit — selecting another."
-                $TMPDIR/acca $config --set charging_switch= 2>/dev/null || :
-                chargingSwitch=()
-                rm $TMPDIR/.lockfail-count 2>/dev/null || :
+                if [ -f $dataDir/.user-locked ]; then
+                  [ -f $TMPDIR/.lockwarned ] || { touch $TMPDIR/.lockwarned 2>/dev/null || :; notif "⚠️ ACC: your locked charging switch isn't holding your ${capacity[3]:-?}% limit. Pick another in AccA — ACC will NOT change a locked switch for you."; }
+                else
+                  echo "${chargingSwitch[*]% --}" >> $TMPDIR/.sw-blacklist
+                  notif "⚠️ ACC: the auto-selected charging switch stopped holding your ${capacity[3]:-?}% limit — selecting another."
+                  $TMPDIR/acca $config --set charging_switch= 2>/dev/null || :
+                  chargingSwitch=()
+                  rm $TMPDIR/.lockfail-count 2>/dev/null || :
+                fi
               fi
             else
               # Nothing locked yet and the in-process locker has not stopped charge this
@@ -485,7 +494,7 @@ if ! $_INIT; then
             # not breaching (stopped at the limit, below it, or UNPLUGGED): clear the
             # per-loop markers. The full campaign reset happens in is_charging when
             # charging genuinely stops.
-            rm $TMPDIR/.breach $TMPDIR/.lockfail-count 2>/dev/null || :
+            rm $TMPDIR/.breach $TMPDIR/.lockfail-count $TMPDIR/.lockwarned 2>/dev/null || :
           fi 2>/dev/null || :
           _nap ${loopDelay[1]}
           rm $TMPDIR/.minCapMax 2>/dev/null || :
@@ -527,6 +536,34 @@ if ! $_INIT; then
 
       else
 
+        # rc6 (L1 self-heal): some devices report current_now with an unreliable / rate-dependent
+        # sign (e.g. Mi A3: charging reads NEGATIVE at full rate but POSITIVE when tapered near the
+        # top), so the current-based status detection can land us in THIS not-charging branch while
+        # the battery is actually charging ABOVE the limit -> the cap silently goes UNENFORCED and
+        # the battery overshoots. The RAW battery status node IS reliable here, so use it as a
+        # backstop TRIGGER: if it says Charging while online and at/above the pause level (debounced
+        # one loop), force the pause directly. disable_charging can only STOP charging, never
+        # overcharge, so this is always safe -- and it is a no-op on healthy devices, which never
+        # reach this branch while genuinely charging above the limit.
+        if online && _ge_pause_cap && [ "$(read_status)" = Charging ]; then
+          _sh=$(cat $TMPDIR/.statusheal 2>/dev/null || echo 0); _sh=$((_sh + 1)); echo $_sh > $TMPDIR/.statusheal
+          if [ $_sh -ge 2 ]; then
+            disable_charging || :
+            force_off
+            # rc6 (H1): if forcing the pause repeatedly STILL does not stop charging, no switch on
+            # this device holds the limit -- surface it ONCE (mirrors the charging-branch give-up)
+            # rather than retrying silently forever.
+            if [ $_sh -ge 8 ] && [ ! -f $TMPDIR/.statusheal-gaveup ]; then
+              touch $TMPDIR/.statusheal-gaveup
+              notif "⚠️ ACC: no charging switch on this phone stops charging at your ${capacity[3]:-?}% limit. Open AccA → Scripts → 'Scan & lock', or this device may need a switch ACC does not have yet."
+            fi
+            _nap ${loopDelay[1]}
+            continue
+          fi
+        else
+          rm $TMPDIR/.statusheal $TMPDIR/.statusheal-gaveup 2>/dev/null || :
+        fi
+
         # rc24: generic (non-Pixel) fresh-plug re-arm -- resume on re-plug without a reboot.
         generic_rearm || :
 
@@ -549,13 +586,18 @@ if ! $_INIT; then
             for _rn in */apsd_rerun */rerun_aicl; do [ -w "$_rn" ] && echo 1 > "$_rn" 2>/dev/null || :; done
             rf=$(cat $TMPDIR/.resumefail 2>/dev/null || echo 0); rf=$((rf + 1)); echo $rf > $TMPDIR/.resumefail
             if [ $rf -ge 4 ] && [[ "${chargingSwitch[*]-}" = *\ -- ]]; then
-              echo "${chargingSwitch[*]% --}" >> $TMPDIR/.sw-blacklist
-              notif "⚠️ ACC: charging is not resuming at your ${capacity[2]:-?}% limit — selecting another switch."
-              $TMPDIR/acca $config --set charging_switch= 2>/dev/null || :; chargingSwitch=()
-              rm $TMPDIR/.resumefail 2>/dev/null || :
+              if [ -f $dataDir/.user-locked ]; then
+                # rc8: user-locked switch not resuming -> WARN, never auto-replace (respect the lock).
+                [ -f $TMPDIR/.resumewarned ] || { touch $TMPDIR/.resumewarned 2>/dev/null || :; notif "⚠️ ACC: charging isn't resuming at your ${capacity[2]:-?}% limit with your locked switch. Pick another in AccA — ACC will NOT change a locked switch."; }
+              else
+                echo "${chargingSwitch[*]% --}" >> $TMPDIR/.sw-blacklist
+                notif "⚠️ ACC: charging is not resuming at your ${capacity[2]:-?}% limit — selecting another switch."
+                $TMPDIR/acca $config --set charging_switch= 2>/dev/null || :; chargingSwitch=()
+                rm $TMPDIR/.resumefail 2>/dev/null || :
+              fi
             fi
           else
-            rm $TMPDIR/.resumefail 2>/dev/null || :
+            rm $TMPDIR/.resumefail $TMPDIR/.resumewarned 2>/dev/null || :
           fi
         fi
 
@@ -590,7 +632,11 @@ if ! $_INIT; then
         # and config edits still break the wait within ~1s (see _nap_idle). Anything
         # actionable (charger present, or at/below the shutdown threshold) keeps the
         # original short nap so shutdown/resume timing is never weakened.
-        if ! online && { ! _le_shutdown_cap || [ "${capacity[0]:-0}" -lt 1 ] 2>/dev/null; }; then
+        # rc9: gate the deep-idle nap on present (cable attached), not online -- an input-cut
+        # switch holds online=0 while plugged, so a plugged-but-capped device used to enter
+        # the 120s deep nap. _nap_idle's present check now breaks it in ~1s, but entering it
+        # every loop churns the CPU; present here keeps a plugged device on the clean short nap.
+        if ! present && { ! _le_shutdown_cap || [ "${capacity[0]:-0}" -lt 1 ] 2>/dev/null; }; then
           _nap_idle ${idleDelay:-120}
         else
           _nap ${loopDelay[1]}
@@ -602,13 +648,16 @@ if ! $_INIT; then
 
 
   force_off() {
-    local f=$TMPDIR/.forceoff
+    local f=$TMPDIR/.forceoff _pp=$$
     rm $f* 2>/dev/null || :
     $forceOff || return 0
     f=$f.$(date +%s)
     touch $f
     set +x
-    while [ -f $f ] && _gt_resume_cap; do
+    # rc6 (B5): also stop if the parent daemon is gone. A SIGKILL skips exxit's flag cleanup,
+    # so the tmpfs flag could otherwise orphan this background loop and keep current pinned at 0
+    # (no charge) until reboot. kill -0 on the daemon pid ends the loop when the daemon dies.
+    while [ -f $f ] && kill -0 $_pp 2>/dev/null && _gt_resume_cap; do
       flip_sw off || break
       sleep 1
     done &
@@ -704,33 +753,38 @@ if ! $_INIT; then
 
 
   set_dp() {
-    local cmd=
-    local curr=
+    local curr= i= pos=0 neg=0
     . $config
-    while [ -z "${_DPOL-}" ] && $battStatusWorkaround && [ $currFile != $TMPDIR/.dummy-mcc ]; do
-      curr=$(cat $currFile)
-      if [ $(cat $battStatus) = Charging ]; then
-        if [ $curr -gt 0 ]; then
-          sdp -
-        elif [ $curr -lt 0 ]; then
-          sdp +
-        else
-          /dev/acca --set batt_status_workaround=false
-          return 0
-        fi
-      else
-        if [ $curr -gt 0 ]; then
-          sdp +
-        elif [ $curr -lt 0 ]; then
-          sdp -
-        else
-          /dev/acca --set batt_status_workaround=false
-          return 0
-        fi
+    # nothing to do once polarity is known, the workaround is off, or there is no sensor
+    { [ -z "${_DPOL-}" ] && $battStatusWorkaround && [ $currFile != $TMPDIR/.dummy-mcc ]; } || return 0
+    # rc6 (L1): latch the discharge polarity ONLY from a CONFIRMED "Charging" status -- that
+    # is the one unambiguous moment (we KNOW charging, so the current sign IS the charge
+    # direction). The old code ALSO inferred polarity from a non-Charging status; right after a
+    # pause-release the status lags the current sign, so it latched the WRONG polarity -> the
+    # daemon then read this device's steady +current as Discharging and NEVER enforced the limit
+    # (silent overcharge). And _DPOL is cached in .batt-interface.sh, so a plain restart kept the
+    # bad value (only --init recomputed it). If not clearly charging this loop, leave _DPOL unset
+    # and try again next loop -- never guess from a transient.
+    set +x
+    if [ "$(cat $battStatus 2>/dev/null)" = Charging ]; then
+      # sample the (noisy) current a few times; require a consistent sign before committing
+      for i in 1 2 3 4 5; do
+        curr=$(cat $currFile 2>/dev/null)
+        case ${curr:-x} in
+          -*) neg=$((neg + 1));;
+          ''|x|*[!0-9-]*|0) ;;
+          *) pos=$((pos + 1));;
+        esac
+        sleep 1
+      done
+      if   [ $pos -ge 3 ]; then sdp -
+      elif [ $neg -ge 3 ]; then sdp +
+      elif [ $((pos + neg)) -eq 0 ]; then
+        # charging but current reads zero/unreadable = no usable current sensor; fall back to
+        # the raw battery status (same intent as the old curr==0 path).
+        /dev/acca --set batt_status_workaround=false
       fi
-      set +x
-      . $config
-    done
+    fi
     set -x
   }
 
@@ -848,7 +902,9 @@ if ! $_INIT; then
   # blacklist are intentionally NOT cleared here so reruns stay bounded across the
   # scanner's own daemon restart; they reset when charging stops (see is_charging).
   rm $TMPDIR/.testingsw $TMPDIR/.sw-strict-done $TMPDIR/.breach \
-     $TMPDIR/.autolock-tried $TMPDIR/.lockfail-count 2>/dev/null || :
+     $TMPDIR/.autolock-tried $TMPDIR/.lockfail-count \
+     $TMPDIR/.statusheal $TMPDIR/.statusheal-gaveup \
+     $TMPDIR/.lockwarned $TMPDIR/.resumewarned 2>/dev/null || :   # rc6 (H5)/rc8: clear self-heal + locked-switch-warn markers on (re)start (NOT $dataDir/.user-locked, which persists)
   # rc19 recovery: a killed manual scan (SIGKILL skips its restore trap) can leave a
   # charge-current node pinned at 0 -> the phone will not charge until reboot, because
   # enable_charging only restores the LOCKED switch, not other nodes. When plugged in,

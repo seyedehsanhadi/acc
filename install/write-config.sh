@@ -115,6 +115,10 @@ fi
 [ ${sc:-5} -lt $rc ] || sc=$(( rc > 1 ? rc - 1 : 0 ))
 
 : ${mt:=50}
+# rc6 (H4): cap an absurd numeric max_temp into a sane band. The shutdown_temp floor below keeps
+# st>=max_temp; an out-of-band mt (e.g. 90) would otherwise drag the whole temperature band off or
+# force st down below mt. Valid pause/cooldown ceiling is ~20..60 C; anything else -> 50.
+{ [ ${mt:-50} -ge 20 ] && [ ${mt:-50} -le 60 ]; } 2>/dev/null || mt=50
 : ${rt:=40}
 : ${ct:=45}
 
@@ -130,6 +134,13 @@ fi
 # throttles. If the cooldown->max gap collapsed (<3 C), the input was garbage -> reset to the
 # proven default band rather than ship a dead cooldown stage.
 [ $((mt - ct)) -ge 3 ] || { ct=45; mt=50; rt=40; }
+
+# rc6 (A3): shutdown_temp is the HARD over-temperature cutoff -- it must sit at/above the
+# operating band, never below it. The non-numeric guard above let a low NUMERIC value (e.g.
+# st=8) through, and the daemon then shuts the phone down whenever battery temp >= st (8C is
+# always true). Keep st in a sane band [max(max_temp,40) .. 70]; outside that = garbage -> 55.
+case ${st:-55} in *[!0-9]*) st=55;; esac
+{ [ ${st:-55} -ge $mt ] && [ ${st:-55} -ge 40 ] && [ ${st:-55} -le 70 ]; } 2>/dev/null || st=55
 
 
 # reset switch (in auto-mode) if pbim has changed and another switch is not being set
@@ -168,6 +179,25 @@ case ${rr-} in true|false) :;; *) rr=false;; esac
 case ${rbsp-} in true|false) :;; *) rbsp=false;; esac
 case ${rbsu-} in true|false) :;; *) rbsu=false;; esac
 case ${rbspl-} in true|false) :;; *) rbspl=false;; esac
+
+# rc6 (A1): clamp plain-numeric mcc/mcv/tl HERE so the front-end path (acca -s, which writes
+# config directly via this file) gets the SAME validation acc -s applies through set_ch_curr/
+# set_ch_volt. A bad value (mcv=4500, mcc=99999) used to be stored verbatim -- only the daemon
+# re-clamped on apply, so the saved config diverged from the acc -s result. Lists (with spaces)
+# and node paths contain non-digits, so they are left untouched.
+case "$mcc" in ''|*[!0-9]*) ;; *) [ $mcc -le 9999 ] || mcc=9999;; esac
+case "$mcv" in ''|*[!0-9]*) ;; *) [ $mcv -ge 3700 ] || mcv=3700; [ $mcv -le 4300 ] || mcv=4300;; esac
+case "${tl:-0}" in ''|*[!0-9]*) ;; *) [ ${tl:-0} -le 100 ] || tl=100;; esac
+
+# rc8: remember whether the charging switch was LOCKED by the USER (a manual lock to RESPECT --
+# never auto-replace it) vs by the daemon's own auto-locker (which may self-heal/replace it).
+# isAccd=true means the running daemon wrote this config; a user `acc/acca -s` runs with
+# isAccd=false. The 3 auto-replace sites (disable_charging fallback, breach monitor, resume
+# watchdog) read this marker and only ever auto-change an AUTO-locked switch, never a user lock.
+case "$s" in
+  *\ --) if ${isAccd:-false}; then rm -f $dataDir/.user-locked 2>/dev/null || :; else touch $dataDir/.user-locked 2>/dev/null || :; fi;;
+  *) rm -f $dataDir/.user-locked 2>/dev/null || :;;
+esac
 
 
 echo "configVerCode=$(cat $TMPDIR/.config-ver)

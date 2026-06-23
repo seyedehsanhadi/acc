@@ -126,7 +126,7 @@ case "$@" in
   -s\ d*|-s\ --print-default*|--set\ d*|--set\ --print-default*|-sd*)
     [ $1 = -sd ] && shift || shift 2
     . $defaultConfig
-    one="${1//,/|}"
+    one="${1-}"; one="${one//,/|}"   # rc7 (F7): guard unset $1 -- after the shift, `acca -s p` / `-s d` with no filter left $1 unset, and `${1//,/|}` aborts under set -u (the app's "show config" refresh hard-fails)
     . $execDir/print-config.sh ns | grep -E "${one:-.}" | sed 's/^$//' || :
     exit 0
   ;;
@@ -135,7 +135,7 @@ case "$@" in
   -s\ p*|-s\ --print|-s\ --print\ *|--set\ p|--set\ --print|--set\ --print\ *|-sp*)
     [ $1 = -sp ] && shift || shift 2
     . $config
-    one="${1//,/|}"
+    one="${1-}"; one="${one//,/|}"   # rc7 (F7): guard unset $1 -- after the shift, `acca -s p` / `-s d` with no filter left $1 unset, and `${1//,/|}` aborts under set -u (the app's "show config" refresh hard-fails)
     . $execDir/print-config.sh | grep -E "${one:-.}" | sed 's/^$//' || :
     exit 0
   ;;

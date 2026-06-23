@@ -1,5 +1,4 @@
 _grep() { grep -Eq "$1" ${2:-$config}; }
-_set_prop() { sed -i "\|^${1}=|s|=.*|=$2|" ${3:-$config}; }
 _get_prop() { sed -n "\|^$1=|s|.*=||p" ${2:-$config} 2>/dev/null || :; }
 _is_board() { getprop ro.product.board | grep -Eiq "$1"; }
 
@@ -7,13 +6,7 @@ _is_board() { getprop ro.product.board | grep -Eiq "$1"; }
 if (set +x; . $config) >/dev/null 2>&1; then
   configVer=0$(_get_prop configVerCode)
   defaultConfVer=0$(cat $TMPDIR/.config-ver)
-  [ $configVer -eq $defaultConfVer ] || {
-    # if [ $configVer -lt 202404070 ]; then
-    #   $TMPDIR/acca $config --set thermal_suspend=
-    # else
-      $TMPDIR/acca $config --set dummy=
-    # fi
-  }
+  [ $configVer -eq $defaultConfVer ] || $TMPDIR/acca $config --set dummy=
 else
   cat $execDir/default-config.txt > $config
 fi
@@ -57,5 +50,5 @@ fi
     || $TMPDIR/acca $config --set charging_switch="battery/charging_enabled 1 0 --"
 }
 
-unset -f _grep _get_prop _is_board _set_prop
+unset -f _grep _get_prop _is_board
 unset configVer defaultConfVer

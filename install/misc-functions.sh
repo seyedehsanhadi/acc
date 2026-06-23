@@ -246,13 +246,17 @@ disable_charging() {
         if ! { flip_sw off && not_charging; }; then
           $isAccd || print_switch_fails "${chargingSwitch[@]-}"
           flip_sw on 2>/dev/null || :
-          # fix7 hardening: recover even from a --locked switch that has stopped
-          # working. "--" suppresses routine auto-cycling (no churn while it works),
-          # but a switch that fails to stop charging AT ALL must still trigger the
-          # fallback -- safety outranks the lock. Alert once so a stale lock is seen.
-          $autoMode || notif "⚠️ Locked charging switch failed to stop charging; auto-selecting another"
-          unset_switch
-          cycle_switches_off
+          # rc8: RESPECT a manual lock. If the USER locked this switch (.user-locked, set by
+          # write-config when a non-daemon `acc/acca -s` wrote it), NEVER auto-replace it -- the user
+          # locks precisely to stop ACC ever using a different node. Just WARN (debounced) so they
+          # can fix it; keep retrying THEIR switch each loop. An AUTO-locked switch (daemon-chosen)
+          # still self-heals as before. (was: any failing locked switch was unset + auto-selected.)
+          if [ -f $dataDir/.user-locked ]; then
+            [ -f $TMPDIR/.lockwarned ] || { touch $TMPDIR/.lockwarned 2>/dev/null || :; notif "⚠️ ACC: your manually-set charging switch isn't stopping charging. Pick another in AccA — ACC will NOT auto-change a locked switch."; }
+          else
+            unset_switch
+            cycle_switches_off
+          fi
         fi
       else
         invalid_switch
@@ -325,7 +329,7 @@ enable_charging() {
     # current-cap switches even while online=0 (same name exception as the resume gate below).
     if [ -f $TMPDIR/.sw ]; then
       . $TMPDIR/.sw 2>/dev/null || :; rm -f $TMPDIR/.sw 2>/dev/null || :
-      if online || { case "${chargingSwitch[*]-}" in *suspend*|*bypass*|*vbus*|*current_max*|*input_current*|*constant_charge_current*) true;; *) false;; esac; }; then
+      if present; then   # rc7 (U5): gate resume on PRESENT (cable attached), not online+name-allowlist. Many input-cut switches (charging_enabled/charge_disable/slate_mode/force_*_suspend/mmi/night_charging...) drive */online to 0 while latched, and were NOT in the allowlist -> never re-armed -> stuck not-charging till reboot. present stays 1 whenever plugged, covers EVERY cut class, and still skips the flip when truly unplugged (no phantom-charging blip).
         flip_sw on 2>/dev/null || :
       fi
     fi
@@ -348,7 +352,7 @@ enable_charging() {
       # no current = no phantom "Charging") and un-masks online when actually plugged. The
       # pause path still enforces the limit, so this can never overcharge. All OTHER switch
       # types keep the online gate (avoids the cosmetic unplug blip).
-      if online || { case "${chargingSwitch[*]-}" in *suspend*|*bypass*|*vbus*|*current_max*|*input_current*|*constant_charge_current*) true;; *) false;; esac; }; then
+      if present; then   # rc7 (U5): gate resume on PRESENT (cable attached), not online+name-allowlist. Many input-cut switches (charging_enabled/charge_disable/slate_mode/force_*_suspend/mmi/night_charging...) drive */online to 0 while latched, and were NOT in the allowlist -> never re-armed -> stuck not-charging till reboot. present stays 1 whenever plugged, covers EVERY cut class, and still skips the flip when truly unplugged (no phantom-charging blip).
         flip_sw on || cycle_switches on
         # D8 (rc5: extended to current-cap classes): after un-cutting, re-run APSD/AICL so the
         # charger re-negotiates. Input-cut switches (input_suspend/bypass/vbus) mask */online to 0
@@ -373,17 +377,6 @@ enable_charging() {
             fi ;;
         esac
       fi
-
-      # detect and block ghost charging
-      # if ! $ghostCharging && ! not_charging && ! online \
-      #   && sleep ${loopDelay[0]} && ! not_charging && ! online
-      # then
-      #   ghostCharging=true
-      #   disable_charging > /dev/null
-      #   touch $TMPDIR/.ghost-charging
-      #   wait_plug
-      #   return 0
-      # fi
 
     else
       wait_plug
@@ -450,6 +443,7 @@ flip_sw() {
   flip=$1
   local on=
   local off=
+  local _wrote=0
 
   set -- ${chargingSwitch[@]-}
   [ -f ${1:-//} ] || return 2
@@ -465,22 +459,33 @@ flip_sw() {
     # NOT pcap: charge_stop_level latches "stopped", and only a higher value (100)
     # re-arms the charger -- writing the limit value back would leave it frozen.
     [ "$2" != pcap ] || on=100
-    if [ $3 = 3600mV ]; then
-      off=$(cat $1)
-      [ $off -lt 10000 ] && off=3600 || off=3600000
-    elif [ $3 = pcap ]; then
+    if [ "$3" = 3600mV ]; then
+      # rc7 (U4): the float-voltage node can blip empty/garbage during PD/AICL renegotiation. An
+      # unguarded "[ $off -lt 10000 ]" then aborts flip_sw under set -e (pause lost). Coerce: if
+      # unreadable, FAIL this flip (caller retries next loop) rather than write a wrong-unit value.
+      off=$(cat $1 2>/dev/null)
+      case ${off:-x} in
+        ''|*[!0-9-]*) return 1;;
+        *) [ $off -lt 10000 ] && off=3600 || off=3600000;;
+      esac
+    elif [ "$3" = pcap ]; then
       case ${capacity[3]-} in ''|*[!0-9]*) off=60;; *) off=${capacity[3]};; esac
     else
       off="$(parse_value "$3")"
     fi
 
     [ $flip = on ] || cat $currFile > $curThen
-    write \$$flip $1 || return 1
+    # rc7 (U1): write EVERY node of a multi-node group (best-effort) instead of aborting on the
+    # first node that fails -- a group like the Pixel all-paths current cut needs ALL nodes set, and
+    # actual success is judged by not_charging afterwards, not by one node's write. Report total
+    # failure (return 1) only if NO node could be written at all.
+    write \$$flip $1 && _wrote=1 || :
 
     [ $# -lt 3 ] || shift 3
     [ $# -ge 3 ] || break
 
   done
+  [ $_wrote = 1 ] || return 1
 }
 
 
