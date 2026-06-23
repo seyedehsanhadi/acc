@@ -209,6 +209,12 @@ cycle_switches() {
 
 
 cycle_switches_off() {
+  # rc11: demote the current-cap class (*/current_max, constant_charge_current[_max],
+  # */input_current) to the END of the candidate list -- those can pass the 9s sustained-hold
+  # verify yet get re-armed by the charger firmware afterwards, so discovery wastes ~9s on each
+  # before the runtime monitor parks it. Reliable cut/native-level switches are tried first now.
+  # Pure reorder of the candidate ORDER; the verify + ranking logic is unchanged; no-op if awk absent.
+  [ -f $TMPDIR/ch-switches ] && awk '/current_max|constant_charge_current|input_current/{lo=lo $0 ORS; next}{hi=hi $0 ORS}END{printf "%s%s",hi,lo}' $TMPDIR/ch-switches > $TMPDIR/ch-switches.r 2>/dev/null && mv -f $TMPDIR/ch-switches.r $TMPDIR/ch-switches 2>/dev/null || :
   # Pass 1 (strict): prefer a switch whose off state persists, so a flicker-prone
   # level switch is skipped whenever a cleaner one exists on this device.
   # Probe strictly only while no switch is set yet, and at most once per accd
