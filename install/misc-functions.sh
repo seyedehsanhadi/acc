@@ -190,11 +190,38 @@ cycle_switches() {
           # limit, then resumed/reset" sawtooth). A --locked switch that later stops working is
           # still recovered (fix8), so locking is safe.
           $strict && s="${chargingSwitch[*]} --" || s="${chargingSwitch[*]}"
+          # rc13: breadcrumb. Cache the bare switch line (no trailing " --") so the next
+          # cycle_switches_off on this or a future session can try it FIRST instead of
+          # fanning out through the full candidate list (each failed candidate's
+          # flip_sw on re-arms charging briefly -> battery rises during cycling).
+          printf '%s\n' "${chargingSwitch[*]}" > $dataDir/.last-good-switch 2>/dev/null || :
           . $execDir/write-config.sh
           break
         else
-          # reset switch/group that fails to comply, and move it to the end of the list
-          flip_sw on 2>/dev/null || :
+          # reset switch/group that fails to comply, and move it to the end of the list.
+          # rc13: SUPPRESS the flip_sw on re-arm when we're already at/above the pause level
+          # (post-install fan-out through N candidates can otherwise let cap creep past pause:
+          # each failed candidate's "on" briefly un-cuts before the next is tried). The failed
+          # switch's "off" write had no protective effect anyway, so leaving the nodes alone
+          # is no worse than re-arming them, and the loop body still moves the candidate to
+          # the end. Mirrors the daemon's ${capacity[3]} domain check (% if <=100, else mV).
+          _suppress_on=false
+          case "${capacity[3]-}" in
+            ''|*[!0-9]*) : ;;
+            *)
+              if [ "${capacity[3]}" -gt 3000 ] 2>/dev/null && [ "${capacity[3]}" -le 5000 ] 2>/dev/null; then
+                _vn=$(volt_now 2>/dev/null)
+                case "${_vn:-x}" in ''|x|*[!0-9-]*) : ;; *) [ "$_vn" -ge "${capacity[3]}" ] 2>/dev/null && _suppress_on=true ;; esac
+                unset _vn
+              elif [ "${capacity[3]}" -le 100 ] 2>/dev/null; then
+                _bc=$(batt_cap 2>/dev/null)
+                case "${_bc:-x}" in ''|x|*[!0-9-]*) : ;; *) [ "$_bc" -ge "${capacity[3]}" ] 2>/dev/null && _suppress_on=true ;; esac
+                unset _bc
+              fi
+              ;;
+          esac
+          $_suppress_on || flip_sw on 2>/dev/null || :
+          unset _suppress_on
           if ! ${acc_t:-false}; then
             sed -i "\|^${chargingSwitch[*]}$|d" $TMPDIR/ch-switches
             echo "${chargingSwitch[*]}" >> $TMPDIR/ch-switches
@@ -215,6 +242,15 @@ cycle_switches_off() {
   # before the runtime monitor parks it. Reliable cut/native-level switches are tried first now.
   # Pure reorder of the candidate ORDER; the verify + ranking logic is unchanged; no-op if awk absent.
   [ -f $TMPDIR/ch-switches ] && awk '/current_max|constant_charge_current|input_current/{lo=lo $0 ORS; next}{hi=hi $0 ORS}END{printf "%s%s",hi,lo}' $TMPDIR/ch-switches > $TMPDIR/ch-switches.r 2>/dev/null && mv -f $TMPDIR/ch-switches.r $TMPDIR/ch-switches 2>/dev/null || :
+  # rc13: if a previously verified switch is cached AND still in the candidate list,
+  # promote it to the TOP so the strict pass tries it FIRST. Skips the full fan-out
+  # through the candidate list (each failing candidate's flip_sw on briefly re-arms
+  # charging -> cap can rise past pause during cycling on fresh installs / blanks).
+  # Pure reorder; if the cached switch fails the strict verify it just falls through
+  # to the existing list. No effect once a switch is locked (the guard below is false).
+  if [ -z "${chargingSwitch[0]-}" ] && [ -s $dataDir/.last-good-switch ] && [ -f $TMPDIR/ch-switches ]; then
+    awk -v lgs="$(cat $dataDir/.last-good-switch 2>/dev/null)" 'lgs!="" && $0==lgs{hit=hit $0 ORS; next}{rest=rest $0 ORS}END{printf "%s%s",hit,rest}' $TMPDIR/ch-switches > $TMPDIR/ch-switches.l 2>/dev/null && mv -f $TMPDIR/ch-switches.l $TMPDIR/ch-switches 2>/dev/null || :
+  fi
   # Pass 1 (strict): prefer a switch whose off state persists, so a flicker-prone
   # level switch is skipped whenever a cleaner one exists on this device.
   # Probe strictly only while no switch is set yet, and at most once per accd

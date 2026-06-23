@@ -246,9 +246,19 @@ if ! $_INIT; then
     # charging), and a garbage value would re-exec the daemon every loop.
     case ${currentWorkaround-} in true|false) :;; *) currentWorkaround=$currentWorkaround0;; esac
     [ "$currentWorkaround0" = "$currentWorkaround" ] || exec $TMPDIR/accd --init
-    # rc10: a user-initiated "automatic" reset re-discovers the best switch now, without a manual
-    # restart -- write-config drops $dataDir/.rediscover when a non-daemon acc/acca -s blanks the switch.
-    [ -f $dataDir/.rediscover ] && { rm -f $dataDir/.rediscover 2>/dev/null || :; exec $TMPDIR/accd --init; }
+    # rc10/rc12: a user-initiated "automatic" reset re-discovers the best switch now, without a
+    # manual restart -- write-config drops $dataDir/.rediscover when a non-daemon acc/acca -s blanks
+    # the switch. rc12 robustness: clear the marker + the session switch-blacklist (fresh slate),
+    # then RE-ARM charging on the known cut nodes -- otherwise the just-blanked switch's leftover cut
+    # makes the daemon read "already not charging", so it sees no cut-need and never re-detects.
+    # Then self-init to re-pick + lock. (Re-arm runs ONLY on an explicit user reset.)
+    [ -f $dataDir/.rediscover ] && {
+      rm -f $dataDir/.rediscover $TMPDIR/.sw-blacklist 2>/dev/null || :
+      for _en in /sys/class/power_supply/*/charging_enabled /sys/class/power_supply/*/battery_charging_enabled /sys/class/power_supply/*/charge_enabled; do [ -w "$_en" ] && echo 1 > "$_en" 2>/dev/null || :; done
+      for _di in /sys/class/power_supply/*/input_suspend /sys/class/power_supply/*/charge_disable /sys/class/power_supply/*/batt_slate_mode /sys/class/power_supply/*/op_disable_charge; do [ -w "$_di" ] && echo 0 > "$_di" 2>/dev/null || :; done
+      unset _en _di 2>/dev/null || :
+      exec $TMPDIR/accd --init
+    }
     (set +eu; eval '${loopCmd-}') || :
 
     # N1: coerce temperature[]/capacity[] to safe numeric defaults EACH loop. The daemon re-sources
