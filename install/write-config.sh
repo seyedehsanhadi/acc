@@ -196,6 +196,7 @@ case "${tl:-0}" in ''|*[!0-9]*) ;; *) [ ${tl:-0} -le 100 ] || tl=100;; esac
 # watchdog) read this marker and only ever auto-change an AUTO-locked switch, never a user lock.
 case "$s" in
   *\ --) if ${isAccd:-false}; then rm -f $dataDir/.user-locked 2>/dev/null || :; else touch $dataDir/.user-locked 2>/dev/null || :; fi;;
+  '') rm -f $dataDir/.user-locked 2>/dev/null || :; ${isAccd:-false} || touch $dataDir/.rediscover 2>/dev/null || :;;
   *) rm -f $dataDir/.user-locked 2>/dev/null || :;;
 esac
 

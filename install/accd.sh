@@ -246,6 +246,9 @@ if ! $_INIT; then
     # charging), and a garbage value would re-exec the daemon every loop.
     case ${currentWorkaround-} in true|false) :;; *) currentWorkaround=$currentWorkaround0;; esac
     [ "$currentWorkaround0" = "$currentWorkaround" ] || exec $TMPDIR/accd --init
+    # rc10: a user-initiated "automatic" reset re-discovers the best switch now, without a manual
+    # restart -- write-config drops $dataDir/.rediscover when a non-daemon acc/acca -s blanks the switch.
+    [ -f $dataDir/.rediscover ] && { rm -f $dataDir/.rediscover 2>/dev/null || :; exec $TMPDIR/accd --init; }
     (set +eu; eval '${loopCmd-}') || :
 
     # N1: coerce temperature[]/capacity[] to safe numeric defaults EACH loop. The daemon re-sources
