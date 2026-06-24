@@ -513,9 +513,10 @@ if ! $_INIT; then
               echo $ac > $TMPDIR/.autolock-count
               if [ $ac -le 6 ]; then
                 [ -f $TMPDIR/.breach ] || { notif "🔍 ACC: selecting a charging switch that holds your ${capacity[3]:-?}% limit…"; touch $TMPDIR/.breach; }
-              elif [ ! -f $TMPDIR/.autolock-gaveup ]; then
+              elif [ ! -f $TMPDIR/.autolock-gaveup ] \
+                && { [ "${capacity[3]:-100}" -gt 100 ] || [ "$(batt_cap)" -ge $(( ${capacity[3]:-100} + 2 )) ] 2>/dev/null; }; then
                 touch $TMPDIR/.autolock-gaveup
-                notif "⚠️ ACC: no charging switch on this phone stops charging at your ${capacity[3]:-?}% limit. Open AccA → Scripts → 'Scan & lock' to test, or this device may need a switch ACC does not have yet."
+                notif "⚠️ ACC: charging did not stop at your ${capacity[3]:-?}% limit; the battery went past it. In AccA, open the config editor and tap 'Find my charging switch'. This device may need a switch ACC does not have yet."
               fi
             fi
           else
@@ -581,9 +582,15 @@ if ! $_INIT; then
             # rc6 (H1): if forcing the pause repeatedly STILL does not stop charging, no switch on
             # this device holds the limit -- surface it ONCE (mirrors the charging-branch give-up)
             # rather than retrying silently forever.
-            if [ $_sh -ge 8 ] && [ ! -f $TMPDIR/.statusheal-gaveup ]; then
+            # rc4: warn ONLY when the cell has GENUINELY gone past the limit. On bypass/idle SoCs
+            # (e.g. OnePlus op_disable_charge) the status node lies "Charging" while the battery
+            # actually holds at 0A, which used to trip this give-up even though the switch works.
+            # The capacity overshoot is the ground truth (skip the % test in millivolt mode, where
+            # capacity[3] > 100).
+            if [ $_sh -ge 8 ] && [ ! -f $TMPDIR/.statusheal-gaveup ] \
+               && { [ "${capacity[3]:-100}" -gt 100 ] || [ "$(batt_cap)" -ge $(( ${capacity[3]:-100} + 2 )) ] 2>/dev/null; }; then
               touch $TMPDIR/.statusheal-gaveup
-              notif "⚠️ ACC: no charging switch on this phone stops charging at your ${capacity[3]:-?}% limit. Open AccA → Scripts → 'Scan & lock', or this device may need a switch ACC does not have yet."
+              notif "⚠️ ACC: charging did not stop at your ${capacity[3]:-?}% limit; the battery went past it. In AccA, open the config editor and tap 'Find my charging switch'. This device may need a switch ACC does not have yet."
             fi
             _nap ${loopDelay[1]}
             continue
