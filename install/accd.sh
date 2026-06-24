@@ -400,9 +400,26 @@ if ! $_INIT; then
     [ "$_frc" -ge 40 ] 2>/dev/null && { _frc=0; tail -n 1500 "$dataDir/logs/flight.log" > "$dataDir/logs/flight.log.t" 2>/dev/null && mv -f "$dataDir/logs/flight.log.t" "$dataDir/logs/flight.log" 2>/dev/null; } || :
   }
 
+  amp_recheck() {
+    # 6.4.1-rc5: STICKY-UP uA latch. The current_now unit is only knowable from a CHARGING
+    # current: a microamp sensor reads >= 16000 raw when charging (no cell charges at 16+ amps),
+    # a milliamp sensor stays under it (OnePlus 8 Pro tops out ~5000 mA). Latch + PERSIST uA the
+    # moment a big current appears, so a daemon init while idling at the cap can self-heal on the
+    # next charge instead of mis-defaulting to mA. Bumps UP only; a true mA device is never touched.
+    [ "${ampFactor_:-1000}" = 1000000 ] && return 0
+    local _c=$(cat $currFile 2>/dev/null); _c=${_c#-}
+    [ "$_c" -ge 16000 ] 2>/dev/null || return 0
+    ampFactor_=1000000
+    echo ampFactor_=1000000 >> $TMPDIR/.batt-interface.sh 2>/dev/null || :
+    grep -q '^ampFactor=1000000$' $dataDir/config.txt 2>/dev/null \
+      || sed -i 's/^ampFactor=.*/ampFactor=1000000/' $dataDir/config.txt 2>/dev/null || :
+  }
+
   ctrl_charging() {
 
     while :; do
+
+      amp_recheck || :
 
       # publish the state export (subsystem A) -- best-effort, never blocks the loop
       write_state || :

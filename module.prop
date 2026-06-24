@@ -1,8 +1,8 @@
 id=acc
 domain=vr25
 name=Advanced Charging Controller (ACC)
-version=v2025.5.18-6.4.1-rc4
-versionCode=202505244
+version=v2025.5.18-6.4.1-rc5
+versionCode=202505245
 author=VR25 (community stable)
 description=Extend your battery's service life by controlling charging current, temperature, and voltage. 6.4.1 RC: corrects a battery current read that showed impossible dashboard numbers and a fake discharge on Pixel and Tensor, self-heals current polarity, and flat-holds idle when a native firmware limit backstops it. 6.4 stable: a Magisk post-fs-data early cap closes the boot-window overcharge gap before the daemon starts; a switch you lock manually is never auto-replaced; switches are locked only after a sustained hold so the re-arm overcharge family is rejected; a raised limit and auto-resume react in seconds; re-discovery after a reset is reliable; the daemon survives a corrupt config; and device coverage is wider. Every change is stricter, additive, or diagnostic, and existing configs are unchanged. Any root solution is supported; the installation is always systemless. Works on Android and KaiOS.
 updateJson=https://raw.githubusercontent.com/VR-25/acc/master/module.json
