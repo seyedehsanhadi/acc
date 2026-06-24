@@ -1,8 +1,8 @@
-**v2025.5.18-6.4.1-rc1 (202505241)**
-A hotfix release candidate for 6.4 stable, fixing a battery current-reading bug surfaced on Pixel and Tensor. Existing configs are unchanged.
+**v2025.5.18-6.4.1-rc2 (202505242)**
+A hotfix release candidate for 6.4 stable, fixing a battery current-reading bug surfaced on Pixel and Tensor, plus a native-limit display issue. Existing configs are unchanged.
 - **Correct current scale, no more impossible dashboard numbers.** The current unit is read from the unambiguous voltage and design-capacity scale instead of the tiny instantaneous current, so a few-milliamp idle current at the cap is no longer mislabelled and shown about 1000 times too large. The daemon's own calibration uses the same anchor, so it can never mis-latch when it starts while idling at the cap.
 - **Self-healing current polarity.** A discharge polarity cached wrong (seen on Pixel and Android 17, where charging read as Discharging) self-corrects from a single large, unambiguous live sample during confirmed charging; small currents are ignored, so the silent-overcharge guard is preserved.
-- **Flat-hold idle on Pixel and Tensor when a native limit backstops it.** Battery-idle is re-enabled on these devices only when the verified native firmware limit (charge_stop_level) is the locked switch, so the firmware itself prevents any overshoot.
+- **Native firmware limit shows as a locked switch.** On Pixel and Tensor the daemon drives the firmware charge_stop_level pair directly and skips the generic switch toggle, so the switch field read empty and the phone looked like nothing was holding. The daemon now records the native limit as the locked switch, so the app shows it and the boot-time early cap can use it. The rc1 flat-hold experiment is removed (these SoCs have no true bypass, and the idle flags are ignored in this mode, so it could not help).
 - **Tester.** acc-compat anchors its unit detection the same way, so it no longer prints mA for a microamp sensor.
 
 **v2025.5.18-stable.6.4 (202505240)**

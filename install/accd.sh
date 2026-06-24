@@ -957,6 +957,17 @@ if ! $_INIT; then
   # "restart daemon" recovers charging with no reboot. Subshell isolates cycle_switches'
   # chargingSwitch writes from the locked config value (set_dp re-sources $config anyway).
   if $nativeLimit; then
+    # rc2: record the native firmware limit as the (locked) switch so AccA shows it instead of an
+    # empty "Automatic". The daemon drives it via sync_native_limit regardless of chargingSwitch,
+    # but an empty switch reads as "nothing is holding" and users re-run Find-Switch in vain (and
+    # the early-cap skips). Cosmetic + idempotent: fills an EMPTY switch only, never overrides a
+    # user's choice; nativeLimit still owns the actual hold.
+    . $config 2>/dev/null || :
+    [ -z "${chargingSwitch[*]-}" ] && {
+      sed -i "s|^chargingSwitch=.*|chargingSwitch=($gcsl 100 pcap --)|" $config 2>/dev/null || :
+      touch $dataDir/.user-locked 2>/dev/null || :
+      . $config 2>/dev/null || :
+    }
     sync_native_limit 2>/dev/null || :   # set the firmware limit at once (no toggle/overshoot)
   else
     online 2>/dev/null && ( cycle_switches on ) >/dev/null 2>&1 || :
