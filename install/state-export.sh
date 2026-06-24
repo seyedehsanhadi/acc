@@ -94,9 +94,18 @@ _se_plugged() {
 
 # current units from magnitude: large abs => uA, else mA (works on any kernel)
 _se_units() {
+  # 6.4.1-rc3: prefer the daemon's calibrated factor. ampFactor_/ampFactor is anchored to the
+  # unambiguous voltage/design-capacity scale, so a SMALL instantaneous current can no longer
+  # mislabel a uA phone as mA -- the exact dashboard bug (a 4.7 mA idle current read as
+  # "4687 mA" because 4687 < 16000 fell to the mA branch). The per-value cutoff stays only as a
+  # fallback when no factor is set.
+  case "${ampFactor:-${ampFactor_:-}}" in
+    1000000) echo uA; return;;
+    1000)    echo mA; return;;
+  esac
   case "${1:-null}" in null|''|0) echo unknown; return;; esac
   local a="${1#-}"
-  if [ "$a" -gt 16000 ] 2>/dev/null; then echo uA; else echo mA; fi   # rc6 (D2): use the SAME 16000 uA/mA cutoff the control side uses (batt-interface / read-ch-curr-ctrl-files-p2), so AccA's reported units never disagree with control in the 16000-20000 band
+  if [ "$a" -gt 16000 ] 2>/dev/null; then echo uA; else echo mA; fi
 }
 
 # polarity: cross-check status vs current sign
