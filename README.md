@@ -1,5 +1,22 @@
 # Advanced Charging Controller (ACC)
 
+## Find your charging switch (acc-compat)
+
+[`acc-compat-v5.7.sh`](acc-compat-v5.7.sh) is a standalone, root-only tester that detects which charge-control switch actually works on your device and prints a copy-paste ACC setup. It writes only ACC's standard reversible switches plus native percent-limits, snapshots every change, and restores on exit.
+
+**Run it (rooted phone).** Termux:
+
+    termux-setup-storage          # once, to reach /sdcard/Download
+    curl -LsO https://raw.githubusercontent.com/seyedehsanhadi/acc/main/acc-compat-v5.7.sh
+    sh acc-compat-v5.7.sh         # auto-elevates to root (or: su -c 'sh acc-compat-v5.7.sh')
+
+ADB:
+
+    adb push acc-compat-v5.7.sh /sdcard/Download/
+    adb shell 'su -c "sh /sdcard/Download/acc-compat-v5.7.sh"'
+
+The report is saved to your Download folder and printed to the terminal, so you can copy-paste it back to us. No-root self-check: `sh acc-compat-v5.7.sh --selftest`.
+
 
 ---
 - [DESCRIPTION](#description)
