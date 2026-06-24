@@ -1,0 +1,45 @@
+name: release
+
+# Build the flashable zip + tarball + uninstaller on a stable tag and publish a real
+# (non pre-release) GitHub Release with the top changelog.md entry as the body.
+on:
+  push:
+    tags:
+      - 'v2025.5.18-stable.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # build.sh runs check-syntax.sh (bash -n on every *.sh) first, then packages the
+      # flashable zip + installable tarball and regenerates the flashable uninstaller zip.
+      - name: Build flashable zip + tarball + uninstaller
+        run: |
+          chmod +x build.sh check-syntax.sh 2>/dev/null || true
+          rm -f bin/acc_flashable_uninstaller.zip
+          sh build.sh
+
+      - name: Show outputs
+        run: ls -R _builds bin 2>/dev/null || true
+
+      # Release body = the top entry of changelog.md (everything up to the next "**v..." line).
+      - name: Extract changelog entry
+        run: awk 'NR>1 && /^\*\*v/{exit} {print}' changelog.md > _release_body.md
+
+      - name: Publish stable release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: false
+          name: ${{ github.ref_name }}
+          body_path: _release_body.md
+          files: |
+            _builds/*/*.zip
+            _builds/*/*.tgz
+            bin/acc_flashable_uninstaller.zip
+          fail_on_unmatched_files: false
