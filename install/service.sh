@@ -11,6 +11,11 @@ dataDir=/data/adb/$domain/${id}-data
 
 [ -f $execDir/disable -o -f $dataDir/disable ] && exit 14
 
+# rc14: reaching late_start_service means boot got far enough to NOT be a bootloop, so clear the
+# post-fs-data early-cap's strike counter. This is what keeps the 3-strike self-heal from ever
+# tripping in normal use -- it only accumulates across boots that never make it here.
+rm -f $dataDir/.early-boot-count 2>/dev/null || :
+
 # wait til the lock screen is ready and give some bootloop grace period
 slept=false
 _bootwait=0

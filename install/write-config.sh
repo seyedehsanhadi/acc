@@ -195,9 +195,16 @@ case "${tl:-0}" in ''|*[!0-9]*) ;; *) [ ${tl:-0} -le 100 ] || tl=100;; esac
 # isAccd=false. The 3 auto-replace sites (disable_charging fallback, breach monitor, resume
 # watchdog) read this marker and only ever auto-change an AUTO-locked switch, never a user lock.
 case "$s" in
-  *\ --) if ${isAccd:-false}; then rm -f $dataDir/.user-locked 2>/dev/null || :; else touch $dataDir/.user-locked 2>/dev/null || :; fi;;
+  # rc14: a USER `--` lock must SURVIVE the daemon re-persisting config. Previously the daemon
+  # (isAccd) cleared .user-locked whenever it rewrote a `--` switch -- including re-saving the
+  # user's OWN locked switch on boot/verify -- which intermittently dropped the lock across reboots
+  # (device-observed: 1 of 3 reboots). The daemon never auto-replaces a user-locked switch (it warns
+  # instead, see disable_charging), so it has NO reason to clear the marker; only a USER writing the
+  # switch (isAccd=false) should ever touch it. Daemon writes now leave an existing lock intact, and
+  # auto mode is unaffected because the marker is already absent there (it is only ever set by a user).
+  *\ --) ${isAccd:-false} || touch $dataDir/.user-locked 2>/dev/null || :;;
   '') rm -f $dataDir/.user-locked 2>/dev/null || :; ${isAccd:-false} || touch $dataDir/.rediscover 2>/dev/null || :;;
-  *) rm -f $dataDir/.user-locked 2>/dev/null || :;;
+  *) ${isAccd:-false} || rm -f $dataDir/.user-locked 2>/dev/null || :;;
 esac
 
 

@@ -386,12 +386,27 @@ if ! $_INIT; then
   }
 
 
+  # rc15 FLIGHT RECORDER: one compact state sample per loop into a ring-buffered log. This piggybacks
+  # the loop the daemon ALREADY runs every ~9s (no new wakeup, no extra battery drain) so it captures
+  # the full charge-control timeline -- including an overnight overcharge -- for acc-diag to bundle and
+  # the user to share. Pure logging, fully guarded (|| :), can NEVER affect charging. Trims itself to
+  # ~1500 lines. Fields: epoch,cap,cur_raw,status,online,present,cutByAcc,tag
+  flight_rec(){
+    { printf '%s,%s,%s,%s,%s,%s,%s,%s\n' "$(date +%s 2>/dev/null)" "$(batt_cap 2>/dev/null)" \
+        "$(cat "$currFile" 2>/dev/null)" "$(read_status 2>/dev/null)" \
+        "$(online 2>/dev/null && echo 1 || echo 0)" "$(present 2>/dev/null && echo 1 || echo 0)" \
+        "${chDisabledByAcc:-?}" "${1:-loop}" >> "$dataDir/logs/flight.log"; } 2>/dev/null || :
+    _frc=$(( ${_frc:-0} + 1 ))
+    [ "$_frc" -ge 40 ] 2>/dev/null && { _frc=0; tail -n 1500 "$dataDir/logs/flight.log" > "$dataDir/logs/flight.log.t" 2>/dev/null && mv -f "$dataDir/logs/flight.log.t" "$dataDir/logs/flight.log" 2>/dev/null; } || :
+  }
+
   ctrl_charging() {
 
     while :; do
 
       # publish the state export (subsystem A) -- best-effort, never blocks the loop
       write_state || :
+      flight_rec || :
 
       # rc24: shared plug-transition tracker. freshPlug is true on the loop where the
       # charger goes offline->online; it drives native_unlatch (Pixel) and generic_rearm
