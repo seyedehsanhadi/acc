@@ -245,7 +245,16 @@ if ${_INIT:-false}; then
   ampFactor=$(sed -n 's/^ampFactor=//p' $dataDir/config.txt 2>/dev/null || :)
   ampFactor_=${ampFactor:-1000}
 
-  if [ $ampFactor_ -eq 1000000 ] || [ $(sed s/-// $currFile) -ge 16000 ]; then
+  # uA-vs-mA: the live current can be a few mA while idling at the cap, which is < 16000 in
+  # uA and used to be misread as a mA device (ampFactor_=1000) -> every reading 1000x off
+  # and the daemon could misjudge charge direction. charge_full_design and voltage_now share
+  # the cell's unit prefix and are ALWAYS large, so they reveal the scale regardless of the
+  # instantaneous current. Latch uA if config, design-capacity, voltage, OR a big live
+  # current say micro-units.
+  if [ $ampFactor_ -eq 1000000 ] \
+     || { cfd=$(cat $batt/charge_full_design 2>/dev/null); [ "${cfd%%[!0-9]*}" -ge 1000000 ] 2>/dev/null; } \
+     || { vnow=$(cat $voltNow 2>/dev/null); [ "${vnow%%[!0-9]*}" -ge 1000000 ] 2>/dev/null; } \
+     || [ $(sed s/-// $currFile) -ge 16000 ]; then
     ampFactor_=1000000
   fi
 

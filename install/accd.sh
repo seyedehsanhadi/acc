@@ -783,8 +783,8 @@ if ! $_INIT; then
   set_dp() {
     local curr= i= pos=0 neg=0
     . $config
-    # nothing to do once polarity is known, the workaround is off, or there is no sensor
-    { [ -z "${_DPOL-}" ] && $battStatusWorkaround && [ $currFile != $TMPDIR/.dummy-mcc ]; } || return 0
+    # skip if the status workaround is off or there is no usable current sensor
+    { $battStatusWorkaround && [ $currFile != $TMPDIR/.dummy-mcc ]; } || return 0
     # rc6 (L1): latch the discharge polarity ONLY from a CONFIRMED "Charging" status -- that
     # is the one unambiguous moment (we KNOW charging, so the current sign IS the charge
     # direction). The old code ALSO inferred polarity from a non-Charging status; right after a
@@ -793,6 +793,23 @@ if ! $_INIT; then
     # (silent overcharge). And _DPOL is cached in .batt-interface.sh, so a plain restart kept the
     # bad value (only --init recomputed it). If not clearly charging this loop, leave _DPOL unset
     # and try again next loop -- never guess from a transient.
+    # 6.4.1: once latched, SELF-HEAL a cache that is wrong. Skip the costly 5s re-sample unless
+    # a single LARGE, unambiguous live sample taken during confirmed Charging contradicts the
+    # cached sign; only then fall through and re-latch. Recovers a _DPOL mis-latched on one
+    # phone/Android rev (seen on Pixel / Android 17, where charging read as Discharging) with no
+    # per-loop overhead and no flip-flop on noise -- a small current is ignored, so the rc6
+    # silent-overcharge guard is preserved.
+    if [ -n "${_DPOL-}" ]; then
+      [ "$(cat $battStatus 2>/dev/null)" = Charging ] || return 0
+      curr=$(cat $currFile 2>/dev/null)
+      case ${curr:-x} in ''|x|*[!0-9-]*) return 0;; esac
+      [ ${curr#-} -ge 16000 ] 2>/dev/null || return 0
+      case "$curr" in
+        -*) [ "$_DPOL" = + ] && return 0;;   # negative current, _DPOL=+ (charging is -) -> agrees
+        *)  [ "$_DPOL" = - ] && return 0;;   # positive current, _DPOL=- (charging is +) -> agrees
+      esac
+      # a large sample disagrees with the cached polarity during confirmed charging -> re-latch
+    fi
     set +x
     if [ "$(cat $battStatus 2>/dev/null)" = Charging ]; then
       # sample the (noisy) current a few times; require a consistent sign before committing
@@ -807,7 +824,7 @@ if ! $_INIT; then
       done
       if   [ $pos -ge 3 ]; then sdp -
       elif [ $neg -ge 3 ]; then sdp +
-      elif [ $((pos + neg)) -eq 0 ]; then
+      elif [ -z "${_DPOL-}" ] && [ $((pos + neg)) -eq 0 ]; then
         # charging but current reads zero/unreadable = no usable current sensor; fall back to
         # the raw battery status (same intent as the old curr==0 path).
         /dev/acca --set batt_status_workaround=false

@@ -295,6 +295,22 @@ cp -f $srcDir/README.* $data_dir/
 }
 
 
+# 6.4.1: idle-above-pcap was force-disabled on Pixel/Tensor (above) because the firmware
+# fake-idles and OVERSHOOTS the limit when nothing hard-caps it. But once the VERIFIED native
+# firmware limit (charge_stop_level) is the LOCKED switch, that limit itself backstops
+# overcharge, so idle is safe again and lets the cell hold nearer the cap instead of draining
+# down to charge_start_level and recharging. Re-enable it ONLY when the native limit is the
+# locked switch (so the backstop is proven present); on a config with no/!= switch the cut
+# behaviour is kept. Reversible: clear the switch or toggle idle off. New marker so it applies
+# over the .6/.7 disable. Runs once; fully guarded.
+[ -f $data_dir/.stable-defaults8-pixelidle ] || {
+  { [ -e /sys/devices/platform/google,charger/charge_stop_level ] && [ -f $config ] \
+    && grep -q '^chargingSwitch=.*charge_stop_level' $config; } && \
+    sed -i 's/^allowIdleAbovePcap=false$/allowIdleAbovePcap=true/; s/^prioritizeBattIdleMode=no$/prioritizeBattIdleMode=true/' $config 2>/dev/null || :
+  touch $data_dir/.stable-defaults8-pixelidle 2>/dev/null || :
+}
+
+
 # rc(6.3.3): undo a bad 6.3.2 lock. 6.3.2 could auto-migrate an MTK device onto current_cmd,
 # which on some kernels (e.g. klee/HyperOS) PASSES the quick scan check but does NOT actually
 # hold the limit -> OVERCHARGE. current_cmd is no longer promoted (input_suspend, which holds,

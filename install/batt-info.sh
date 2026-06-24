@@ -6,6 +6,7 @@ batt_info() {
   local currNow=
   local powerNow=
   local factor=
+  local unitFactor=
   local one="${1//,/|}"
   set +eu
 
@@ -39,14 +40,21 @@ batt_info() {
   )"
 
 
-  # parse CURRENT_NOW & convert to Amps
+  # parse VOLTAGE_NOW raw first: its scale is unambiguous (a cell is always ~3-4.5V, i.e.
+  # thousands in mV or millions in uV) and current_now shares the kernel unit prefix, so it
+  # reveals uA-vs-mA even when the live current is tiny. Idling at the cap the current is a
+  # few mA -> the old per-value "< 16000 = mA" guess mislabelled uA as mA and the reading
+  # came out 1000x too big (and flipped to a fake discharge). Anchor to voltage instead.
+  voltNow_=$(echo "$info" | sed -n "s/^voltage_now //p")
+  [ "${voltNow_%%[!0-9]*}" -ge 1000000 ] 2>/dev/null && unitFactor=1000000
+
+  # parse CURRENT_NOW & convert to Amps (calibrated factor, else the voltage anchor, else guess)
   currNow=$(echo "$info" | sed -n "s/^current_now //p")
-  dtr_conv_factor ${currNow#-} ${ampFactor:-$ampFactor_}
+  dtr_conv_factor ${currNow#-} ${ampFactor:-${ampFactor_:-$unitFactor}}
   currNow=$(calc2 ${currNow:-0} / $factor)
 
 
-  # parse VOLTAGE_NOW & convert to Volts
-  voltNow_=$(echo "$info" | sed -n "s/^voltage_now //p")
+  # convert VOLTAGE_NOW to Volts
   dtr_conv_factor $voltNow_ ${voltFactor-}
   voltNow_=$(calc2 ${voltNow_:-0} / $factor)
 
@@ -76,7 +84,7 @@ power_now ${powerNow}W"
 charge_type $power_supply_type"
 
       psaRaw=$(cat $i/*current_now 2>/dev/null | tail -n 1)
-      dtr_conv_factor ${psaRaw#-} ${ampFactor:-$ampFactor_}
+      dtr_conv_factor ${psaRaw#-} ${ampFactor:-${ampFactor_:-$unitFactor}}
       power_supply_amps=$(calc2 ${psaRaw:-0} / $factor)
 
       if [ 0${power_supply_amps%.*} -gt 0 ]; then
