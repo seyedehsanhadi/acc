@@ -1,6 +1,6 @@
 # Advanced Charging Controller (ACC)
 
-Community-maintained fork of [ACC](https://github.com/VR-25/acc) by VR-25. ACC extends your battery's service life by limiting charge current, temperature, and voltage on any rooted Android (and KaiOS) device. Systemless, works with any root solution.
+Community-maintained fork of [ACC](https://github.com/VR-25/acc) by VR-25, maintained by [seyedehsanhadi](https://github.com/seyedehsanhadi). ACC extends your battery's service life by limiting charge current, temperature, and voltage on any rooted Android (and KaiOS) device. Systemless, works with any root solution.
 
 **New in 6.5: AMPS.** A universal charge-switch finder that auto-detects and verifies the switch that actually works on your phone, on any device. It is built into the companion app [AccA](https://github.com/seyedehsanhadi/AccA) as "Find my switch", or run it standalone (below). Upstream ACC has been static since 2023; this fork carries a 2025 source base, a year of reliability work on the 6.x line, and AMPS.
 
@@ -14,12 +14,12 @@ Community-maintained fork of [ACC](https://github.com/VR-25/acc) by VR-25. ACC e
     curl -LsO https://raw.githubusercontent.com/seyedehsanhadi/acc/main/amps.sh
     sh amps.sh         # auto-elevates to root (or: su -c 'sh amps.sh')
 
-ADB:
+ADB (runs from any path, /sdcard not required):
 
-    adb push amps.sh /sdcard/Download/
-    adb shell 'su -c "sh /sdcard/Download/amps.sh"'
+    adb push amps.sh /data/local/tmp/
+    adb shell 'su -c "sh /data/local/tmp/amps.sh"'
 
-The report is saved to your Download folder and printed to the terminal, so you can copy-paste it back to us. No-root self-check: `sh amps.sh --selftest`.
+The report prints to the terminal and is saved to your Download folder when available, with a copy always written to `/data/local/tmp/`, so you can copy-paste it back to us. No-root self-check: `sh amps.sh --selftest`.
 
 
 ---
