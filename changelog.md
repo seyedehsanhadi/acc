@@ -1,5 +1,23 @@
 **v2025.5.18-stable.6.5 (202505280)**
-The 6.5 stable. Headline: AMPS (Adaptive Multi-device Probe & Selector), a universal charge-switch finder that probes any device, leak-verifies bypass/cut/drain switches and native percent-limits, and recommends the safest one. It trusts a high-confidence live current reading over a stale cached polarity, and defers to ACC's already-running firmware percent-limit, so a working native limit is never demoted below a drain switch on any phone. It replaces the old acc-compat tester and is built into the AccA app as "Find my switch". Safe by construction: writes only ACC's reversible switches, snapshots every change, restores on exit, and never writes an unknown vendor node; a precondition gate refuses to run on a battery that is too full, too low, or hot. This release folds in the entire 6.4 / 6.4.1 line below: the Magisk post-fs-data early cap that closes the boot-window overcharge gap, manual switch locks that are never auto-replaced, sustained-hold locking that rejects the re-arm overcharge family, fast resume and reliable re-discovery, corrupt-config survival, corrected battery-current and polarity reads on Pixel and Tensor, and resume reliability that tells a de-negotiated charger apart from a failed switch (replug/reboot, keep the working switch). Warnings are silent by default. Device-verified on Xiaomi Mi A3 and Pixel 9a; read-verified on Pixel 4a, Xiaomi sweet, LG V600, OnePlus 8, and Moto edge 50 pro. Existing configs are unchanged; systemless; any root.
+
+First public release of this fork of ACC. Headline: AMPS, a new universal charge-switch finder. The full 6.4 / 6.4.1 reliability line is folded in. Existing configs are unchanged; systemless; works on any root.
+
+New: AMPS (Adaptive Multi-device Probe & Selector)
+- Finds the charge-control switch that actually works on your phone, on any device, by probing the whole power-supply tree and testing each candidate live.
+- Covers every switch type (bypass, cut, drain, native percent-limit), leak-verifies that a switch truly holds (catches charge-pumps that fake "idle" while still charging), and recommends the safest one.
+- Never demotes a working firmware percent-limit to a battery-draining switch: it trusts a strong live current reading over a stale cached polarity, and defers to the limit ACC is already running.
+- Safe by design: writes only ACC's own reversible switches, snapshots and restores every change, never touches an unknown vendor node, and refuses to run if the battery is too full, too low, or hot.
+- Built into the AccA app as "Find my switch"; also a standalone amps.sh. Replaces the old acc-compat tester.
+
+Reliability (folded in from 6.4 / 6.4.1)
+- Closes the boot-window overcharge gap: a Magisk early cap applies your limit before the daemon starts, so a phone rebooted at its limit never charges past it.
+- Sustained-hold locking rejects switches that quietly re-arm (the overcharge family); a switch you lock by hand is never auto-replaced.
+- Faster resume, more reliable switch re-discovery, and survival of a corrupt or empty config without quitting.
+- Correct battery current and self-healing polarity on Pixel and Tensor.
+- Tells a de-negotiated charger apart from a failed switch: asks you to replug or reboot and keeps your working switch instead of churning it.
+- Warnings are silent by default (written to the log, no pop-up).
+
+Tested: device-verified on Xiaomi Mi A3 and Pixel 9a; read-verified on Pixel 4a, Xiaomi sweet, LG V600, OnePlus 8, and Moto edge 50 pro.
 
 **v2025.5.18-6.4.1-rc8 (202505248)**
 Stops a false "charging isn't resuming" warning on OnePlus/OPLUS phones (e.g. OnePlus 8 Pro) where charging actually works. A bypass/idle switch holds the battery idle, so the status node reads "not charging" by design, and some ROMs lag or lie (made worse by a mis-latched current polarity) -- which used to trip the resume warning even though charging had resumed. The resume watchdog now confirms a REAL stall against the fuel gauge (charge_counter actually climbing) before it warns or re-arms. The three resume warnings also go through the silent-by-default warning system now (logged to warnings.log, no pop-up; opt the pop-ups back in with `acc -s warnings=on`); the protective re-arm/reselect actions still run. Fail-safe: a phone without a usable charge_counter keeps the previous status-only behaviour. Daemon-only change; existing configs unchanged.
