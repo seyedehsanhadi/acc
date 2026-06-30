@@ -1,23 +1,23 @@
 **v2025.5.18-stable.6.5 (202505280)**
 
-First public release of this fork of ACC. Headline: AMPS, a new universal charge-switch finder. The full 6.4 / 6.4.1 reliability line is folded in. Existing configs are unchanged; systemless; works on any root.
+🎉 **First public release** of this fork of ACC. The headline is **AMPS**, a new universal charge-switch finder, with the full 6.4 / 6.4.1 reliability line folded in. Existing configs are unchanged; systemless; works on any root.
 
-New: AMPS (Adaptive Multi-device Probe & Selector)
-- Finds the charge-control switch that actually works on your phone, on any device, by probing the whole power-supply tree and testing each candidate live.
-- Covers every switch type (bypass, cut, drain, native percent-limit), leak-verifies that a switch truly holds (catches charge-pumps that fake "idle" while still charging), and recommends the safest one.
-- Never demotes a working firmware percent-limit to a battery-draining switch: it trusts a strong live current reading over a stale cached polarity, and defers to the limit ACC is already running.
-- Safe by design: writes only ACC's own reversible switches, snapshots and restores every change, never touches an unknown vendor node, and refuses to run if the battery is too full, too low, or hot.
-- Built into the AccA app as "Find my switch"; also a standalone amps.sh. Replaces the old acc-compat tester.
+### ⚡ New — AMPS (Adaptive Multi-device Probe & Selector)
+- 🔍 **Finds the switch that actually works** on your phone, on any device — probes the whole power-supply tree and tests each candidate live.
+- 🧪 **Tests every type** (bypass, cut, drain, native %-limit) and leak-verifies a switch truly holds — it catches charge-pumps that fake "idle" while still charging — then recommends the safest.
+- 🛡️ **Never demotes a working firmware %-limit** to a battery-draining switch: it trusts a strong live current reading over a stale cached polarity, and defers to the limit ACC is already running.
+- ✅ **Safe by design** — writes only ACC's own reversible switches, snapshots and restores every change, never touches an unknown vendor node, and won't run if the battery is too full, too low, or hot.
+- 📱 Built into the AccA app as **Find my switch**; also a standalone `amps.sh`. Replaces the old acc-compat tester.
 
-Reliability (folded in from 6.4 / 6.4.1)
-- Closes the boot-window overcharge gap: a Magisk early cap applies your limit before the daemon starts, so a phone rebooted at its limit never charges past it.
-- Sustained-hold locking rejects switches that quietly re-arm (the overcharge family); a switch you lock by hand is never auto-replaced.
-- Faster resume, more reliable switch re-discovery, and survival of a corrupt or empty config without quitting.
-- Correct battery current and self-healing polarity on Pixel and Tensor.
-- Tells a de-negotiated charger apart from a failed switch: asks you to replug or reboot and keeps your working switch instead of churning it.
-- Warnings are silent by default (written to the log, no pop-up).
+### 🔋 Reliability (folded in from 6.4 / 6.4.1)
+- 🔌 **Boot-window overcharge cap** — applies your limit before the daemon starts, so a phone rebooted at its limit never charges past it.
+- 🔒 **Sustained-hold locking** rejects switches that quietly re-arm; a switch you lock by hand is never auto-replaced.
+- ⚡ **Faster resume**, more reliable switch re-discovery, and survival of a corrupt or empty config.
+- 🎯 **Correct current and self-healing polarity** on Pixel and Tensor.
+- 🔁 **Tells a de-negotiated charger apart from a failed switch** — asks you to replug or reboot and keeps your working switch instead of churning it.
+- 🤫 Warnings are silent by default (logged, no pop-up).
 
-Tested: device-verified on Xiaomi Mi A3 and Pixel 9a; read-verified on Pixel 4a, Xiaomi sweet, LG V600, OnePlus 8, and Moto edge 50 pro.
+📲 **Tested** — device-verified on Xiaomi Mi A3 and Pixel 9a; read-verified on Pixel 4a, Xiaomi sweet, LG V600, OnePlus 8, and Moto edge 50 pro.
 
 **v2025.5.18-6.4.1-rc8 (202505248)**
 Stops a false "charging isn't resuming" warning on OnePlus/OPLUS phones (e.g. OnePlus 8 Pro) where charging actually works. A bypass/idle switch holds the battery idle, so the status node reads "not charging" by design, and some ROMs lag or lie (made worse by a mis-latched current polarity) -- which used to trip the resume warning even though charging had resumed. The resume watchdog now confirms a REAL stall against the fuel gauge (charge_counter actually climbing) before it warns or re-arms. The three resume warnings also go through the silent-by-default warning system now (logged to warnings.log, no pop-up; opt the pop-ups back in with `acc -s warnings=on`); the protective re-arm/reselect actions still run. Fail-safe: a phone without a usable charge_counter keeps the previous status-only behaviour. Daemon-only change; existing configs unchanged.
