@@ -41,14 +41,14 @@ tmpDir=.tmp/META-INF/com/google/android
   cat << EOF > module.json
 {
     "busybox": "https://github.com/Magisk-Modules-Repo/busybox-ndk",
-    "changelog": "https://raw.githubusercontent.com/VR-25/$id/master/changelog.md",
+    "changelog": "https://raw.githubusercontent.com/seyedehsanhadi/$id/main/changelog.md",
     "curl": "https://github.com/Zackptg5/Cross-Compiled-Binaries-Android/tree/master/curl",
-    "onlineInstaller": "https://github.com/VR-25/$id/releases/download/$version/install-online.sh",
-    "tgz": "https://github.com/VR-25/$id/releases/download/$version/${basename}.tgz",
-    "tgzInstaller": "https://github.com/VR-25/$id/releases/download/$version/install-tarball.sh",
+    "onlineInstaller": "https://github.com/seyedehsanhadi/$id/releases/download/$version/install-online.sh",
+    "tgz": "https://github.com/seyedehsanhadi/$id/releases/download/$version/${basename}.tgz",
+    "tgzInstaller": "https://github.com/seyedehsanhadi/$id/releases/download/$version/install-tarball.sh",
     "version": "$version",
     "versionCode": $versionCode,
-    "zipUrl": "https://github.com/VR-25/$id/releases/download/$version/${basename}.zip"
+    "zipUrl": "https://github.com/seyedehsanhadi/$id/releases/download/$version/${basename}.zip"
 }
 EOF
 }
@@ -142,7 +142,7 @@ fi
 
   # generate $id flashable zip
   case $version in
-    *-*) basename_=${basename}_$(date +%H%M);;
+    *-rc*|*-pre*|*-beta*|*-dev*) basename_=${basename}_$(date +%H%M);;
     *) basename_=$basename;;
   esac
   echo "=> _builds/${basename}/${basename_}.zip"

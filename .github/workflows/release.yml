@@ -42,5 +42,4 @@ jobs:
           files: |
             _builds/*/*.zip
             _builds/*/*.tgz
-            bin/acc_flashable_uninstaller.zip
           fail_on_unmatched_files: false
