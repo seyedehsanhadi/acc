@@ -56,6 +56,11 @@ battery/input_suspend 0 1 /proc/mtk_battery_cmd/en_power_path 1 1
 /sys/class/hw_power/charger/charge_data/enable_charger 1 0
 /sys/class/qcom-battery/charging_enabled 1 0
 /sys/class/qcom-battery/input_suspend 0 1
+# rc15: restrict_chg -- the qcom-battery restrict toggle the acc-compat field tester saw the FIRMWARE
+# itself flip 0->1 to STOP charging (FP5/lahaina log). A clean input-cut on devices that lack a working
+# input_suspend. Additive; ACC verifies it holds before locking, so a no-op node is harmless.
+/sys/class/qcom-battery/restrict_chg 0 1
+/sys/class/qcom-battery/odm_battery/restrict_chg 0 1
 # rc(6.4-rc2): the odm_battery sub-path is a separate qcom-battery layout (newer Xiaomi/
 # HyperOS); the acc-compat field tester found these held+resumed where the top-level node
 # was absent. Additive -- devices that expose the standard node are unaffected.

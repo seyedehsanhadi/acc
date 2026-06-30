@@ -292,3 +292,13 @@ batt_cap() {
   case $r in ''|*[!0-9]*) r=100;; esac
   echo $r
 }
+
+
+cc_now() {
+  # charge_counter (uAh remaining) -- a POLARITY-INDEPENDENT "is the cell actually gaining charge?" signal.
+  # The resume watchdog uses it to tell a real stall apart from a status node that lies under a bypass/idle
+  # switch (OnePlus/OPLUS) or a mis-latched polarity. 0 = node absent or non-numeric (signed coulomb-counter
+  # devices) -> callers fall back to the status-only path, so this never regresses a phone without it.
+  local _c=$(cat ${battCapacity%capacity}charge_counter 2>/dev/null)
+  case "$_c" in ''|*[!0-9]*) echo 0;; *) echo "$_c";; esac
+}

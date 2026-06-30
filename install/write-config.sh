@@ -203,7 +203,7 @@ case "$s" in
   # switch (isAccd=false) should ever touch it. Daemon writes now leave an existing lock intact, and
   # auto mode is unaffected because the marker is already absent there (it is only ever set by a user).
   *\ --) ${isAccd:-false} || touch $dataDir/.user-locked 2>/dev/null || :;;
-  '') rm -f $dataDir/.user-locked 2>/dev/null || :; ${isAccd:-false} || touch $dataDir/.rediscover 2>/dev/null || :;;
+  '') ${isAccd:-false} || { rm -f $dataDir/.user-locked 2>/dev/null; touch $dataDir/.rediscover 2>/dev/null; } || :;;  # D7: the rm was UNCONDITIONAL -- only a USER going automatic (isAccd=false) clears the lock; a daemon blank must not
   *) ${isAccd:-false} || rm -f $dataDir/.user-locked 2>/dev/null || :;;
 esac
 

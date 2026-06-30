@@ -1,21 +1,25 @@
 # Advanced Charging Controller (ACC)
 
-## Find your charging switch (acc-compat)
+Community-maintained fork of [ACC](https://github.com/VR-25/acc) by VR-25. ACC extends your battery's service life by limiting charge current, temperature, and voltage on any rooted Android (and KaiOS) device. Systemless, works with any root solution.
 
-[`acc-compat-v5.7.sh`](acc-compat-v5.7.sh) is a standalone, root-only tester that detects which charge-control switch actually works on your device and prints a copy-paste ACC setup. It writes only ACC's standard reversible switches plus native percent-limits, snapshots every change, and restores on exit.
+**New in 6.5: AMPS.** A universal charge-switch finder that auto-detects and verifies the switch that actually works on your phone, on any device. It is built into the companion app [AccA](https://github.com/seyedehsanhadi/AccA) as "Find my switch", or run it standalone (below). Upstream ACC has been static since 2023; this fork carries a 2025 source base, a year of reliability work on the 6.x line, and AMPS.
+
+## Find your charging switch (AMPS)
+
+**AMPS** ([`amps.sh`](amps.sh)) - Adaptive Multi-device Probe & Selector - is a standalone, root-only finder that detects which charge-control switch actually works on your device and prints a copy-paste ACC setup. It writes only ACC's standard reversible switches plus native percent-limits, snapshots every change, and restores on exit.
 
 **Run it (rooted phone).** Termux:
 
     termux-setup-storage          # once, to reach /sdcard/Download
-    curl -LsO https://raw.githubusercontent.com/seyedehsanhadi/acc/main/acc-compat-v5.7.sh
-    sh acc-compat-v5.7.sh         # auto-elevates to root (or: su -c 'sh acc-compat-v5.7.sh')
+    curl -LsO https://raw.githubusercontent.com/seyedehsanhadi/acc/main/amps.sh
+    sh amps.sh         # auto-elevates to root (or: su -c 'sh amps.sh')
 
 ADB:
 
-    adb push acc-compat-v5.7.sh /sdcard/Download/
-    adb shell 'su -c "sh /sdcard/Download/acc-compat-v5.7.sh"'
+    adb push amps.sh /sdcard/Download/
+    adb shell 'su -c "sh /sdcard/Download/amps.sh"'
 
-The report is saved to your Download folder and printed to the terminal, so you can copy-paste it back to us. No-root self-check: `sh acc-compat-v5.7.sh --selftest`.
+The report is saved to your Download folder and printed to the terminal, so you can copy-paste it back to us. No-root self-check: `sh amps.sh --selftest`.
 
 
 ---

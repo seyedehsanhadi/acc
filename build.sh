@@ -152,7 +152,10 @@ fi
   echo
 
   # prepare files to be included in $id installable tarball
-  cp -R install install.sh License.md README.* module.prop bin/ \
+  # acc-compat.sh ships under its fixed name (AccA pushes it by that name on-device + the
+  # uninstall *compat* preserve-glob depends on it); amps.sh is the branded standalone copy.
+  [ -f acc-compat.sh ] || { echo "BUILD ERROR: acc-compat.sh missing from repo root"; exit 9; }
+  cp -R install install.sh License.md README.* module.prop bin/ acc-compat.sh amps.sh \
     _builds/${basename}/${basename}/ 2>&1 \
     | grep -iv "can't preserve"
 

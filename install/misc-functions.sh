@@ -294,7 +294,7 @@ disable_charging() {
           # can fix it; keep retrying THEIR switch each loop. An AUTO-locked switch (daemon-chosen)
           # still self-heals as before. (was: any failing locked switch was unset + auto-selected.)
           if [ -f $dataDir/.user-locked ]; then
-            [ -f $TMPDIR/.lockwarned ] || { touch $TMPDIR/.lockwarned 2>/dev/null || :; notif "⚠️ ACC: your manually-set charging switch isn't stopping charging. Pick another in AccA — ACC will NOT auto-change a locked switch."; }
+            warn_once_per lockhold 21600 "⚠️ ACC: your locked charging switch isn't holding your ${capacity[3]:-?}% limit. Pick another in AccA — ACC will not change a locked switch for you."
           else
             unset_switch
             cycle_switches_off
@@ -561,6 +561,28 @@ misc_stuff() {
 
 notif() {
   su -lp 2000 -c "/system/bin/cmd notification post -S bigtext -t \"🔋ACC | $(date +%H:%M)\" "Tag$(date +%s)" \"${*:-:)}\"" < /dev/null > /dev/null 2>&1 || :
+}
+
+
+warn_once_per() {
+  # rc15: rate-limited notification that SURVIVES daemon restarts + reboots. Stores the last-warn epoch
+  # in $dataDir/.warn-<key> (persistent) instead of a 0-byte $TMPDIR sentinel that the pause/resume loop
+  # wiped every non-breach tick -- which turned a flapping/leaky switch's "warn once" into a per-loop
+  # spam. Now a problem warns at most once per <window> seconds no matter how often the loop sees it.
+  # $1=key  $2=min-seconds-between  $3=message
+  local _wf=$dataDir/.warn-$1 _now _last
+  _now=$(date +%s 2>/dev/null) || _now=0
+  _last=$(cat "$_wf" 2>/dev/null || echo 0); case "$_last" in ''|*[!0-9]*) _last=0;; esac
+  if [ "$_now" = 0 ] || [ $(( _now - _last )) -ge "$2" ]; then
+    echo "$_now" > "$_wf" 2>/dev/null || :
+    # rc15: warnings are SILENT by default -- the user asked to remove the popups ("user is not
+    # stupid"). The protective capping + auto-select still run; the message is only LOGGED, never shown.
+    # Power users can opt the notifications back in with `acc -s warnings=on` (still rate-limited above).
+    case ${warnings:-off} in
+      on|true|1) notif "$3";;
+      *) echo "$(date '+%m-%d %H:%M') $3" >> $dataDir/warnings.log 2>/dev/null || :;;
+    esac
+  fi
 }
 
 
