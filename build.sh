@@ -155,6 +155,8 @@ fi
   # acc-compat.sh ships under its fixed name (AccA pushes it by that name on-device + the
   # uninstall *compat* preserve-glob depends on it); amps.sh is the branded standalone copy.
   [ -f acc-compat.sh ] || { echo "BUILD ERROR: acc-compat.sh missing from repo root"; exit 9; }
+  [ -f amps.sh ] || { echo "BUILD ERROR: amps.sh missing from repo root"; exit 9; }
+  cmp -s acc-compat.sh amps.sh || { echo "BUILD ERROR: acc-compat.sh and amps.sh differ -- they are the same engine under two names; sync them (edit one, copy to the other) before release"; exit 9; }
   cp -R install install.sh License.md README.* module.prop bin/ acc-compat.sh amps.sh \
     _builds/${basename}/${basename}/ 2>&1 \
     | grep -iv "can't preserve"
