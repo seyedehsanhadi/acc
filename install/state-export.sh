@@ -55,20 +55,23 @@ _se_meta() {
 
 # Status source priority: daemon-computed _status > kernel uevent POWER_SUPPLY_STATUS
 # (read atomically with current, so they are coherent) > current-sign derivation. $1=current,
-# $2=uevent status string. "Not charging" maps to Idle (same as read_status).
+# $2=uevent status string. 6.5.1: kernel labels pass through UNMODIFIED (the old
+# "Not charging"->Idle remap collided with the battery-idle vocabulary; the semantic
+# word now comes from measuredClass only).
 _se_status() {
   local s="${_status:-}"
   case "$s" in
     ''|unknown) ;;
+    Idle) printf 'Not charging'; return 0;;
     *) printf '%s' "$s"; return 0;;
   esac
   case "${2:-}" in
     Charging|Discharging|Full) printf '%s' "$2"; return 0;;
-    Not\ charging) printf 'Idle'; return 0;;
+    Not\ charging) printf 'Not charging'; return 0;;
   esac
   case "${1:-null}" in
     null|'') printf 'unknown';;
-    0) printf 'Idle';;
+    0) printf 'Not charging';;
     -*) printf 'Discharging';;
     *) printf 'Charging';;
   esac
@@ -118,8 +121,9 @@ _se_polarity() {
   esac
 }
 
-# measured class from plug + current (unit-aware idle band), all SoCs:
-# plugged & ~0 -> bypass; unplugged & ~0 -> idle; >0 plugged -> charging; <0 -> discharging
+# measured class from plug + current (unit-aware idle band), all SoCs. 6.5.1 vocabulary:
+# plugged & ~0 -> bypass (battery idle); unplugged & ~0 -> standby; plugged & <0 -> drain
+# (ACC or the firmware lowering the battery to the limit); unplugged & <0 -> discharging.
 _se_class() {
   local cur="$1" plugged="$2" units="$3" polarity="$4" a thr
   case "$cur" in null|'') echo unknown; return;; esac
@@ -130,10 +134,10 @@ _se_class() {
   a="${cur#-}"
   [ "$units" = uA ] && thr=30000 || thr=30
   if [ "$a" -lt "$thr" ] 2>/dev/null; then
-    [ "$plugged" = true ] && echo bypass || echo idle; return
+    [ "$plugged" = true ] && echo bypass || echo standby; return
   fi
   case "$cur" in
-    -*) echo discharging;;
+    -*) [ "$plugged" = true ] && echo drain || echo discharging;;
     *) [ "$plugged" = true ] && echo charging || echo discharging;;
   esac
 }
@@ -155,9 +159,10 @@ _se_trust() {
     *) echo unverified; return;;
   esac
   case "$2" in
-    bypass|idle)  [ "$sc" = idle ]        && echo trusted || echo measured;;
-    charging)     [ "$sc" = charging ]    && echo trusted || echo measured;;
-    discharging)  [ "$sc" = discharging ] && echo trusted || echo measured;;
+    bypass|idle|standby) [ "$sc" = idle ]        && echo trusted || echo measured;;
+    charging)            [ "$sc" = charging ]    && echo trusted || echo measured;;
+    drain)               [ "$sc" = discharging ] && echo trusted || echo measured;;
+    discharging)         [ "$sc" = discharging ] && echo trusted || echo measured;;
     *) echo unverified;;
   esac
 }
@@ -190,7 +195,25 @@ write_state() {
     # ONE atomic read of battery/uevent so status+current+... are coherent (separate cats can
     # straddle a state change -- the root reason statusTrust was perpetually "unknown"). Fall
     # back to the individual nodes for any field the uevent does not carry.
-    ue=$(cat /sys/class/power_supply/battery/uevent 2>/dev/null)
+    # 6.5.1 (D3): three atomic uevent samples, classify on the MEDIAN-current sample kept
+    # WHOLE (status+current stay a coherent pair) -- one transient spike (resume pulse,
+    # screen toggle) no longer flaps the measured class between ticks.
+    _ue1=$(cat /sys/class/power_supply/battery/uevent 2>/dev/null)
+    sleep 0.15 2>/dev/null || :
+    _ue2=$(cat /sys/class/power_supply/battery/uevent 2>/dev/null)
+    sleep 0.15 2>/dev/null || :
+    _ue3=$(cat /sys/class/power_supply/battery/uevent 2>/dev/null)
+    _c1=$(printf '%s\n' "$_ue1" | sed -n 's/^POWER_SUPPLY_CURRENT_NOW=//p' | head -1)
+    _c2=$(printf '%s\n' "$_ue2" | sed -n 's/^POWER_SUPPLY_CURRENT_NOW=//p' | head -1)
+    _c3=$(printf '%s\n' "$_ue3" | sed -n 's/^POWER_SUPPLY_CURRENT_NOW=//p' | head -1)
+    ue=$_ue2
+    if [ -n "$_c1" ] && [ -n "$_c2" ] && [ -n "$_c3" ]; then
+      if { [ "$_c1" -ge "$_c2" ] && [ "$_c1" -le "$_c3" ]; } 2>/dev/null \
+        || { [ "$_c1" -le "$_c2" ] && [ "$_c1" -ge "$_c3" ]; } 2>/dev/null; then ue=$_ue1
+      elif { [ "$_c3" -ge "$_c1" ] && [ "$_c3" -le "$_c2" ]; } 2>/dev/null \
+        || { [ "$_c3" -le "$_c1" ] && [ "$_c3" -ge "$_c2" ]; } 2>/dev/null; then ue=$_ue3
+      fi
+    fi
     ue_st=$(printf '%s\n' "$ue"   | sed -n 's/^POWER_SUPPLY_STATUS=//p'      | head -1)
     ue_cur=$(printf '%s\n' "$ue"  | sed -n 's/^POWER_SUPPLY_CURRENT_NOW=//p' | head -1)
     ue_cap=$(printf '%s\n' "$ue"  | sed -n 's/^POWER_SUPPLY_CAPACITY=//p'    | head -1)
