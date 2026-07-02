@@ -277,17 +277,39 @@ cycle_switches_off() {
 }
 
 
+sw_holds() {
+  # Level-type switches (charge_stop_level / pcap / charge_control_limit) are applied by the
+  # FIRMWARE on its own evaluation tick (~30s on google_charger). An instant not_charging
+  # check always fails there, and the old flip-on revert then CANCELLED the pending limit --
+  # the filmed 40<->100 oscillation. Settle across up to 4 ticks before judging a level
+  # switch; instant on/off switches keep the immediate check.
+  not_charging && return 0
+  $levelSwitch || return 1
+  local _i=0
+  while [ $_i -lt 4 ]; do
+    sleep ${LVL_SETTLE_STEP:-10}
+    not_charging && return 0
+    _i=$(( _i + 1 ))
+  done
+  return 1
+}
+
 disable_charging() {
 
   local autoMode=true
 
     [[ "${chargingSwitch[*]-}" != *\ -- ]] || autoMode=false
 
+    case "${chargingSwitch[*]-}" in
+      *pcap*|*stop_level*|*charge_control_limit*) levelSwitch=true;;
+      *) levelSwitch=false;;
+    esac
+
     if [[ "${chargingSwitch[0]-}" = */* ]]; then
       if [ -f ${chargingSwitch[0]} ]; then
-        if ! { flip_sw off && not_charging; }; then
+        if ! { flip_sw off && sw_holds; }; then
           $isAccd || print_switch_fails "${chargingSwitch[@]-}"
-          flip_sw on 2>/dev/null || :
+          $levelSwitch || flip_sw on 2>/dev/null || :
           # rc8: RESPECT a manual lock. If the USER locked this switch (.user-locked, set by
           # write-config when a non-daemon `acc/acca -s` wrote it), NEVER auto-replace it -- the user
           # locks precisely to stop ACC ever using a different node. Just WARN (debounced) so they
