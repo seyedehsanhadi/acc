@@ -111,9 +111,26 @@ _se_units() {
   if [ "$a" -gt 16000 ] 2>/dev/null; then echo uA; else echo mA; fi
 }
 
-# polarity: cross-check status vs current sign
+# polarity: learned from the unplugged ground truth, cached, status cross-check only as
+# bootstrap. The old per-sample status-vs-sign inference was circular on firmware that lies
+# during a drain-down (bramble reports "Charging" while deliberately discharging): the lying
+# status flipped polarity to inverted, _se_class flipped the sign back, and the honest
+# measurement laundered into "charging" - the dashboard showed Charging instead of
+# Draining to N%. Unplugged with meaningful current the battery can only be discharging, so
+# that sign is physics, not firmware opinion; it is learned once, persisted, and plugged
+# samples can never poison it. $1=status $2=cur $3=plugged $4=units
 _se_polarity() {
+  local pc="${SE_POLCACHE:-${dataDir:-/data/adb/vr25/acc-data}/.se-polarity}" cached a thr p
   case "${2:-null}" in null|'') echo unknown; return;; esac
+  a="${2#-}"
+  [ "${4:-}" = uA ] && thr=30000 || thr=30
+  if [ "${3:-}" = false ] && [ "$a" -ge "$thr" ] 2>/dev/null; then
+    case "$2" in -*) p=normal;; *) p=inverted;; esac
+    [ ".$(cat "$pc" 2>/dev/null)" = ".$p" ] || echo "$p" > "$pc" 2>/dev/null
+    echo "$p"; return
+  fi
+  cached=$(cat "$pc" 2>/dev/null)
+  case "$cached" in normal|inverted) echo "$cached"; return;; esac
   case "$1" in
     Charging)    case "$2" in -*) echo inverted;; *) echo normal;; esac;;
     Discharging) case "$2" in -*) echo normal;; *) echo inverted;; esac;;
@@ -232,7 +249,7 @@ write_state() {
     local plugged units polarity mclass conf trust
     plugged=$(_se_plugged)
     units=$(_se_units "$cur")
-    polarity=$(_se_polarity "$status" "$cur")
+    polarity=$(_se_polarity "$status" "$cur" "$plugged" "$units")
     mclass=$(_se_class "$cur" "$plugged" "$units" "$polarity")
     trust=$(_se_trust "$status" "$mclass" "$cur")
     conf=low
