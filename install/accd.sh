@@ -998,10 +998,13 @@ if ! $_INIT; then
   # these phones nothing worked. Here we DRIVE THE NATIVE PAIR from pause/resume_capacity
   # and skip the toggle entirely -- the 2023-era behavior that users confirm works.
   # Opt out (use the generic switch logic instead): touch $dataDir/.no-native-limit
-  gcsl=/sys/devices/platform/google,charger/charge_stop_level
-  gcst=/sys/devices/platform/google,charger/charge_start_level
+  gcsl=; gcst=
+  for _gd in ${NATIVE_DIRS:-/sys/devices/platform/google,charger /sys/devices/platform/soc/soc:google,charger}; do
+    [ -f "$_gd/charge_stop_level" ] && [ -f "$_gd/charge_start_level" ] || continue
+    gcsl=$_gd/charge_stop_level; gcst=$_gd/charge_start_level; break
+  done
   nativeLimit=false
-  { [ -f "$gcsl" ] && [ -f "$gcst" ] && [ ! -f $dataDir/.no-native-limit ]; } && nativeLimit=true
+  { [ -n "$gcsl" ] && [ ! -f $dataDir/.no-native-limit ]; } && nativeLimit=true
 
 
   # fix#305/#308: boot blacklist. If a charging node kernel-panicked / hard-rebooted
