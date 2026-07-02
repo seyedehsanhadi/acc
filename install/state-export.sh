@@ -119,52 +119,57 @@ _se_units() {
 # Draining to N%.
 # Physics samples, either of:
 #   - unplugged with meaningful current (the battery can only be discharging), or
-#   - plugged with meaningful current while the battery VOLTAGE keeps falling (>=30mV over a
-#     45s+ window): a genuinely charging battery does not lose voltage, so the pack is
-#     discharging no matter what the status node claims - this calibrates bramble-style
-#     liars without ever unplugging.
-# A sample's own physics reading is echoed live (a live ground-truth read is never vetoed by
-# the cache); the persistent value needs 2 agreeing samples to confirm, and 3 agreeing
-# contradictions to flip a previously confirmed value (self-heal from a bad learn). Plugged
-# status opinions can never touch the cache. $1=status $2=cur $3=plugged $4=units
-# $5=volt_raw $6=now_ts
+#   - plugged with meaningful current while the state-of-charge MOVES: SoC is coulomb-counted,
+#     so a falling % means the pack is net-discharging and a rising % means net-charging, no
+#     matter what the (lying) status node claims and immune to voltage dips under load. This
+#     calibrates bramble-style liars while plugged, without ever unplugging.
+# An earlier build used a falling VOLTAGE as the plugged discharge signal; a voltage dip during
+# normal charging then mislearned polarity as inverted (bramble showed "Charging" during a
+# drain-down). The cache carries sv=2; any cache without it is from that build and is discarded.
+# A sample's own physics reading is echoed live (a live ground-truth read is never vetoed by the
+# cache); the persistent value needs 2 agreeing samples to confirm and 3 agreeing contradictions
+# to flip a confirmed one (self-heal). Plugged status opinions can never touch the cache.
+# $1=status $2=cur $3=plugged $4=units $5=capacityPct $6=now_ts
 _se_polarity() {
   local pc="${SE_POLCACHE:-${dataDir:-/data/adb/vr25/acc-data}/.se-polarity}"
-  local a thr p physics= confirmed= cand= n=0 av= ats= vmv kv line dirty=
+  local a thr p physics= confirmed= cand= n=0 ac= ats= sv= cap kv line dirty=
   case "${2:-null}" in null|'') echo unknown; return;; esac
   a="${2#-}"
   [ "${4:-}" = uA ] && thr=30000 || thr=30
   line=$(cat "$pc" 2>/dev/null)
   for kv in $line; do
     case "$kv" in
+      sv=*) sv=${kv#*=};;
       confirmed=*) confirmed=${kv#*=};;
       cand=*) cand=${kv#*=};;
       n=*) n=${kv#*=};;
-      av=*) av=${kv#*=};;
+      ac=*) ac=${kv#*=};;
       ats=*) ats=${kv#*=};;
     esac
   done
   case "$n" in ''|*[!0-9]*) n=0;; esac
-  vmv="${5:-}"
-  case "$vmv" in null|''|*[!0-9]*) vmv=;; esac
-  [ -n "$vmv" ] && [ "$vmv" -ge 100000 ] 2>/dev/null && vmv=$((vmv / 1000))
-  if [ "${3:-}" = false ]; then
-    [ -n "$av" ] && { av=; ats=; dirty=1; }
-    if [ "$a" -ge "$thr" ] 2>/dev/null; then
+  if [ -n "$line" ] && [ ".$sv" != .2 ]; then confirmed=; cand=; n=0; ac=; ats=; dirty=1; fi
+  cap="${5:-}"
+  case "$cap" in ''|*[!0-9]*) cap=;; esac
+  if [ "$a" -ge "$thr" ] 2>/dev/null; then
+    if [ "${3:-}" = false ]; then
       case "$2" in -*) p=normal;; *) p=inverted;; esac
       physics=1
-    fi
-  elif [ "$a" -ge "$thr" ] 2>/dev/null && [ -n "$vmv" ] && [ -n "${6:-}" ]; then
-    if [ -n "$av" ] && [ -n "$ats" ] && [ $(( $6 - ats )) -ge 45 ] 2>/dev/null && [ $(( $6 - ats )) -le 3600 ] 2>/dev/null; then
-      if [ $(( av - vmv )) -ge 30 ] 2>/dev/null; then
-        case "$2" in -*) p=normal;; *) p=inverted;; esac
-        physics=1
+    elif [ -n "$cap" ] && [ -n "${6:-}" ]; then
+      if [ -n "$ac" ] && [ -n "$ats" ] && [ $(( $6 - ats )) -ge 0 ] 2>/dev/null && [ $(( $6 - ats )) -le 3600 ] 2>/dev/null; then
+        if [ $(( ac - cap )) -ge 1 ] 2>/dev/null; then
+          case "$2" in -*) p=normal;; *) p=inverted;; esac
+          physics=1; ac=$cap; ats=$6; dirty=1
+        elif [ $(( cap - ac )) -ge 1 ] 2>/dev/null; then
+          case "$2" in -*) p=inverted;; *) p=normal;; esac
+          physics=1; ac=$cap; ats=$6; dirty=1
+        fi
+      else
+        ac=$cap; ats=$6; dirty=1
       fi
-      av=$vmv; ats=$6; dirty=1
-    elif [ -z "$av" ] || [ -z "$ats" ] || [ $(( $6 - ats )) -gt 3600 ] 2>/dev/null || [ $(( $6 - ats )) -lt 0 ] 2>/dev/null; then
-      av=$vmv; ats=$6; dirty=1
     fi
   fi
+  if [ "${3:-}" = false ] && [ -n "$ac" ]; then ac=; ats=; dirty=1; fi
   if [ -n "$physics" ]; then
     if [ ".$p" = ".$confirmed" ]; then
       [ -n "$cand" ] && { cand=; n=0; dirty=1; }
@@ -176,7 +181,7 @@ _se_polarity() {
     if [ -z "$confirmed" ] && [ "$n" -ge 2 ]; then confirmed=$p; cand=; n=0; dirty=1; fi
     if [ -n "$confirmed" ] && [ ".$p" != ".$confirmed" ] && [ "$n" -ge 3 ]; then confirmed=$p; cand=; n=0; dirty=1; fi
   fi
-  [ -n "$dirty" ] && echo "confirmed=$confirmed cand=$cand n=$n av=$av ats=$ats" > "$pc" 2>/dev/null
+  [ -n "$dirty" ] && echo "sv=2 confirmed=$confirmed cand=$cand n=$n ac=$ac ats=$ats" > "$pc" 2>/dev/null
   if [ -n "$physics" ]; then echo "$p"; return; fi
   if [ -n "$confirmed" ]; then echo "$confirmed"; return; fi
   case "$1" in
@@ -188,8 +193,8 @@ _se_polarity() {
 
 _se_polarity_source() {
   local pc="${SE_POLCACHE:-${dataDir:-/data/adb/vr25/acc-data}/.se-polarity}"
-  case "$(cat "$pc" 2>/dev/null)" in
-    confirmed=normal*|confirmed=inverted*) echo learned;;
+  case " $(cat "$pc" 2>/dev/null) " in
+    *" confirmed=normal "*|*" confirmed=inverted "*) echo learned;;
     *) echo bootstrap;;
   esac
 }
@@ -305,7 +310,7 @@ write_state() {
     local plugged units polarity psrc mclass conf trust
     plugged=$(_se_plugged)
     units=$(_se_units "$cur")
-    polarity=$(_se_polarity "$status" "$cur" "$plugged" "$units" "$volt" "$ts")
+    polarity=$(_se_polarity "$status" "$cur" "$plugged" "$units" "$lvl" "$ts")
     psrc=$(_se_polarity_source)
     mclass=$(_se_class "$cur" "$plugged" "$units" "$polarity")
     trust=$(_se_trust "$status" "$mclass" "$cur")
