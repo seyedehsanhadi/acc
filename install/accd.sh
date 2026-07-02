@@ -454,6 +454,7 @@ if ! $_INIT; then
         . $config 2>/dev/null || :
         sync_native_limit
         native_unlatch || :
+        native_verify_backstop || :
         _nap ${loopDelay[1]:-9}
         continue
       fi
@@ -770,6 +771,44 @@ if ! $_INIT; then
     chmod 0644 $gcsl $gcst 2>/dev/null || :
     echo "$start" > $gcst 2>/dev/null || :
     echo "$stop"  > $gcsl 2>/dev/null || :
+  }
+
+
+  native_verify_backstop() {
+    # 6.5.1: the native %-limit is normally firmware-enforced, but a churned charge session
+    # can ignore a retroactive stop write (probe-filmed on bramble). Verify the hold against
+    # the FUEL GAUGE (charge_counter climbing = really charging, immune to lying status
+    # labels): two consecutive climbing samples while >1% above the stop level -> hold a
+    # reversible input cut each loop; restore it at/below the limit or on unplug. No-op on
+    # phones without the node or the counter.
+    local stop=${capacity[3]:-80} cap cc prev
+    nvb_node=${NVB_NODE:-/sys/class/power_supply/usb/input_current_max}
+    [ -f "$nvb_node" ] || return 0
+    cap=$(batt_cap) || return 0
+    if [ "$cap" -le $(( stop + 1 )) ] || ! online; then
+      if [ -f $TMPDIR/.nvb-on ]; then
+        chmod 0644 "$nvb_node" 2>/dev/null || :
+        cat $TMPDIR/.nvb-restore > "$nvb_node" 2>/dev/null || :
+        rm -f $TMPDIR/.nvb-on 2>/dev/null || :
+      fi
+      nvb_count=0; rm -f $TMPDIR/.nvb-cc 2>/dev/null || :
+      return 0
+    fi
+    cc=$(cat ${NVB_CC:-/sys/class/power_supply/battery/charge_counter} 2>/dev/null) || return 0
+    case "$cc" in ''|*[!0-9-]*) return 0;; esac
+    prev=$(cat $TMPDIR/.nvb-cc 2>/dev/null || echo "")
+    echo "$cc" > $TMPDIR/.nvb-cc
+    [ -n "$prev" ] || return 0
+    if [ "$cc" -gt $(( prev + 2000 )) ] 2>/dev/null; then
+      nvb_count=$(( ${nvb_count:-0} + 1 ))
+    else
+      nvb_count=0; return 0
+    fi
+    [ ${nvb_count:-0} -ge 2 ] || return 0
+    [ -f $TMPDIR/.nvb-on ] || { cat "$nvb_node" > $TMPDIR/.nvb-restore 2>/dev/null || echo 2000000 > $TMPDIR/.nvb-restore; }
+    chmod 0644 "$nvb_node" 2>/dev/null || :
+    echo 0 > "$nvb_node" 2>/dev/null && touch $TMPDIR/.nvb-on
+    warn_once_per nvbackstop 21600 "⚠️ ACC: the firmware ignored the native charge limit (still charging past ${capacity[3]:-?}%); holding a reversible input cut until the battery is back at the limit."
   }
 
 
