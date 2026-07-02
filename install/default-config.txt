@@ -423,7 +423,7 @@ runCmdOnPause=''
 # Type: Boolean | String (pbim=no)
 # Default: true
 #
-# Battery idle mode, also called "standby mode" or "charging bypass", is the ability of running off the charger, as if the battery were disconnected from the device.
+# Battery idle mode, also called "charging bypass", is the ability of running off the charger, as if the battery were disconnected from the device.
 # Not all devices support this, but there's also emulated idle mode (refer to the readme), which works on all devices.
 #
 # If enabled, charging switches that support battery idle mode take precedence.

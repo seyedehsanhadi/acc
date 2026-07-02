@@ -1,3 +1,6 @@
+**v2025.5.18-6.5.1-rc1 (202505281)**
+Release candidate, driven by two field reports with full boot films. Pixel 4a / 4a 5G / 5 class (soc:google,charger): the daemon now detects the native stop/start pair there and manages it directly - no more fighting the firmware through the generic 100-pcap toggle (the filmed 40-100 oscillation is gone), and it verifies the hold against the fuel gauge at boot: if the firmware ignores the limit, ACC holds a reversible input cut until the battery is back at the limit. Level switches are never flipped back on after a failed instant check (they settle across firmware ticks instead). One vocabulary for battery resting: Bypass (plugged in, battery idle) vs Standby (unplugged) vs Draining (plugged, lowering to the limit); the status export passes the kernel label through unmodified and classifies from the median of three coherent samples, so the dashboard no longer flickers on transient spikes. Nothing changes on Tensor Pixels or instant on/off switches. Existing configs are unchanged.
+
 **v2025.5.18-stable.6.5 (202505280)**
 
 🎉 **First public release** of this fork of ACC. The headline is **AMPS**, a new universal charge-switch finder, with the full 6.4 / 6.4.1 reliability line folded in. Existing configs are unchanged; systemless; works on any root.
