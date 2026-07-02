@@ -111,30 +111,86 @@ _se_units() {
   if [ "$a" -gt 16000 ] 2>/dev/null; then echo uA; else echo mA; fi
 }
 
-# polarity: learned from the unplugged ground truth, cached, status cross-check only as
-# bootstrap. The old per-sample status-vs-sign inference was circular on firmware that lies
-# during a drain-down (bramble reports "Charging" while deliberately discharging): the lying
-# status flipped polarity to inverted, _se_class flipped the sign back, and the honest
+# polarity: learned from physics, cached with a confirmation streak, status cross-check only
+# as bootstrap. The old per-sample status-vs-sign inference was circular on firmware that
+# lies during a drain-down (bramble reports "Charging" while deliberately discharging): the
+# lying status flipped polarity to inverted, _se_class flipped the sign back, and the honest
 # measurement laundered into "charging" - the dashboard showed Charging instead of
-# Draining to N%. Unplugged with meaningful current the battery can only be discharging, so
-# that sign is physics, not firmware opinion; it is learned once, persisted, and plugged
-# samples can never poison it. $1=status $2=cur $3=plugged $4=units
+# Draining to N%.
+# Physics samples, either of:
+#   - unplugged with meaningful current (the battery can only be discharging), or
+#   - plugged with meaningful current while the battery VOLTAGE keeps falling (>=30mV over a
+#     45s+ window): a genuinely charging battery does not lose voltage, so the pack is
+#     discharging no matter what the status node claims - this calibrates bramble-style
+#     liars without ever unplugging.
+# A sample's own physics reading is echoed live (a live ground-truth read is never vetoed by
+# the cache); the persistent value needs 2 agreeing samples to confirm, and 3 agreeing
+# contradictions to flip a previously confirmed value (self-heal from a bad learn). Plugged
+# status opinions can never touch the cache. $1=status $2=cur $3=plugged $4=units
+# $5=volt_raw $6=now_ts
 _se_polarity() {
-  local pc="${SE_POLCACHE:-${dataDir:-/data/adb/vr25/acc-data}/.se-polarity}" cached a thr p
+  local pc="${SE_POLCACHE:-${dataDir:-/data/adb/vr25/acc-data}/.se-polarity}"
+  local a thr p physics= confirmed= cand= n=0 av= ats= vmv kv line dirty=
   case "${2:-null}" in null|'') echo unknown; return;; esac
   a="${2#-}"
   [ "${4:-}" = uA ] && thr=30000 || thr=30
-  if [ "${3:-}" = false ] && [ "$a" -ge "$thr" ] 2>/dev/null; then
-    case "$2" in -*) p=normal;; *) p=inverted;; esac
-    [ ".$(cat "$pc" 2>/dev/null)" = ".$p" ] || echo "$p" > "$pc" 2>/dev/null
-    echo "$p"; return
+  line=$(cat "$pc" 2>/dev/null)
+  for kv in $line; do
+    case "$kv" in
+      confirmed=*) confirmed=${kv#*=};;
+      cand=*) cand=${kv#*=};;
+      n=*) n=${kv#*=};;
+      av=*) av=${kv#*=};;
+      ats=*) ats=${kv#*=};;
+    esac
+  done
+  case "$n" in ''|*[!0-9]*) n=0;; esac
+  vmv="${5:-}"
+  case "$vmv" in null|''|*[!0-9]*) vmv=;; esac
+  [ -n "$vmv" ] && [ "$vmv" -ge 100000 ] 2>/dev/null && vmv=$((vmv / 1000))
+  if [ "${3:-}" = false ]; then
+    [ -n "$av" ] && { av=; ats=; dirty=1; }
+    if [ "$a" -ge "$thr" ] 2>/dev/null; then
+      case "$2" in -*) p=normal;; *) p=inverted;; esac
+      physics=1
+    fi
+  elif [ "$a" -ge "$thr" ] 2>/dev/null && [ -n "$vmv" ] && [ -n "${6:-}" ]; then
+    if [ -n "$av" ] && [ -n "$ats" ] && [ $(( $6 - ats )) -ge 45 ] 2>/dev/null && [ $(( $6 - ats )) -le 3600 ] 2>/dev/null; then
+      if [ $(( av - vmv )) -ge 30 ] 2>/dev/null; then
+        case "$2" in -*) p=normal;; *) p=inverted;; esac
+        physics=1
+      fi
+      av=$vmv; ats=$6; dirty=1
+    elif [ -z "$av" ] || [ -z "$ats" ] || [ $(( $6 - ats )) -gt 3600 ] 2>/dev/null || [ $(( $6 - ats )) -lt 0 ] 2>/dev/null; then
+      av=$vmv; ats=$6; dirty=1
+    fi
   fi
-  cached=$(cat "$pc" 2>/dev/null)
-  case "$cached" in normal|inverted) echo "$cached"; return;; esac
+  if [ -n "$physics" ]; then
+    if [ ".$p" = ".$confirmed" ]; then
+      [ -n "$cand" ] && { cand=; n=0; dirty=1; }
+    elif [ ".$p" = ".$cand" ]; then
+      n=$((n + 1)); dirty=1
+    else
+      cand=$p; n=1; dirty=1
+    fi
+    if [ -z "$confirmed" ] && [ "$n" -ge 2 ]; then confirmed=$p; cand=; n=0; dirty=1; fi
+    if [ -n "$confirmed" ] && [ ".$p" != ".$confirmed" ] && [ "$n" -ge 3 ]; then confirmed=$p; cand=; n=0; dirty=1; fi
+  fi
+  [ -n "$dirty" ] && echo "confirmed=$confirmed cand=$cand n=$n av=$av ats=$ats" > "$pc" 2>/dev/null
+  if [ -n "$physics" ]; then echo "$p"; return; fi
+  if [ -n "$confirmed" ]; then echo "$confirmed"; return; fi
   case "$1" in
     Charging)    case "$2" in -*) echo inverted;; *) echo normal;; esac;;
     Discharging) case "$2" in -*) echo normal;; *) echo inverted;; esac;;
     *) echo unknown;;
+  esac
+}
+
+_se_polarity_source() {
+  local pc="${SE_POLCACHE:-${dataDir:-/data/adb/vr25/acc-data}/.se-polarity}"
+  case "$(cat "$pc" 2>/dev/null)" in
+    confirmed=normal*|confirmed=inverted*) echo learned;;
+    *) echo bootstrap;;
   esac
 }
 
@@ -246,10 +302,11 @@ write_state() {
     userLocked=false
     case "${chargingSwitch[*]-}" in *" --"*) userLocked=true;; esac
 
-    local plugged units polarity mclass conf trust
+    local plugged units polarity psrc mclass conf trust
     plugged=$(_se_plugged)
     units=$(_se_units "$cur")
-    polarity=$(_se_polarity "$status" "$cur" "$plugged" "$units")
+    polarity=$(_se_polarity "$status" "$cur" "$plugged" "$units" "$volt" "$ts")
+    psrc=$(_se_polarity_source)
     mclass=$(_se_class "$cur" "$plugged" "$units" "$polarity")
     trust=$(_se_trust "$status" "$mclass" "$cur")
     conf=low
@@ -268,8 +325,8 @@ write_state() {
       # smart sensing, measured live for any SoC
       printf ',"plugged":%s' "$plugged"
       printf ',%s' "$(_se_native)"
-      printf ',"sensing":{"currentUnits":"%s","polarity":"%s","statusTrust":"%s","confidence":"%s"}' \
-        "$units" "$polarity" "$trust" "$conf"
+      printf ',"sensing":{"currentUnits":"%s","polarity":"%s","polaritySource":"%s","statusTrust":"%s","confidence":"%s"}' \
+        "$units" "$polarity" "$psrc" "$trust" "$conf"
       printf ',"switch":{"locked":"%s","userLocked":%s,"measuredClass":"%s"}' \
         "$(_se_esc "${chargingSwitch[*]-}")" "$userLocked" "$mclass"
       printf '}\n'
