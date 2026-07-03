@@ -3,7 +3,7 @@
 # AMPS - Adaptive Multi-device Probe & Selector.
 # Root-only universal charge-control switch finder: probes any device, leak-verifies
 # bypass/cut/drain switches + native %-limits, snapshots every write, restores on exit.
-V=7.0.0
+V=7.1.0
 # Force C locale so status words, sort, and text tooling are deterministic regardless of the device locale.
 export LC_ALL=C LANG=C
 case "${1:-}" in --selftest|--version) _STONLY=1;; esac
@@ -162,6 +162,49 @@ reco_pick(){
 
 _lblof(){ printf '%s' "$1" | cut -d'|' -f1; }
 _clsof(){ printf '%s' "$1" | cut -d'|' -f2; }
+# Finalist stress verdict (pure): from firmware-override count / hammer count / capacity delta while
+# the level pick is engaged, decide LEAK (charged while held) > REARM (firmware kept overriding) > CLEAN.
+fstress_verdict(){ _fov="${1:-0}"; _fn="${2:-0}"; _fcapd="${3:-0}"
+  case "$_fov" in ''|*[!0-9]*) _fov=0;; esac
+  case "$_fn" in ''|*[!0-9]*) _fn=0;; esac
+  case "$_fcapd" in ''|*[!0-9-]*) _fcapd=0;; esac
+  [ "$_fcapd" -gt 0 ] 2>/dev/null && { printf LEAK; return; }
+  { [ "$_fov" -ge 3 ] 2>/dev/null && [ "$(( _fov * 3 ))" -ge "$_fn" ] 2>/dev/null; } && { printf REARM; return; }
+  printf CLEAN; }
+# Finalist stress-test: a native %-limit verified in L5's short window can still be an intermittently
+# re-arming thermal node (accepts a %, firmware resets it minutes later). Re-hammer ONLY the level
+# finalist to provoke that re-arm; demote it (mutating le_enf/LEVELOK/STUCKS so reco falls to a hard
+# cut/bypass) if the firmware overrides it under load or the pack keeps charging. Demote-only +
+# snapshot-restored, so the worst case is the 2nd-best pick. No-op unless a level finalist exists.
+finalist_stress(){
+  [ -n "$le_enf" ] && [ "${STRESS_FINALIST:-1}" = 1 ] && [ "$BLINDV" = 0 ] \
+    && [ "$CAP" -ge 12 ] 2>/dev/null && [ "$CAP" -lt 96 ] 2>/dev/null && ! over || return 0
+  _fs_node="$(printf '%s' "$CFG_LEVEL" | awk '{print $1}')"
+  [ -n "$_fs_node" ] && [ -w "$_fs_node" ] || return 0
+  _fs_ev=$(( CAP - 5 )); [ "$_fs_ev" -ge 96 ] 2>/dev/null && _fs_ev=95
+  _fs_orig="$(read1 "$_fs_node")"
+  log ""
+  log "==== FINALIST STRESS-TEST (re-hammer the level pick to catch an intermittent re-arm) ===="
+  snap_add "$_fs_node"
+  recover_online 8 >/dev/null 2>&1; sleep 2
+  _fs_c0="$(san "$(read1 "$BATT/capacity")")"; _fs_ov=0; _fs_i=0
+  while [ "$_fs_i" -lt "${STRESS_HITS:-12}" ]; do
+    stop_check; wr "$_fs_node" "$_fs_ev"; sleep 1
+    [ "$(read1 "$_fs_node")" != "$_fs_ev" ] && _fs_ov=$(( _fs_ov + 1 ))
+    _fs_i=$(( _fs_i + 1 )); over && break
+  done
+  _fs_c1="$(san "$(read1 "$BATT/capacity")")"; _fs_capd=$(( _fs_c1 - _fs_c0 ))
+  [ -n "$_fs_orig" ] && wr "$_fs_node" "$_fs_orig"; recover_online 8 >/dev/null 2>&1
+  _fs_v="$(fstress_verdict "$_fs_ov" "$_fs_i" "$_fs_capd")"
+  log "  $le_enf: hammered ${_fs_i}x -> firmware overrode ${_fs_ov}/${_fs_i}, capacity ${_fs_capd}% -> $_fs_v"
+  if [ "$_fs_v" != CLEAN ]; then
+    log "    -> DEMOTED: not a stable native cap under load ($_fs_v). Preferring a hard cut/bypass."
+    REASSERT="$REASSERT|$le_enf"; STUCKS="$STUCKS|$le_enf"; RESUMES="$RESUMES|$le_enf=STUCK"
+    LEVELOK="$(printf '%s\n' "$LEVELOK" | tr '|' '\n' | grep -vxF "$le_enf" 2>/dev/null | sed '/^$/d' | tr '\n' '|')"
+    le_enf=; LVL_BY_ACC=0
+  else
+    log "    -> CONFIRMED: native cap held under load; keeping it as the top pick."
+  fi; }
 
 note_for(){ case "$1" in
   native-level)   echo "firmware limit -- reliable and no battery cycling when it truly enforces";;
@@ -324,6 +367,16 @@ selftest(){ _sp=0; _sf=0
   _ck lcd_full_p     "$(learn_chgdir Full p 1)"          "p med"
   _ck lcd_disch_p    "$(learn_chgdir Discharging p 1)"   "n high"
   _ck lcd_charging   "$(learn_chgdir Charging p 1)"      "p high"
+  _ck fs_clean       "$(fstress_verdict 0 12 0)"    CLEAN
+  _ck fs_clean_stray "$(fstress_verdict 1 12 0)"    CLEAN
+  _ck fs_clean_short "$(fstress_verdict 2 12 0)"    CLEAN
+  _ck fs_rearm_all   "$(fstress_verdict 12 12 0)"   REARM
+  _ck fs_rearm_qtr   "$(fstress_verdict 4 12 0)"    REARM
+  _ck fs_rearm_min   "$(fstress_verdict 3 12 0)"    CLEAN
+  _ck fs_leak_flat   "$(fstress_verdict 0 12 1)"    LEAK
+  _ck fs_leak_over   "$(fstress_verdict 12 12 2)"   LEAK
+  _ck fs_leak_neg    "$(fstress_verdict 0 12 -1)"   CLEAN
+  _ck fs_bad_input   "$(fstress_verdict x y z)"     CLEAN
   echo "== self-test: $_sp passed, $_sf failed =="
   [ "$_sf" = 0 ]; }
 
@@ -2262,6 +2315,7 @@ if [ -z "$le_enf" ]; then
     esac
   fi
 fi
+finalist_stress
 RECO=none; RECO_LATCH=0; RECO_LBL=
 rb="$(pick_usable "$BYPASS")"; rc="$(pick_usable "$CUT")"; rdr="$(pick_usable "$DRAIN")"; rt="$(pick_usable "$THROTTLE")"
 rbh="$(pick_usable "${BYPASS_HELD:-}")"
