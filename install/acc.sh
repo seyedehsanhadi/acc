@@ -568,6 +568,7 @@ case "${1-}" in
     config=$TMPDIR/.config
 
     exxit() {
+      trap - EXIT INT TERM HUP
       rm $TMPDIR/.testingsw 2>/dev/null || :
       if [ -n "$parsed" ]; then
         cat $TMPDIR/ch-switches $_parsed 2>/dev/null > $parsed \
@@ -581,7 +582,7 @@ case "${1-}" in
 
     set +e
     touch $TMPDIR/.testingsw
-    trap exxit EXIT
+    trap exxit EXIT INT TERM HUP
     not_charging && enable_charging > /dev/null
 
     not_charging && {

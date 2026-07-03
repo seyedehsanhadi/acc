@@ -459,6 +459,8 @@ if ! $_INIT; then
         continue
       fi
 
+      leak_backstop && { _nap ${loopDelay[1]:-9}; continue; }
+
       if is_charging; then
 
         xIdle=false
@@ -643,6 +645,14 @@ if ! $_INIT; then
           rm $TMPDIR/.forceoff* 2>/dev/null && sleep ${loopDelay[0]} || :
           _ccResume0=$(cc_now)
           enable_charging
+          # 6.5.1: below the resume level the intent is unambiguously to CHARGE, so release any
+          # stray hard cut from ANY source (a killed test, a prior leak_backstop, an OEM app)
+          # right here -- unconditionally, BEFORE the not_charging gate below. The status/current
+          # nodes can false-read "charging" while a leftover input_suspend blocks real input (Mi A3:
+          # current reads -1.5A while charge_counter stays flat), which made not_charging=false and
+          # skipped the rc5 clear -> charging stayed dead until a reboot. enable_charging already put
+          # the switch in its ON state, so clearing the cut family here only ever ALLOWS charging.
+          for _di in */input_suspend */charge_disable */batt_slate_mode */op_disable_charge; do [ -w "$_di" ] && echo 0 > "$_di" 2>/dev/null || :; done
           # rc5 (#7): RESUME-side watchdog, symmetric to the rc19 breach monitor. enable_charging
           # wrote the switch ON value (+ the D8 rerun for current-cap), but on some current-cap
           # switches charging may STILL not restart -- an otherwise SILENT stall. If present and
@@ -659,6 +669,7 @@ if ! $_INIT; then
             if [ "${_ccResume0:-0}" -gt 0 ] && [ "$(cc_now)" -gt "$(( _ccResume0 + 1000 ))" ] 2>/dev/null; then
               rm $TMPDIR/.resumefail $TMPDIR/.resumewarned 2>/dev/null || :
             else
+            for _di in */input_suspend */charge_disable */batt_slate_mode */op_disable_charge; do [ -w "$_di" ] && echo 0 > "$_di" 2>/dev/null || :; done
             for _rn in */apsd_rerun */rerun_aicl; do [ -w "$_rn" ] && echo 1 > "$_rn" 2>/dev/null || :; done
             rf=$(cat $TMPDIR/.resumefail 2>/dev/null || echo 0); rf=$((rf + 1)); echo $rf > $TMPDIR/.resumefail
             if [ $rf -ge 4 ] && [[ "${chargingSwitch[*]-}" = *\ -- ]]; then
@@ -771,6 +782,47 @@ if ! $_INIT; then
     chmod 0644 $gcsl $gcst 2>/dev/null || :
     echo "$start" > $gcst 2>/dev/null || :
     echo "$stop"  > $gcsl 2>/dev/null || :
+  }
+
+
+  leak_backstop() {
+    # 6.5.1: ground-truth overcharge guard for the GENERIC switch path (the native
+    # path has native_verify_backstop). batt_cap (coulomb-counted %) stays reliable
+    # when the status/current nodes lie, so a cell sitting ABOVE the pause level
+    # while plugged means the configured switch is LEAKING -- firmware overrode it
+    # (e.g. Mi A3 charge_control_limit, which the PMI632 keeps re-arming to levels
+    # that still charge). Engage a reversible hard input cut on a DIFFERENT node
+    # than the switch (never fight the switch's own node) and REPORT holding (return
+    # 0) so the caller skips the rest of the loop -- otherwise the daemon's own
+    # re-arm/resume logic would clear the cut on the very next line and the two
+    # would fight (filmed: is=1 then is=0 oscillation). Hysteresis: engage at
+    # limit+2, keep holding until the cell drains to the limit or is unplugged.
+    # Returns 1 (proceed normally) when the switch holds, below the limit,
+    # unplugged, or in millivolt mode (capacity[3] > 100).
+    local pause=${capacity[3]:-100} cap n sw0
+    [ "$pause" -le 100 ] 2>/dev/null || return 1
+    cap=$(batt_cap) 2>/dev/null || return 1
+    sw0="${chargingSwitch[0]-}"; sw0="${sw0##*/}"
+    if ! present || [ "$cap" -le "$pause" ]; then
+      [ -f $TMPDIR/.leakcut ] && {
+        for n in input_suspend charge_disable batt_slate_mode op_disable_charge; do
+          [ "$n" = "$sw0" ] && continue
+          [ -w "battery/$n" ] && echo 0 > "battery/$n" 2>/dev/null || :
+        done
+        rm -f $TMPDIR/.leakcut 2>/dev/null || :
+      }
+      return 1
+    fi
+    [ "$cap" -ge $(( pause + 2 )) ] || [ -f $TMPDIR/.leakcut ] || return 1
+    for n in input_suspend charge_disable batt_slate_mode op_disable_charge; do
+      [ "$n" = "$sw0" ] && continue
+      [ -w "battery/$n" ] || continue
+      echo 1 > "battery/$n" 2>/dev/null
+      touch $TMPDIR/.leakcut
+      warn_once_per leakcut 21600 "⚠️ ACC: your charging switch leaked past the ${capacity[3]:-?}% limit; holding a reversible input cut until the battery is back at the limit."
+      return 0
+    done
+    return 1
   }
 
 

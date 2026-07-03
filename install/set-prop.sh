@@ -82,12 +82,12 @@ set_prop() {
 
     # print switches
     s:|--charging*witch:)
-      sort -u $TMPDIR/ch-switches
+      sort -u $TMPDIR/ch-switches 2>/dev/null || :
       return 0
     ;;
 
     -ss::|--charging*witch::)
-      sort $dataDir/logs/working-switches.log | nl -s ") " -w 2 -v 1
+      sort $dataDir/logs/working-switches.log 2>/dev/null | nl -s ") " -w 2 -v 1 || :
       return 0
     ;;
 
