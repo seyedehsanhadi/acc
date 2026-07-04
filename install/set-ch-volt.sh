@@ -3,7 +3,10 @@ set_ch_volt() {
   local f=$TMPDIR/.volt-custom
   local isAccd=${isAccd:-false}
 
-  [[ ! -f $f && .${1-} = .- ]] && return 0 || :
+  # Same reboot hole as set-ch-curr: the tmpfs marker alone must not gate a restore, or clearing
+  # the voltage limit after a reboot silently keeps the old value in the config and on the nodes.
+  [[ ! -f $f && .${1-} = .- ]] && [ -z "${maxChargingVoltage[0]-}" ] \
+    && ! grep -q / $TMPDIR/ch-volt-ctrl-files 2>/dev/null && return 0 || :
 
   if [ -n "${1-}" ]; then
 

@@ -3,7 +3,14 @@ set_ch_curr() {
   local f=$TMPDIR/.mcc-custom
   local isAccd=${isAccd:-false}
 
-  [[ ! -f $f && .${1-} = .- ]] && return 0 || :
+  # Fast no-op on restore ONLY when there is truly nothing to clear. The marker lives in tmpfs
+  # (gone every reboot) and only reappears once the daemon re-applies the limit during a CHARGING
+  # tick - on a phone that has not charged since boot, gating on the marker alone made a clear a
+  # TOTAL no-op: the config kept the old milliamps, so AccA showed "Disabled" while the editor
+  # resurrected the value on reload and the limit stayed enforced (field video). Proceed whenever
+  # the config still carries a value or control files were resolved this boot.
+  [[ ! -f $f && .${1-} = .- ]] && [ -z "${maxChargingCurrent[0]-}" ] \
+    && ! grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null && return 0 || :
 
   [[ .${1-} != .*% ]] || {
     set_temp_level ${1%\%}
