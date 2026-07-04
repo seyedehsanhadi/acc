@@ -182,10 +182,14 @@ fstress_thermal(){ case "${1:-}" in ''|*[!0-9]*) return 1;; esac
 # (native-level, bypass, cut, drain), re-hammer its OFF value to provoke that re-arm; demote it
 # (STUCKS, so pick_usable skips it on the re-pick) if the firmware overrides the writes or the
 # pack keeps charging while engaged. Demote-only + snapshot-restored, so the worst case is the
-# 2nd-best pick. Args: $1=winner label, $2="node on off" config line for it.
+# 2nd-best pick. Every signal here is sensor-independent (node readback, coulomb capacity, _max
+# sibling), so this runs in BLIND sessions too - lying-sensor phones need it most. A cfg whose
+# node does not appear in the label (a class-default fallback from cfg_lookup missing the entry)
+# is SKIPPED rather than hammered: stressing the wrong node once read ccl's _max against
+# input_suspend and demoted the best switch. Args: $1=winner label, $2="node on off" cfg line.
 finalist_stress(){
   _fs_lbl="$1"; _fs_cfg="$2"
-  [ -n "$_fs_lbl" ] && [ -n "$_fs_cfg" ] && [ "${STRESS_FINALIST:-1}" = 1 ] && [ "$BLINDV" = 0 ] \
+  [ -n "$_fs_lbl" ] && [ -n "$_fs_cfg" ] && [ "${STRESS_FINALIST:-1}" = 1 ] \
     && [ "${ACC_DEFER:-0}" = 0 ] && [ "$CAP" -ge 12 ] 2>/dev/null && [ "$CAP" -lt 96 ] 2>/dev/null && ! over || return 0
   case " ${_FS_SEEN:-} " in *" $_fs_lbl "*) return 0;; esac
   _FS_SEEN="${_FS_SEEN:-} $_fs_lbl"
@@ -194,6 +198,7 @@ finalist_stress(){
   [ "$_fs_ev" = pcap ] && { _fs_ev=$(( CAP - 5 )); [ "$_fs_ev" -ge 96 ] 2>/dev/null && _fs_ev=95; }
   case "$_fs_ev" in ''|*[!0-9-]*) return 0;; esac
   [ -n "$_fs_node" ] && [ -w "$_fs_node" ] || return 0
+  case "$_fs_lbl" in *"${_fs_node##*/}"*) ;; *) return 0;; esac
   _fs_orig="$(read1 "$_fs_node")"
   log ""
   log "==== FINALIST STRESS-TEST (re-hammer the winning pick to catch an intermittent re-arm) ===="
@@ -575,7 +580,7 @@ recover_online(){
 restore(){
   [ "$RESTORED" = 1 ] && return; RESTORED=1
   trap '' INT TERM HUP
-  ( sleep 130; defaults_native 2>/dev/null; sleep 5; kill -9 $$ 2>/dev/null ) & RWDOG=$!
+  ( sleep 130; defaults_native 2>/dev/null; sleep 5; kill -9 $$ 2>/dev/null ) >/dev/null 2>&1 & RWDOG=$!
   if [ "$DID" = 1 ]; then
     log ""; log "===== RESTORING (replaying snapshot to original values) ====="
     defaults_native
@@ -641,13 +646,19 @@ restore(){
     am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d "file://$OUT" >/dev/null 2>&1
     am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d "file://$OUTDIR" >/dev/null 2>&1
   fi
-  [ -n "${WATCHDOG-}" ] && kill "$WATCHDOG" 2>/dev/null
-  [ -n "${RWDOG-}" ] && kill "$RWDOG" 2>/dev/null
+  # Disarm both watchdogs INCLUDING their forked sleep children: killing only the subshell
+  # leaves its running sleep orphaned with an inherited copy of our stdout, and a pipe reader
+  # (AccA's live log stream) then waits the full sleep (~2 min of frozen UI) before seeing EOF.
+  for _wd in "${WATCHDOG-}" "${RWDOG-}"; do
+    [ -n "$_wd" ] || continue
+    for _wc in $(pgrep -P "$_wd" 2>/dev/null); do kill -9 "$_wc" 2>/dev/null; done
+    kill -9 "$_wd" 2>/dev/null
+  done
 }
 trap restore EXIT
 trap 'restore; trap - EXIT; exit 130' INT TERM HUP
 MYPID=$$
-( i=0; lim=$(( (MAXSEC + 120) / 5 )); while [ $i -lt $lim ]; do sleep 5; kill -0 "$MYPID" 2>/dev/null || exit 0; i=$((i+1)); done; kill -TERM "$MYPID" 2>/dev/null ) &
+( i=0; lim=$(( (MAXSEC + 120) / 5 )); while [ $i -lt $lim ]; do sleep 5; kill -0 "$MYPID" 2>/dev/null || exit 0; i=$((i+1)); done; kill -TERM "$MYPID" 2>/dev/null ) >/dev/null 2>&1 &
 WATCHDOG=$!
 rm -f "$STOPF" 2>/dev/null
 # Runtime guards: cooperative cancel (AccA writes the stop-flag), ACC hold-off, thermal/precondition
@@ -2287,6 +2298,8 @@ pick_usable(){ puf="$BK/pickusable"; printf '%s\n' "$1" | tr '|' '\n' | sed '/^$
 label_path(){ lpp="$1"
   case "$lpp" in
     "fcc-zero "*) lpp="${lpp#fcc-zero }";;
+    "voltage-cap "*) lpp="${lpp#voltage-cap }";;
+    "[ACC] "*) lpp="${lpp#\[ACC\] }";;
     "[NEW] "*) lpp="${lpp#\[NEW\] }";;
     "[NEW:safe] "*) lpp="${lpp#\[NEW:safe\] }";;
     "[GEN:"*|"[LEARN"*) lpp="${lpp#*] }";;
