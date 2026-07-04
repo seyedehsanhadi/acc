@@ -598,6 +598,15 @@ if ! $_INIT; then
 
       else
 
+        # A cleared max_charging_current must release the current-limit nodes in THIS branch too.
+        # AccA's fast path (acca -s) only rewrites the config - it never calls set_ch_curr - and
+        # the existing restore call sites all sit in the charging/cooldown paths, so a user who
+        # disabled Charging power control while the daemon held the battery at the limit (the
+        # normal resting state) kept the old cap until reboot: config clean, phone still
+        # current-limited (field report: "disabled it but it still sticks", capped at 1100 mA).
+        # Cheap: set_ch_curr short-circuits on its marker once the defaults are restored.
+        [ -n "${maxChargingCurrent[0]-}" ] || (set_ch_curr - || :)
+
         # rc6 (L1 self-heal): some devices report current_now with an unreliable / rate-dependent
         # sign (e.g. Mi A3: charging reads NEGATIVE at full rate but POSITIVE when tapered near the
         # top), so the current-based status detection can land us in THIS not-charging branch while

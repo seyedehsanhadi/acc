@@ -30,6 +30,13 @@ set_ch_curr() {
           maxChargingCurrent=()
           max_charging_current=
           unset mcc
+          # Also restore the control nodes when they were already resolved this boot: writing the
+          # stored defaults is a plain file write (no live-charging probe needed). Returning without
+          # it left the caps applied with a clean config - the phone stayed current-limited until
+          # reboot, and the daemon's own later `set_ch_curr -` no-ops once the marker is gone
+          # (field report: disabled Charging power control, UI clean, still capped at 1100 mA).
+          grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null \
+            && (applyOnPlug=(); maxChargingVoltage=(); maxChargingCurrent=(); apply_on_plug default) || :
           rm $f 2>/dev/null || :
           $isAccd || print_curr_restored
           return 0
