@@ -1,3 +1,10 @@
+**v2025.5.18-6.5.1-rc7 (202505287)**
+
+Charging power control:
+- Fixed: disabling the current limit did not stick on devices without working current-control files. The config kept the old mA, so the editor kept showing (and re-applying) the value the dashboard had already cleared. The clear now always drops the config, whether or not the hardware exposes a limit node. rc6 fixed this only for phones that DO expose the nodes; rc7 covers the rest.
+- Fixed: the voltage limit had the same gap. Clearing it while the daemon rested at the limit, or on a phone that had not charged since boot, left the old millivolts on the config and nodes until reboot. It now clears in every state, matching the current limit.
+- Verified with real before/after on the Mi A3: a phantom 1100 mA in the config clears to empty through the exact AccA disable path; a negative control on the old code reproduces the stuck value.
+
 **v2025.5.18-6.5.1-rc6 (202505286)**
 
 Charging current limit:
