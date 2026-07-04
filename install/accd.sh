@@ -529,10 +529,10 @@ if ! $_INIT; then
               echo $lf > $TMPDIR/.lockfail-count
               if [ $lf -ge 3 ]; then
                 if [ -f $dataDir/.user-locked ]; then
-                  warn_once_per lockhold 21600 "⚠️ ACC: your locked charging switch isn't holding your ${capacity[3]:-?}% limit. Pick another in AccA — ACC will not change a locked switch for you."
+                  warn_once_per lockhold 21600 "⚠️ ACC: your locked charging switch isn't holding your ${capacity[3]:-?}% limit. Pick another in AccA - ACC will not change a locked switch for you."
                 else
                   echo "${chargingSwitch[*]% --}" >> $TMPDIR/.sw-blacklist
-                  notif "⚠️ ACC: the auto-selected charging switch stopped holding your ${capacity[3]:-?}% limit — selecting another."
+                  notif "⚠️ ACC: the auto-selected charging switch stopped holding your ${capacity[3]:-?}% limit - selecting another."
                   $TMPDIR/acca $config --set charging_switch= 2>/dev/null || :
                   chargingSwitch=()
                   rm $TMPDIR/.lockfail-count 2>/dev/null || :
@@ -697,13 +697,13 @@ if ! $_INIT; then
               # warnings.log) and rate-limited; the protective apsd/blacklist/reselect actions still run.
               # Opt the popups back in with `acc -s warnings=on`.
               if present 2>/dev/null && ! online 2>/dev/null; then
-                [ -f $TMPDIR/.resumewarned ] || { touch $TMPDIR/.resumewarned 2>/dev/null || :; warn_once_per resume-replug 1800 "⚠️ ACC: the charger stopped responding (online=0) at your ${capacity[2]:-?}% limit — UNPLUG and REPLUG the cable (or reboot) to resume. Your switch is fine; ACC won't change it."; }
+                [ -f $TMPDIR/.resumewarned ] || { touch $TMPDIR/.resumewarned 2>/dev/null || :; warn_once_per resume-replug 1800 "⚠️ ACC: the charger stopped responding (online=0) at your ${capacity[2]:-?}% limit - UNPLUG and REPLUG the cable (or reboot) to resume. Your switch is fine; ACC won't change it."; }
               elif [ -f $dataDir/.user-locked ]; then
                 # rc8: user-locked switch not resuming -> WARN, never auto-replace (respect the lock).
-                [ -f $TMPDIR/.resumewarned ] || { touch $TMPDIR/.resumewarned 2>/dev/null || :; warn_once_per resume-locked 1800 "⚠️ ACC: charging isn't resuming at your ${capacity[2]:-?}% limit with your locked switch. Pick another in AccA — ACC will NOT change a locked switch."; }
+                [ -f $TMPDIR/.resumewarned ] || { touch $TMPDIR/.resumewarned 2>/dev/null || :; warn_once_per resume-locked 1800 "⚠️ ACC: charging isn't resuming at your ${capacity[2]:-?}% limit with your locked switch. Pick another in AccA - ACC will NOT change a locked switch."; }
               else
                 echo "${chargingSwitch[*]% --}" >> $TMPDIR/.sw-blacklist
-                warn_once_per resume-reselect 1800 "⚠️ ACC: charging is not resuming at your ${capacity[2]:-?}% limit — selecting another switch."
+                warn_once_per resume-reselect 1800 "⚠️ ACC: charging is not resuming at your ${capacity[2]:-?}% limit - selecting another switch."
                 $TMPDIR/acca $config --set charging_switch= 2>/dev/null || :; chargingSwitch=()
                 rm $TMPDIR/.resumefail 2>/dev/null || :
               fi
