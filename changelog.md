@@ -1,3 +1,8 @@
+**v2025.5.18-6.5.1-rc8 (202505288)**
+
+AMPS (charge-switch finder) v7.1.1:
+- Fixed: on phones with a working native firmware %-limit (Pixel charge_stop_level), the finalist stress-test demoted the limit AMPS had just verified and recommended a battery-draining cut instead. The firmware manages that node itself (it rewrites the value under its own Adaptive Charging), which the stress-test miscounted as a re-arm even though the battery held flat. The stress verdict is now class-aware: a native %-limit is judged only by whether the battery actually charges past the limit (plus the thermal check), never by node-value churn. Cut/drain/bypass switches keep the re-arm check.
+
 **v2025.5.18-6.5.1-rc7 (202505287)**
 
 Charging power control:
