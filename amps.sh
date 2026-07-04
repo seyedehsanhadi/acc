@@ -171,20 +171,32 @@ fstress_verdict(){ _fov="${1:-0}"; _fn="${2:-0}"; _fcapd="${3:-0}"
   [ "$_fcapd" -gt 0 ] 2>/dev/null && { printf LEAK; return; }
   { [ "$_fov" -ge 3 ] 2>/dev/null && [ "$(( _fov * 3 ))" -ge "$_fn" ] 2>/dev/null; } && { printf REARM; return; }
   printf CLEAN; }
-# Finalist stress-test: a native %-limit verified in L5's short window can still be an intermittently
-# re-arming thermal node (accepts a %, firmware resets it minutes later). Re-hammer ONLY the level
-# finalist to provoke that re-arm; demote it (mutating le_enf/LEVELOK/STUCKS so reco falls to a hard
-# cut/bypass) if the firmware overrides it under load or the pack keeps charging. Demote-only +
-# snapshot-restored, so the worst case is the 2nd-best pick. No-op unless a level finalist exists.
+# Thermal-level node check (pure): a node whose _max sibling is a tiny integer (1..10) is the kernel's
+# thermal charge-control interface (levels, not a switch) -- firmware owns it and re-arms it whenever
+# the thermal engine is active, even if a short hammer on a cool phone reads clean.
+fstress_thermal(){ case "${1:-}" in ''|*[!0-9]*) return 1;; esac
+  [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 10 ] 2>/dev/null; }
+# Finalist stress-test: the switch that WINS the recommendation can still be an intermittently
+# re-arming firmware node that happened to hold through its short passive window (the Mi A3's
+# charge_control_limit passes as BYPASS one run and re-arms minutes later). Whatever class won
+# (native-level, bypass, cut, drain), re-hammer its OFF value to provoke that re-arm; demote it
+# (STUCKS, so pick_usable skips it on the re-pick) if the firmware overrides the writes or the
+# pack keeps charging while engaged. Demote-only + snapshot-restored, so the worst case is the
+# 2nd-best pick. Args: $1=winner label, $2="node on off" config line for it.
 finalist_stress(){
-  [ -n "$le_enf" ] && [ "${STRESS_FINALIST:-1}" = 1 ] && [ "$BLINDV" = 0 ] \
-    && [ "$CAP" -ge 12 ] 2>/dev/null && [ "$CAP" -lt 96 ] 2>/dev/null && ! over || return 0
-  _fs_node="$(printf '%s' "$CFG_LEVEL" | awk '{print $1}')"
+  _fs_lbl="$1"; _fs_cfg="$2"
+  [ -n "$_fs_lbl" ] && [ -n "$_fs_cfg" ] && [ "${STRESS_FINALIST:-1}" = 1 ] && [ "$BLINDV" = 0 ] \
+    && [ "${ACC_DEFER:-0}" = 0 ] && [ "$CAP" -ge 12 ] 2>/dev/null && [ "$CAP" -lt 96 ] 2>/dev/null && ! over || return 0
+  case " ${_FS_SEEN:-} " in *" $_fs_lbl "*) return 0;; esac
+  _FS_SEEN="${_FS_SEEN:-} $_fs_lbl"
+  set -- $_fs_cfg
+  _fs_node="$1"; _fs_ev="${3:-}"
+  [ "$_fs_ev" = pcap ] && { _fs_ev=$(( CAP - 5 )); [ "$_fs_ev" -ge 96 ] 2>/dev/null && _fs_ev=95; }
+  case "$_fs_ev" in ''|*[!0-9-]*) return 0;; esac
   [ -n "$_fs_node" ] && [ -w "$_fs_node" ] || return 0
-  _fs_ev=$(( CAP - 5 )); [ "$_fs_ev" -ge 96 ] 2>/dev/null && _fs_ev=95
   _fs_orig="$(read1 "$_fs_node")"
   log ""
-  log "==== FINALIST STRESS-TEST (re-hammer the level pick to catch an intermittent re-arm) ===="
+  log "==== FINALIST STRESS-TEST (re-hammer the winning pick to catch an intermittent re-arm) ===="
   snap_add "$_fs_node"
   recover_online 8 >/dev/null 2>&1; sleep 2
   _fs_c0="$(san "$(read1 "$BATT/capacity")")"; _fs_ov=0; _fs_i=0
@@ -196,15 +208,22 @@ finalist_stress(){
   _fs_c1="$(san "$(read1 "$BATT/capacity")")"; _fs_capd=$(( _fs_c1 - _fs_c0 ))
   [ -n "$_fs_orig" ] && wr "$_fs_node" "$_fs_orig"; recover_online 8 >/dev/null 2>&1
   _fs_v="$(fstress_verdict "$_fs_ov" "$_fs_i" "$_fs_capd")"
-  log "  $le_enf: hammered ${_fs_i}x -> firmware overrode ${_fs_ov}/${_fs_i}, capacity ${_fs_capd}% -> $_fs_v"
+  log "  $_fs_lbl: hammered ${_fs_i}x -> firmware overrode ${_fs_ov}/${_fs_i}, capacity ${_fs_capd}% -> $_fs_v"
+  if [ "$_fs_v" = CLEAN ] && fstress_thermal "$(read1 "${_fs_node}_max")"; then
+    _fs_v="THERMAL-LEVEL (${_fs_node##*/}_max=$(read1 "${_fs_node}_max"): firmware-owned thermal levels, re-arms when the thermal engine is active even though the hammer read clean on this cool run)"
+    log "  $_fs_lbl: $_fs_v"
+  fi
   if [ "$_fs_v" != CLEAN ]; then
-    log "    -> DEMOTED: not a stable native cap under load ($_fs_v). Preferring a hard cut/bypass."
-    REASSERT="$REASSERT|$le_enf"; STUCKS="$STUCKS|$le_enf"; RESUMES="$RESUMES|$le_enf=STUCK"
-    LEVELOK="$(printf '%s\n' "$LEVELOK" | tr '|' '\n' | grep -vxF "$le_enf" 2>/dev/null | sed '/^$/d' | tr '\n' '|')"
-    le_enf=; LVL_BY_ACC=0
-  else
-    log "    -> CONFIRMED: native cap held under load; keeping it as the top pick."
-  fi; }
+    log "    -> DEMOTED: does not hold under load ($_fs_v). Re-picking from the remaining finalists."
+    REASSERT="$REASSERT|$_fs_lbl"; STUCKS="$STUCKS|$_fs_lbl"; RESUMES="$RESUMES|$_fs_lbl=STUCK"
+    if [ "$_fs_lbl" = "$le_enf" ]; then
+      LEVELOK="$(printf '%s\n' "$LEVELOK" | tr '|' '\n' | grep -vxF "$le_enf" 2>/dev/null | sed '/^$/d' | tr '\n' '|')"
+      le_enf=; LVL_BY_ACC=0
+    fi
+    return 1
+  fi
+  log "    -> CONFIRMED: held under load; keeping it as the top pick."
+  return 0; }
 
 note_for(){ case "$1" in
   native-level)   echo "firmware limit -- reliable and no battery cycling when it truly enforces";;
@@ -377,6 +396,14 @@ selftest(){ _sp=0; _sf=0
   _ck fs_leak_over   "$(fstress_verdict 12 12 2)"   LEAK
   _ck fs_leak_neg    "$(fstress_verdict 0 12 -1)"   CLEAN
   _ck fs_bad_input   "$(fstress_verdict x y z)"     CLEAN
+  _ck ft_a3_ccl      "$(fstress_thermal 6 && echo T || echo F)"    T
+  _ck ft_edge_lo     "$(fstress_thermal 1 && echo T || echo F)"    T
+  _ck ft_edge_hi     "$(fstress_thermal 10 && echo T || echo F)"   T
+  _ck ft_pctcap      "$(fstress_thermal 100 && echo T || echo F)"  F
+  _ck ft_above       "$(fstress_thermal 11 && echo T || echo F)"   F
+  _ck ft_zero        "$(fstress_thermal 0 && echo T || echo F)"    F
+  _ck ft_empty       "$(fstress_thermal '' && echo T || echo F)"   F
+  _ck ft_garbage     "$(fstress_thermal x9 && echo T || echo F)"   F
   echo "== self-test: $_sp passed, $_sf failed =="
   [ "$_sf" = 0 ]; }
 
@@ -2315,14 +2342,15 @@ if [ -z "$le_enf" ]; then
     esac
   fi
 fi
-finalist_stress
-RECO=none; RECO_LATCH=0; RECO_LBL=
+compute_reco(){
+RECO=none; RECO_LATCH=0; RECO_LBL=; RECO_CLS=
 rb="$(pick_usable "$BYPASS")"; rc="$(pick_usable "$CUT")"; rdr="$(pick_usable "$DRAIN")"; rt="$(pick_usable "$THROTTLE")"
 rbh="$(pick_usable "${BYPASS_HELD:-}")"
 _reco="$(reco_pick "$le_enf" "$rbh" "$rc" "$rb" "$rdr" "" "$rt")"
 if [ -n "$_reco" ]; then
   RECO_LBL="$(_lblof "$_reco")"
-  case "$(_clsof "$_reco")" in
+  RECO_CLS="$(_clsof "$_reco")"
+  case "$RECO_CLS" in
     native-level) [ "${LVL_BY_ACC:-0}" = 1 ] && RECO="$RECO_LBL (native level limit, confirmed in use by ACC)" || RECO="$RECO_LBL (native level limit, verified)";;
     cut)          RECO="$RECO_LBL (CUT)";;
     bypass)       RECO="$RECO_LBL (BYPASS)";;
@@ -2364,6 +2392,16 @@ if [ -z "$SUGGEST" ]; then
   elif [ -n "$ACC_FALLBACK" ]; then SUGGEST="$ACC_FALLBACK"
   fi
 fi
+}
+compute_reco
+_fsr=0
+while [ "$_fsr" -lt 2 ] && [ -n "$RECO_LBL" ] && [ "$RECO_LATCH" = 0 ]; do
+  case "$RECO_CLS" in native-level|cut|bypass|drain) ;; *) break;; esac
+  _fs_sug="${SUGGEST%%" ("*}"
+  if finalist_stress "$RECO_LBL" "$_fs_sug"; then break; fi
+  _fsr=$(( _fsr + 1 ))
+  compute_reco
+done
 
 log ""
 log "############ DECODED: WHAT IS GOING ON IN THIS PHONE ############"
