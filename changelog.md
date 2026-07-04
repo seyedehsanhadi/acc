@@ -1,3 +1,9 @@
+**v2025.5.18-6.5.1-rc9 (202505289)**
+
+AMPS (charge-switch finder) v7.1.2:
+- Fixed: rc8 stopped the native %-limit being demoted as "re-arming", but the leak check then demoted it on a +1% capacity reading. Over the ~12-second stress window even a fully broken switch gains under 0.5% real charge, so that reading was battery-percentage rounding, not a leak. A verified native %-limit is no longer stress-hammered at all: its enforcement was already proven by the engage test (current anchor, 24-second hold), and neither stress signal applies to a firmware-managed level node. Pixel-class phones now keep charge_stop_level as the recommendation.
+- Cut/drain/bypass switches keep both stress checks unchanged.
+
 **v2025.5.18-6.5.1-rc8 (202505288)**
 
 AMPS (charge-switch finder) v7.1.1:
