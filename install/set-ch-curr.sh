@@ -66,11 +66,6 @@ set_ch_curr() {
     fi
     . $execDir/read-ch-curr-ctrl-files-p2.sh
   }
-  grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null || {
-    $isAccd || print_no_ctrl_file
-    return 0
-  }
-
   if [ -n "${1-}" ]; then
 
     apply_on_plug_() {
@@ -79,47 +74,63 @@ set_ch_curr() {
       apply_on_plug ${1-})
     }
 
-    # restore
+    # A clear (-) must succeed even when the control files were not resolved this boot, or on a
+    # device that probed them but found none (current control effectively unsupported): drop the
+    # config value unconditionally and only touch the nodes / re-kick USB when the control files
+    # are known. Previously a clear hit the "no ctrl file" bail below and returned WITHOUT
+    # clearing, so write-config re-persisted the old milliamps and the editor kept resurrecting the
+    # value the dashboard had already cleared (field video: disabled Charging power control, still
+    # showed 1100 mA). The not-charging clear above only covers the no-.mcc-read case; this covers
+    # the .mcc-read-set-but-unresolved case. Mirrors set-ch-volt's clear.
     if [ $1 = - ]; then
-      apply_on_plug_ default
-      # The stored "defaults" are snapshots from probe time, and negotiation-owned input nodes
-      # (usb/current_max) may have been probed on a weak source - restoring 500000 from a PC-USB
-      # probe leaves a wall charger crawling at 500 mA. Re-kick USB source detection / input
-      # arbitration so those re-settle to the live charger's real capability (same pattern as the
-      # uninstaller's un-cap path; harmless no-op when already correct).
-      for _rr in /sys/class/power_supply/usb/apsd_rerun /sys/class/power_supply/battery/rerun_aicl; do
-        [ -w "$_rr" ] && echo 1 > "$_rr" 2>/dev/null || :
-      done
+      grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null && {
+        apply_on_plug_ default
+        # The stored "defaults" are snapshots from probe time, and negotiation-owned input nodes
+        # (usb/current_max) may have been probed on a weak source - restoring 500000 from a PC-USB
+        # probe leaves a wall charger crawling at 500 mA. Re-kick USB source detection / input
+        # arbitration so those re-settle to the live charger's real capability (same pattern as the
+        # uninstaller's un-cap path; harmless no-op when already correct).
+        for _rr in /sys/class/power_supply/usb/apsd_rerun /sys/class/power_supply/battery/rerun_aicl; do
+          [ -w "$_rr" ] && echo 1 > "$_rr" 2>/dev/null || :
+        done
+      } || :
+      maxChargingCurrent=()
       max_charging_current=
+      unset mcc
       $isAccd || print_curr_restored
       rm $f 2>/dev/null || :
-
-    else
-
-      apply_current() {
-        eval "
-          if [ $1 -ne 0 ]; then
-            maxChargingCurrent=($1 $(sed "s|::v|::$1|" $TMPDIR/ch-curr-ctrl-files))
-          else
-            maxChargingCurrent=($1 $(sed "s|::v.*::|::$1::|" $TMPDIR/ch-curr-ctrl-files))
-          fi
-        " \
-          && unset max_charging_current mcc \
-          && apply_on_plug_ \
-          && {
-            $isAccd || print_curr_set $1
-          } || return 1
-      }
-
-      # [0-9999] milliamps range
-      if [ $1 -ge 0 -a $1 -le 9999 ]; then
-        apply_current $1 || return 1
-      else
-        $isAccd || echo "[0-9999]$(print_mA; print_only)"
-        return 11
-      fi
-      touch $f
+      return 0
     fi
+
+    # A numeric SET needs the resolved control files to know which nodes to write.
+    grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null || {
+      $isAccd || print_no_ctrl_file
+      return 0
+    }
+
+    apply_current() {
+      eval "
+        if [ $1 -ne 0 ]; then
+          maxChargingCurrent=($1 $(sed "s|::v|::$1|" $TMPDIR/ch-curr-ctrl-files))
+        else
+          maxChargingCurrent=($1 $(sed "s|::v.*::|::$1::|" $TMPDIR/ch-curr-ctrl-files))
+        fi
+      " \
+        && unset max_charging_current mcc \
+        && apply_on_plug_ \
+        && {
+          $isAccd || print_curr_set $1
+        } || return 1
+    }
+
+    # [0-9999] milliamps range
+    if [ $1 -ge 0 -a $1 -le 9999 ]; then
+      apply_current $1 || return 1
+    else
+      $isAccd || echo "[0-9999]$(print_mA; print_only)"
+      return 11
+    fi
+    touch $f
 
   else
     # print current value
