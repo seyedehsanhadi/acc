@@ -37,6 +37,9 @@ set_ch_curr() {
           # (field report: disabled Charging power control, UI clean, still capped at 1100 mA).
           grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null \
             && (applyOnPlug=(); maxChargingVoltage=(); maxChargingCurrent=(); apply_on_plug default) || :
+          for _rr in /sys/class/power_supply/usb/apsd_rerun /sys/class/power_supply/battery/rerun_aicl; do
+            [ -w "$_rr" ] && echo 1 > "$_rr" 2>/dev/null || :
+          done
           rm $f 2>/dev/null || :
           $isAccd || print_curr_restored
           return 0
@@ -72,6 +75,14 @@ set_ch_curr() {
     # restore
     if [ $1 = - ]; then
       apply_on_plug_ default
+      # The stored "defaults" are snapshots from probe time, and negotiation-owned input nodes
+      # (usb/current_max) may have been probed on a weak source - restoring 500000 from a PC-USB
+      # probe leaves a wall charger crawling at 500 mA. Re-kick USB source detection / input
+      # arbitration so those re-settle to the live charger's real capability (same pattern as the
+      # uninstaller's un-cap path; harmless no-op when already correct).
+      for _rr in /sys/class/power_supply/usb/apsd_rerun /sys/class/power_supply/battery/rerun_aicl; do
+        [ -w "$_rr" ] && echo 1 > "$_rr" 2>/dev/null || :
+      done
       max_charging_current=
       $isAccd || print_curr_restored
       rm $f 2>/dev/null || :
