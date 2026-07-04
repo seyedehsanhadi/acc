@@ -607,6 +607,13 @@ if ! $_INIT; then
         # Cheap: set_ch_curr short-circuits on its marker once the defaults are restored.
         [ -n "${maxChargingCurrent[0]-}" ] || (set_ch_curr - || :)
 
+        # Same story for a cleared voltage limit. The charging branch releases voltage via
+        # set_ch_volt above, but the daemon spends its resting life in THIS not-charging branch,
+        # so a user who disabled a voltage cap while it held kept the old value on the nodes until
+        # reboot - identical to the current-limit report. Release it here too when the config is
+        # clean; set_ch_volt is a no-op once the defaults are back.
+        [ -n "${maxChargingVoltage[0]-}" ] || (set_ch_volt - || :)
+
         # rc6 (L1 self-heal): some devices report current_now with an unreliable / rate-dependent
         # sign (e.g. Mi A3: charging reads NEGATIVE at full rate but POSITIVE when tapered near the
         # top), so the current-based status detection can land us in THIS not-charging branch while
