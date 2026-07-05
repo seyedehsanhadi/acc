@@ -1,3 +1,10 @@
+**v2025.5.18-6.5.1-rc10 (202505290)**
+
+From a full line-by-line audit of the engine:
+- Fixed: on phones with charging-current or voltage control nodes, once a charging session resolved those nodes the daemon rewrote their defaults and re-kicked USB input negotiation (apsd_rerun / rerun_aicl) on EVERY loop when no current/voltage limit was set - constant input renegotiation while charging, roughly every 3-9 seconds. Introduced in rc6. The restore now short-circuits to a true no-op when there is nothing to clear. Device-verified on a Mi A3: 16 USB re-kicks per 30 seconds before, 0 after.
+- Fixed: a config value containing an apostrophe (e.g. run_cmd_on_pause with "don't") produced an unbalanced quote and the daemon could no longer read the config at all. Such values are now escaped on write.
+- Fixed: the in-app updater (acc -u) fetched from the original upstream repository and could replace this fork with upstream on upgrade; it now updates from this fork.
+
 **v2025.5.18-6.5.1-rc9 (202505289)**
 
 AMPS (charge-switch finder) v7.1.2:
