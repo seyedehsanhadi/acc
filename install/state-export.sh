@@ -246,6 +246,38 @@ _se_trust() {
 }
 
 
+# Charger-INPUT telemetry. The max-charging-current limit acts on INPUT current on most
+# modern platforms (Tensor measured: set 1000 -> input clamps to ~980 mA while the battery
+# gets set x Vusb/Vbat x ~0.85 -- ~1.8x on a 9 V charger, ~1x on 5 V). Exposing the live
+# input volts/amps lets the front-end show the measured relationship instead of guessing.
+# Values normalized to mV/mA by magnitude (uV/uA kernels are >=100000); unreadable -> null
+# (rule S1). Probes usb first, then dc/wireless; absent nodes -> nulls, never an error.
+_se_input() {
+  local vf cf v c va ca
+  vf=; cf=; v=; c=
+  for vf in /sys/class/power_supply/usb/voltage_now \
+            /sys/class/power_supply/dc/voltage_now \
+            /sys/class/power_supply/wireless/voltage_now; do
+    [ -r "$vf" ] && { v=$(cat "$vf" 2>/dev/null | head -1); break; }
+  done
+  for cf in /sys/class/power_supply/usb/input_current_now \
+            /sys/class/power_supply/usb/current_now \
+            /sys/class/power_supply/dc/current_now \
+            /sys/class/power_supply/wireless/current_now; do
+    [ -r "$cf" ] && { c=$(cat "$cf" 2>/dev/null | head -1); break; }
+  done
+  case "$v" in
+    ''|*[!0-9-]*|-*) v=null;;
+    *) va="$v"; [ "$va" -ge 100000 ] 2>/dev/null && v=$(( v / 1000 ));;
+  esac
+  case "$c" in
+    ''|*[!0-9-]*) c=null;;
+    *) ca="${c#-}"; [ "$ca" -ge 100000 ] 2>/dev/null && c=$(( c / 1000 ));;
+  esac
+  printf '"input":{"voltageMv":%s,"currentMa":%s}' "$(_se_num "$v")" "$(_se_num "$c")"
+}
+
+
 # Native firmware charge-limit block. On Pixel/Tensor (google,charger) and similar, ACC
 # controls charging via charge_stop_level/charge_start_level, NOT a chargingSwitch -- so an
 # empty chargingSwitch is normal there. Expose it so the front-end can show "native mode"
@@ -329,6 +361,7 @@ write_state() {
         "$(_se_esc "${prioritizeBattIdleMode-}")"
       # smart sensing, measured live for any SoC
       printf ',"plugged":%s' "$plugged"
+      printf ',%s' "$(_se_input)"
       printf ',%s' "$(_se_native)"
       printf ',"sensing":{"currentUnits":"%s","polarity":"%s","polaritySource":"%s","statusTrust":"%s","confidence":"%s"}' \
         "$units" "$polarity" "$psrc" "$trust" "$conf"

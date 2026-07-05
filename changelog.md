@@ -1,3 +1,7 @@
+**v2025.5.18-6.5.1-rc11 (202505291)**
+
+- Added: `acca --state` now reports live charger-input telemetry as an `"input":{"voltageMv":N,"currentMa":N}` block (read from usb/dc/wireless voltage and input-current nodes, normalized to mV/mA, null where unreadable). This lets AccA show the measured relationship between the Max-current setting and the current the battery actually receives. On most modern phones the current limit acts on the CHARGER INPUT: on a 9V fast charger the battery gets about 1.8x the set value (the charger steps 9V down to the battery voltage), on a 5V charger about 1x. Device-measured on a Pixel 9a: set 1000 -> ~980 mA input -> ~1800 mA into the battery at 9V, ~1000 mA at 5V. Purely additive and read-only; existing `--state` fields and AMPS's parsing of them are unchanged.
+
 **v2025.5.18-6.5.1-rc10 (202505290)**
 
 From a full line-by-line audit of the engine:
