@@ -5,6 +5,11 @@ From a full line-by-line audit of the engine:
 - Fixed: a config value containing an apostrophe (e.g. run_cmd_on_pause with "don't") produced an unbalanced quote and the daemon could no longer read the config at all. Such values are now escaped on write.
 - Fixed: the in-app updater (acc -u) fetched from the original upstream repository and could replace this fork with upstream on upgrade; it now updates from this fork.
 
+AMPS (charge-switch finder) v7.1.3, from a full layer-by-layer audit for device universality:
+- Widened the switch value-gate to accept capitalized states (Enabled/Disabled/ON): some kernels report them capitalized and the tester was skipping those nodes as non-switches. Every write still uses the verbatim value and the read-back check still rejects a driver that will not store it, so this can only add real candidates.
+- Charger-supply detection now also recognises adapter/pogo/dock power supplies (some tablets and docked phones), so presence/online is read correctly there instead of falling back to status alone.
+- On SoCs without Qualcomm's APSD/AICL re-kick nodes (MediaTek/Exynos/Unisoc), a charger that drops offline mid-test is recovered only by the generic input_suspend pulse and a replug prompt; the tester now logs which node it could not find so field reports can teach the real one. No new vendor writes were added.
+
 **v2025.5.18-6.5.1-rc9 (202505289)**
 
 AMPS (charge-switch finder) v7.1.2:
