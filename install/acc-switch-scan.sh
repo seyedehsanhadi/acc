@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# acc-switch-scan.sh — fast & complete ACC charging-switch scanner
+# acc-switch-scan.sh - fast & complete ACC charging-switch scanner
 # Community helper for ACC (by VR25). GPLv3. Does NOT modify ACC.
 #
 # WHY: `acc -t` waits up to _STI (default 35) seconds PER switch to decide if it
@@ -238,7 +238,7 @@ test_switch() {
 
 # ---------- switch list ----------
 SW=$TMPDIR/ch-switches
-[ -s "$SW" ] || { warn "no switch list at $SW — run 'acc -D restart' once, then retry"; exit 1; }
+[ -s "$SW" ] || { warn "no switch list at $SW - run 'acc -D restart' once, then retry"; exit 1; }
 
 # ---------- go ----------
 say "== ACC fast switch scan =="
@@ -313,7 +313,7 @@ while IFS= read -r line; do
 "
           fi
           ;;
-    skip) say "(not charging — rerun while charging)"
+    skip) say "(not charging - rerun while charging)"
           echo "SKIP     $line   (not charging during test)" >> $RESLOG 2>/dev/null || :;;
     *)    say "no effect"
           echo "NOEFFECT $line" >> $RESLOG 2>/dev/null || :;;
@@ -359,7 +359,7 @@ else
     say "Almost always the OS is overriding ACC. Do this, then rerun:"
     say "  Settings > Battery > turn OFF Adaptive Charging / charge optimization"
     say "If it STILL finds nothing, this device needs a charge node ACC doesn't"
-    say "know yet — send this whole output back."
+    say "know yet - send this whole output back."
   fi
 fi
 say "======================================="

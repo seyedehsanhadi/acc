@@ -3,14 +3,16 @@ set_ch_curr() {
   local f=$TMPDIR/.mcc-custom
   local isAccd=${isAccd:-false}
 
-  # Fast no-op on restore ONLY when there is truly nothing to clear. The marker lives in tmpfs
-  # (gone every reboot) and only reappears once the daemon re-applies the limit during a CHARGING
-  # tick - on a phone that has not charged since boot, gating on the marker alone made a clear a
-  # TOTAL no-op: the config kept the old milliamps, so AccA showed "Disabled" while the editor
-  # resurrected the value on reload and the limit stayed enforced (field video). Proceed whenever
-  # the config still carries a value or control files were resolved this boot.
-  [[ ! -f $f && .${1-} = .- ]] && [ -z "${maxChargingCurrent[0]-}" ] \
-    && ! grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null && return 0 || :
+  # Fast no-op on restore ONLY when there is truly nothing to clear: no tmpfs marker (no limit
+  # applied this boot) AND no value anywhere in the config (array or scalar). The marker is gone
+  # every reboot, so the config-value check is what lets a post-reboot clear still proceed (field
+  # video: AccA showed "Disabled" while the editor resurrected the stored milliamps). The gate
+  # must NOT depend on the resolved control files: the daemon calls `set_ch_curr -` every loop
+  # when no limit is set, and a ctrl-files clause turned that into a full default rewrite + USB
+  # re-kick (apsd_rerun/rerun_aicl) every 3-9s on every phone with current control nodes -
+  # constant AICL renegotiation while charging (A3-reproduced: 3 restores in 3 ticks).
+  [[ ! -f $f && .${1-} = .- ]] \
+    && [ -z "${maxChargingCurrent[0]-}${max_charging_current-}${mcc-}" ] && return 0 || :
 
   [[ .${1-} != .*% ]] || {
     set_temp_level ${1%\%}

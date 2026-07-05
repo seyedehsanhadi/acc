@@ -3,10 +3,12 @@ set_ch_volt() {
   local f=$TMPDIR/.volt-custom
   local isAccd=${isAccd:-false}
 
-  # Same reboot hole as set-ch-curr: the tmpfs marker alone must not gate a restore, or clearing
-  # the voltage limit after a reboot silently keeps the old value in the config and on the nodes.
-  [[ ! -f $f && .${1-} = .- ]] && [ -z "${maxChargingVoltage[0]-}" ] \
-    && ! grep -q / $TMPDIR/ch-volt-ctrl-files 2>/dev/null && return 0 || :
+  # Same reboot hole as set-ch-curr: the tmpfs marker alone must not gate a restore (a post-reboot
+  # clear must still drop a stored config value), but the gate must not depend on the resolved
+  # control files either - the daemon calls `set_ch_volt -` every loop when no limit is set, and a
+  # ctrl-files clause made that a full default rewrite each tick on voltage-node phones.
+  [[ ! -f $f && .${1-} = .- ]] \
+    && [ -z "${maxChargingVoltage[0]-}${max_charging_voltage-}${mcv-}" ] && return 0 || :
 
   if [ -n "${1-}" ]; then
 

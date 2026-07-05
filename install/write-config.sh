@@ -208,6 +208,14 @@ case "$s" in
 esac
 
 
+# runCmdOnPause / battStatusOverride are emitted inside single quotes below; a user value
+# containing a single quote (run_cmd_on_pause="don't ...") produced an unbalanced line and the
+# daemon could no longer source the config at all (charging control dead until a manual edit).
+# Escape ' as '\'' so any value round-trips; the escape is applied to the RAW value on every
+# write (the sourced value is unescaped), so it never double-escapes.
+rcp=$(printf %s "$rcp" | sed "s/'/'\\\\''/g")
+bso=$(printf %s "$bso" | sed "s/'/'\\\\''/g")
+
 echo "configVerCode=$(cat $TMPDIR/.config-ver)
 
 allowIdleAbovePcap=${aiapc:-true}

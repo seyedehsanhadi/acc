@@ -316,7 +316,7 @@ disable_charging() {
           # can fix it; keep retrying THEIR switch each loop. An AUTO-locked switch (daemon-chosen)
           # still self-heals as before. (was: any failing locked switch was unset + auto-selected.)
           if [ -f $dataDir/.user-locked ]; then
-            warn_once_per lockhold 21600 "⚠️ ACC: your locked charging switch isn't holding your ${capacity[3]:-?}% limit. Pick another in AccA — ACC will not change a locked switch for you."
+            warn_once_per lockhold 21600 "⚠️ ACC: your locked charging switch isn't holding your ${capacity[3]:-?}% limit. Pick another in AccA - ACC will not change a locked switch for you."
           else
             unset_switch
             cycle_switches_off

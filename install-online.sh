@@ -1,7 +1,7 @@
 #!/system/bin/sh
 #
 # $id Online Installer
-# https://raw.githubusercontent.com/VR-25/$id/$commit/install-online.sh
+# https://raw.githubusercontent.com/seyedehsanhadi/$id/$commit/install-online.sh
 #
 # Copyright 2019-2024, VR25
 # License: GPLv3+
@@ -128,11 +128,11 @@ set_dl
 commit=$(echo "$*" | sed -E 's/%.*%|-c|--changelog|-f|--force|-n|--non-interactive| //g')
 : ${commit:=master}
 
-tarball=https://github.com/VR-25/$id/archive/${commit}.tar.gz
+tarball=https://github.com/seyedehsanhadi/$id/archive/${commit}.tar.gz
 
 installedVersion=$(get_ver /data/adb/$domain/$id/module.prop 2>/dev/null || :)
 
-onlineVersion=$(_curl https://raw.githubusercontent.com/VR-25/$id/${commit}/module.prop | get_ver)
+onlineVersion=$(_curl https://raw.githubusercontent.com/seyedehsanhadi/$id/${commit}/module.prop | get_ver)
 
 
 [ -f $PWD/${0##*/} ] || cd $(readlink -f ${0%/*})
@@ -147,7 +147,7 @@ then
   ! echo "$@" | grep -Eq '\-\-changelog|\-c' || {
     if echo "$@" | grep -Eq '\-\-non-interactive|\-n'; then
       echo $onlineVersion
-      echo "https://github.com/VR-25/$id/blob/${commit}/changelog.md"
+      echo "https://github.com/seyedehsanhadi/$id/blob/${commit}/changelog.md"
       exit 5 # no update available
     else
       echo
