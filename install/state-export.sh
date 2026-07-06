@@ -278,6 +278,50 @@ _se_input() {
 }
 
 
+# Charge-speed classification, physics-only (research-verified 2026-07: every proprietary
+# fast-charge system above 45W -- SUPERVOOC, HyperCharge, Huawei SCP -- has NO standard sysfs
+# protocol label, so watts = input V x A is the ONLY universal signal; vendor names are never
+# needed to classify). Bands: <7W slow, <18W standard, <45W fast, <90W superfast, else hyper
+# (QC4 tops at ~27-28W not 100W; PD PPS SPR caps at 100W; PD3.1 EPR reaches 240W - all verified
+# against primary sources + teardowns, do not replace with marketing numbers).
+# Reason when charging slower than the class suggests, priority order:
+#   user_limit (ACC's own max_charging_current is set - we know our config),
+#   thermal (battery at/above 42.0 C), taper (charge_type says Taper/Trickle, or SOC >= 95).
+# Read-only; approx=true marks the battery-side V x A fallback (always <= input watts, so the
+# class can only UNDER-state, never inflate). Args: $1=inMv $2=inMa $3=battCurRaw $4=battVoltRaw
+# $5=status $6=tempDeciC $7=capacityPct
+_se_charge() {
+  local inmv="$1" inma="$2" bcur="$3" bvolt="$4" st="$5" tdc="$6" cap="$7"
+  local w=null cls=null why=null approx=false bma bmv ct
+  if [ "$st" = "Charging" ]; then
+    if [ "$inmv" != null ] && [ "$inma" != null ] && [ "$inmv" -gt 1000 ] 2>/dev/null && [ "${inma#-}" -gt 50 ] 2>/dev/null; then
+      w=$(( inmv * ${inma#-} / 1000000 ))
+    elif [ "$bcur" != null ] && [ "$bvolt" != null ]; then
+      bma="${bcur#-}"; [ "$bma" -ge 100000 ] 2>/dev/null && bma=$(( bma / 1000 ))
+      bmv="$bvolt";    [ "$bmv" -ge 100000 ] 2>/dev/null && bmv=$(( bmv / 1000 ))
+      if [ "$bma" -gt 50 ] 2>/dev/null && [ "$bmv" -gt 1000 ] 2>/dev/null; then
+        w=$(( bmv * bma / 1000000 )); approx=true
+      fi
+    fi
+    if [ "$w" != null ]; then
+      if   [ "$w" -lt 7 ];  then cls='"slow"'
+      elif [ "$w" -lt 18 ]; then cls='"standard"'
+      elif [ "$w" -lt 45 ]; then cls='"fast"'
+      elif [ "$w" -lt 90 ]; then cls='"superfast"'
+      else cls='"hyper"'; fi
+      if [ -n "${maxChargingCurrent[0]-}" ]; then why='"user_limit"'
+      elif [ "$tdc" != null ] && [ "$tdc" -ge 420 ] 2>/dev/null; then why='"thermal"'
+      else
+        ct=$(cat /sys/class/power_supply/battery/charge_type 2>/dev/null | head -1)
+        case "$ct" in Taper|taper|Trickle|trickle) why='"taper"';; *)
+          [ "$cap" != null ] && [ "$cap" -ge 95 ] 2>/dev/null && why='"taper"';; esac
+      fi
+    fi
+  fi
+  printf '"charge":{"watts":%s,"class":%s,"reason":%s,"approx":%s}' "$w" "$cls" "$why" "$approx"
+}
+
+
 # Native firmware charge-limit block. On Pixel/Tensor (google,charger) and similar, ACC
 # controls charging via charge_stop_level/charge_start_level, NOT a chargingSwitch -- so an
 # empty chargingSwitch is normal there. Expose it so the front-end can show "native mode"
@@ -361,7 +405,12 @@ write_state() {
         "$(_se_esc "${prioritizeBattIdleMode-}")"
       # smart sensing, measured live for any SoC
       printf ',"plugged":%s' "$plugged"
-      printf ',%s' "$(_se_input)"
+      local inj invm inim
+      inj=$(_se_input)
+      invm=${inj#*voltageMv\":}; invm=${invm%%,*}
+      inim=${inj#*currentMa\":}; inim=${inim%%\}*}
+      printf ',%s' "$inj"
+      printf ',%s' "$(_se_charge "$invm" "$inim" "$cur" "$volt" "$status" "$tmp" "$lvl")"
       printf ',%s' "$(_se_native)"
       printf ',"sensing":{"currentUnits":"%s","polarity":"%s","polaritySource":"%s","statusTrust":"%s","confidence":"%s"}' \
         "$units" "$polarity" "$psrc" "$trust" "$conf"
