@@ -878,6 +878,7 @@ log "==== LAYER 3 - current sign + unit auto-learn (ACC method) ===="
 P1=no; plugged && P1=yes
 ST="$(rd $BATT/status | sed -n '1p' | pclean)"
 RAW=0; CUR_FROZEN=0
+_cc0="$(san "$(read1 "$BATT/charge_counter")")"
 if [ -n "$CURF" ]; then
   cb1="$(san "$(read1 "$CURF")")"; sleep 1
   cb2="$(san "$(read1 "$CURF")")"; sleep 1
@@ -923,12 +924,32 @@ case "$EFFST" in ''|Unknown|unknown) EFFST="$AST";; esac
 [ -n "$ST_UNIT" ] && case "$ST_UNIT" in uA*|microamp*) UNIT=uA; THR=50000; IDLE=10000;; mA*|milliamp*) UNIT=mA; THR=50; IDLE=10;; esac
 CS="$(sgn "$RAW")"; _gt=0; [ "$ABSB" -gt "$THR" ] 2>/dev/null && _gt=1
 _lc="$(learn_chgdir "$EFFST" "$CS" "$_gt")"; CHGDIR="${_lc%% *}"; SIGN_CONF="${_lc##* }"; POL_SRC=live
+# rc13 (curtana lesson): COULOMB-PROOF the learned direction. The 6-sample sign vote above is
+# blind to WHY the sign is what it is; the fuel gauge's charge_counter is sign-convention-free.
+# If the counter ROSE >=150 uAh across the ~5s sample window while the charger is present, the
+# pack was provably FILLING, so the dominant large-sample sign IS the charging sign - physics,
+# not inference. This survives dual-path PMICs whose sign flips with the charge contract (5V
+# trickle positive / 9V parallel negative, both charging - field-verified on Redmi Note 9S).
+_cc1="$(san "$(read1 "$BATT/charge_counter")")"
+SIGN_MODE_DEP=0
+if [ -n "$_cc0" ] && [ -n "$_cc1" ] && present_now; then
+  _ccd=$(( _cc1 - _cc0 ))
+  if [ "$_ccd" -ge 150 ] 2>/dev/null && [ "${SIGN_UNSTABLE:-0}" = 0 ]; then
+    if [ "${_sgp:-0}" -ge 3 ] && [ "${_sgn:-0}" -le 1 ]; then CHGDIR=p; SIGN_CONF=high; POL_SRC=cc-physics
+    elif [ "${_sgn:-0}" -ge 3 ] && [ "${_sgp:-0}" -le 1 ]; then CHGDIR=n; SIGN_CONF=high; POL_SRC=cc-physics; fi
+  fi
+fi
 POL_CONFLICT=0
 if [ -n "$ST_POL" ]; then
   _sp="$(acca_sign "$ST_POL")"
   if [ -n "$_sp" ] && [ "${SIGN_UNSTABLE:-0}" = 1 ] && [ "$(pol_conflict "$_sp" "$CHGDIR" "$_gt" "$SIGN_CONF")" = 1 ]; then
     POL_CONFLICT=1
     warn "polarity CONFLICT: acca --state says $ST_POL but live samples flip sign within the read window (chg-sign=$CHGDIR) -- the current sign is unreliable on this phone (oplus/MTK latch it per charge session), so a single-sample polarity can mis-read working switches as 'no effect' -> verifying BLIND (status/charge_type/voltage), which is sign-independent."
+  elif [ -n "$_sp" ] && [ "$POL_SRC" = cc-physics ] && [ "$_sp" != "$CHGDIR" ]; then
+    # coulomb-proven sign for THIS session contradicts ACC's learned cache: the sign follows the
+    # charge mode on this phone. Keep the physics-proven value, never adopt the cache, and say so.
+    SIGN_MODE_DEP=1
+    warn "sign is MODE-DEPENDENT on this phone: the coulomb-proven charge sign this session (chg-sign=$CHGDIR) contradicts ACC's learned polarity ($ST_POL). Dual-path PMICs flip the current sign with the charge contract (5V vs 9V). Verdicts below are valid for THIS session's mode; runtime ACC arbitrates by coulomb slope, so daily behavior stays correct."
   elif [ -n "$_sp" ] && [ "$SIGN_CONF" != high ]; then
     CHGDIR="$_sp"; SIGN_CONF=high; POL_SRC="acca-state:$ST_POL"
   fi
@@ -2543,7 +2564,7 @@ log "SOC=$(getprop ro.board.platform 2>/dev/null)"
 log "ANDROID=$(getprop ro.build.version.release 2>/dev/null)"
 log "ACC=${ACCV:-no}"
 log "SENSOR=${CURF:-none}"
-log "UNITS=$UNIT SIGN=$CHGDIR CONF=$SIGN_CONF BASE=$RAW"
+log "UNITS=$UNIT SIGN=$CHGDIR CONF=$SIGN_CONF SRC=$POL_SRC MODE_DEP=${SIGN_MODE_DEP:-0} BASE=$RAW"
 log "SYSFS_STATUS=$ST ANDROID_STATUS=${AST:-na}"
 log "BATT_TEMP=$(batt_temp) (0.1C units)  CAPACITY=${CAP}% (end $(rd $BATT/capacity | sed -n '1p' | pclean)%)"
 log "IDLE_MODE=$([ -n "$BYPASS" ] && echo yes || echo no)   (bypass / battery-idle charging support)"

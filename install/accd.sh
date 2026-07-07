@@ -994,6 +994,13 @@ if ! $_INIT; then
         -*) [ "$_DPOL" = + ] && return 0;;   # negative current, _DPOL=+ (charging is -) -> agrees
         *)  [ "$_DPOL" = - ] && return 0;;   # positive current, _DPOL=- (charging is +) -> agrees
       esac
+      # rc13: on MODE-DEPENDENT-sign hardware (dual-path PMIC, curtana: 5V path positive / 9V
+      # path negative, both genuinely charging) every contract change would trigger this re-latch
+      # and the polarity would flip-flop forever, each latch wrong for the other mode. Once the
+      # coulomb arbitration in idle_discharging has proven the sign unstable (marker), stop
+      # re-latching: the charge_counter slope owns charge/discharge truth from then on and the
+      # cached sign is only a magnitude hint.
+      [ ! -f $TMPDIR/.dpol_unstable ] || return 0
       _force_relatch=1
       # a large sample disagrees with the cached polarity during proven charging -> re-latch
     fi

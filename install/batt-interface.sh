@@ -10,6 +10,35 @@ idle_discharging() {
           eq "$curThen,$curNow" "-*,[0-9]*|[0-9]*,-*" && _status=Discharging || _status=Charging
        };;
   esac
+  # rc13: COULOMB ARBITRATION. The sign verdict above assumes ONE polarity per device, but on
+  # dual-path PMICs the current sign FLIPS with the charge mode (curtana / Redmi Note 9S: the
+  # master-only 5V trickle path reads POSITIVE while charging, the parallel 9V fast path reads
+  # NEGATIVE while charging - field-verified in back-to-back forensics runs). Whatever single
+  # _DPOL is latched is then wrong in the other mode: the daemon believed Discharging while the
+  # pack was filling, the resume watchdog churned good switches, and acca -i showed "Draining"
+  # with the cable in. The fuel gauge's charge_counter (uAh) is sign-convention-free ground
+  # truth: if it ROSE beyond noise across the sample window the pack IS charging, if it FELL the
+  # pack IS discharging, no matter what the signed current claims. Only a fresh (3-90s) window
+  # arbitrates; a flat counter (idle hold, or too slow to tell) leaves the sign verdict alone,
+  # so bypass/idle behavior is unchanged. When the counter contradicts the sign twice, the
+  # polarity is provably mode-dependent -> drop a marker so set_dp stops re-latch churn.
+  local _cc=$(cc_now) _ccp= _ccts= _ccnow=$(date +%s 2>/dev/null) _ccd= _sv=$_status
+  if [ "${_cc:-0}" -gt 0 ] 2>/dev/null && [ -n "$_ccnow" ]; then
+    [ ! -f $TMPDIR/.cc_then ] || read -r _ccp _ccts < $TMPDIR/.cc_then 2>/dev/null || :
+    if [ "${_ccp:-0}" -gt 0 ] 2>/dev/null && [ $(( _ccnow - ${_ccts:-0} )) -ge 3 ] 2>/dev/null \
+      && [ $(( _ccnow - ${_ccts:-0} )) -le 90 ] 2>/dev/null; then
+      _ccd=$(( _cc - _ccp ))
+      if [ $_ccd -ge 150 ]; then _status=Charging
+      elif [ $_ccd -le -150 ]; then _status=Discharging; fi
+      [ "$_sv" = "$_status" ] || {
+        local _fl=$(cat $TMPDIR/.dpol_flips 2>/dev/null || echo 0)
+        case "$_fl" in ''|*[!0-9]*) _fl=0;; esac
+        _fl=$((_fl + 1)); echo $_fl > $TMPDIR/.dpol_flips 2>/dev/null || :
+        [ $_fl -lt 2 ] || touch $TMPDIR/.dpol_unstable 2>/dev/null || :
+      }
+    fi
+    echo "$_cc $_ccnow" > $TMPDIR/.cc_then 2>/dev/null || :
+  fi
 }
 
 

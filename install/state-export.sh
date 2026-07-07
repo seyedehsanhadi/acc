@@ -140,7 +140,7 @@ _se_units() {
 # $1=status $2=cur $3=plugged $4=units $5=capacityPct $6=now_ts
 _se_polarity() {
   local pc="${SE_POLCACHE:-${dataDir:-/data/adb/vr25/acc-data}/.se-polarity}"
-  local a thr p physics= confirmed= cand= n=0 ac= ats= sv= cap kv line dirty=
+  local a thr p physics= confirmed= cand= n=0 ac= ats= sv= fl=0 cap kv line dirty=
   case "${2:-null}" in null|'') echo unknown; return;; esac
   a="${2#-}"
   [ "${4:-}" = uA ] && thr=30000 || thr=30
@@ -153,9 +153,11 @@ _se_polarity() {
       n=*) n=${kv#*=};;
       ac=*) ac=${kv#*=};;
       ats=*) ats=${kv#*=};;
+      fl=*) fl=${kv#*=};;
     esac
   done
   case "$n" in ''|*[!0-9]*) n=0;; esac
+  case "$fl" in ''|*[!0-9]*) fl=0;; esac
   if [ -n "$line" ] && [ ".$sv" != .3 ]; then confirmed=; cand=; n=0; ac=; ats=; dirty=1; fi
   cap="${5:-}"
   case "$cap" in ''|*[!0-9]*) cap=;; esac
@@ -178,7 +180,7 @@ _se_polarity() {
     fi
   fi
   if [ "${3:-}" = false ] && [ -n "$ac" ]; then ac=; ats=; dirty=1; fi
-  if [ -n "$physics" ]; then
+  if [ -n "$physics" ] && [ ".$confirmed" != .unstable ]; then
     if [ ".$p" = ".$confirmed" ]; then
       [ -n "$cand" ] && { cand=; n=0; dirty=1; }
     elif [ ".$p" = ".$cand" ]; then
@@ -187,9 +189,17 @@ _se_polarity() {
       cand=$p; n=1; dirty=1
     fi
     if [ -z "$confirmed" ] && [ "$n" -ge 2 ]; then confirmed=$p; cand=; n=0; dirty=1; fi
-    if [ -n "$confirmed" ] && [ ".$p" != ".$confirmed" ] && [ "$n" -ge 3 ]; then confirmed=$p; cand=; n=0; dirty=1; fi
+    # rc13: a confirmed polarity that flips TWICE is not noise - it is mode-dependent hardware
+    # (dual-path PMIC, sign follows the engaged charge path). Latch "unstable" permanently:
+    # from then on classification comes from the coulomb slope / kernel status (_se_class),
+    # and per-sample physics is still echoed live below. Never let a cached sign veto ground truth.
+    if [ -n "$confirmed" ] && [ ".$p" != ".$confirmed" ] && [ "$n" -ge 3 ]; then
+      fl=$((fl + 1))
+      if [ $fl -ge 2 ]; then confirmed=unstable; else confirmed=$p; fi
+      cand=; n=0; dirty=1
+    fi
   fi
-  [ -n "$dirty" ] && echo "sv=3 confirmed=$confirmed cand=$cand n=$n ac=$ac ats=$ats" > "$pc" 2>/dev/null
+  [ -n "$dirty" ] && echo "sv=3 confirmed=$confirmed cand=$cand n=$n ac=$ac ats=$ats fl=$fl" > "$pc" 2>/dev/null
   if [ -n "$physics" ]; then echo "$p"; return; fi
   if [ -n "$confirmed" ]; then echo "$confirmed"; return; fi
   case "$1" in
@@ -202,23 +212,70 @@ _se_polarity() {
 _se_polarity_source() {
   local pc="${SE_POLCACHE:-${dataDir:-/data/adb/vr25/acc-data}/.se-polarity}"
   case " $(cat "$pc" 2>/dev/null) " in
+    *" confirmed=unstable "*) echo unstable;;
     *" confirmed=normal "*|*" confirmed=inverted "*) echo learned;;
     *) echo bootstrap;;
   esac
 }
 
+# rc13: charge_counter slope - sign-convention-FREE charge/discharge ground truth. On dual-path
+# PMICs the current sign flips with the charge mode (curtana: 5V trickle path reads positive
+# while charging, 9V parallel path reads negative - both verified charging in the field), so any
+# single learned polarity mislabels one of the modes. The fuel gauge's coulomb counter has no
+# sign convention: rising uAh = the pack is filling, falling = draining. A fresh 3-90s window
+# and a 150 uAh floor (>=~100 mA sustained) keep idle holds and counter noise from arbitrating.
+# $1 = current charge_counter reading (uAh). Echoes rising|falling|flat|unknown.
+_se_ccdir() {
+  local cf="${SE_CCCACHE:-${dataDir:-/data/adb/vr25/acc-data}/.se-cc}"
+  local cc="$1" p= pts= now=$(date +%s 2>/dev/null) d= r=unknown
+  case "$cc" in ''|*[!0-9]*) echo unknown; return;; esac
+  [ -n "$now" ] || { echo unknown; return; }
+  [ ! -f "$cf" ] || read -r p pts < "$cf" 2>/dev/null || :
+  if [ "${p:-0}" -gt 0 ] 2>/dev/null && [ $(( now - ${pts:-0} )) -ge 3 ] 2>/dev/null \
+    && [ $(( now - ${pts:-0} )) -le 90 ] 2>/dev/null; then
+    d=$(( cc - p ))
+    if [ $d -ge 150 ]; then r=rising
+    elif [ $d -le -150 ]; then r=falling
+    else r=flat; fi
+  fi
+  echo "$cc $now" > "$cf" 2>/dev/null
+  echo $r
+}
+
 # measured class from plug + current (unit-aware idle band), all SoCs. 6.5.1 vocabulary:
 # plugged & ~0 -> bypass (battery idle); unplugged & ~0 -> standby; plugged & <0 -> drain
 # (ACC or the firmware lowering the battery to the limit); unplugged & <0 -> discharging.
+# rc13: precedence is now COULOMB SLOPE ($5, from _se_ccdir) > polarity-signed current > kernel
+# status ($6, only when polarity=unstable and the counter is silent). The slope is the only
+# signal that stays correct on mode-dependent-sign hardware (see _se_ccdir).
 _se_class() {
-  local cur="$1" plugged="$2" units="$3" polarity="$4" a thr
+  local cur="$1" plugged="$2" units="$3" polarity="$4" ccdir="${5:-unknown}" status="${6:-}" a thr
   case "$cur" in null|'') echo unknown; return;; esac
+  a="${cur#-}"
+  [ "$units" = uA ] && thr=30000 || thr=30
+  # coulomb arbitration: a moving counter IS the verdict, no sign involved
+  if [ "$a" -ge "$thr" ] 2>/dev/null; then
+    case "$ccdir" in
+      rising)  [ "$plugged" = true ] && { echo charging; return; };;
+      falling) { [ "$plugged" = true ] && echo drain || echo discharging; }; return;;
+    esac
+  fi
+  # sign is meaningless on proven mode-flippers: fall back to the kernel status word
+  if [ "$polarity" = unstable ]; then
+    if [ "$a" -lt "$thr" ] 2>/dev/null; then
+      [ "$plugged" = true ] && echo bypass || echo standby; return
+    fi
+    case "$status" in
+      Charging) echo charging;;
+      Discharging) [ "$plugged" = true ] && echo drain || echo discharging;;
+      *) [ "$plugged" = true ] && echo charging || echo discharging;;
+    esac
+    return
+  fi
   # rc9: normalize the current sign by polarity before classifying. On an inverted-polarity
   # device (charging reads negative / discharging positive) the raw sign mislabeled a cut as
   # "charging"; after this flip >0 always means charging, so a cut reads discharging correctly.
   case "$polarity" in inverted) case "$cur" in -*) cur="${cur#-}";; *) cur="-$cur";; esac;; esac
-  a="${cur#-}"
-  [ "$units" = uA ] && thr=30000 || thr=30
   if [ "$a" -lt "$thr" ] 2>/dev/null; then
     [ "$plugged" = true ] && echo bypass || echo standby; return
   fi
@@ -381,6 +438,8 @@ write_state() {
     ue_cap=$(printf '%s\n' "$ue"  | sed -n 's/^POWER_SUPPLY_CAPACITY=//p'    | head -1)
     ue_volt=$(printf '%s\n' "$ue" | sed -n 's/^POWER_SUPPLY_VOLTAGE_NOW=//p' | head -1)
     ue_temp=$(printf '%s\n' "$ue" | sed -n 's/^POWER_SUPPLY_TEMP=//p'        | head -1)
+    ue_cc=$(printf '%s\n' "$ue"   | sed -n 's/^POWER_SUPPLY_CHARGE_COUNTER=//p' | head -1)
+    [ -n "$ue_cc" ] || ue_cc=$(cat "${battCapacity%capacity}charge_counter" 2>/dev/null)
 
     lvl=$(_se_num "${ue_cap:-$(batt_cap 2>/dev/null)}")
     volt=$(_se_num "${ue_volt:-$(volt_now 2>/dev/null)}")
@@ -391,12 +450,13 @@ write_state() {
     userLocked=false
     case "${chargingSwitch[*]-}" in *" --"*) userLocked=true;; esac
 
-    local plugged units polarity psrc mclass conf trust
+    local plugged units polarity psrc mclass conf trust ccdir
     plugged=$(_se_plugged)
     units=$(_se_units "$cur")
     polarity=$(_se_polarity "$status" "$cur" "$plugged" "$units" "$lvl" "$ts")
     psrc=$(_se_polarity_source)
-    mclass=$(_se_class "$cur" "$plugged" "$units" "$polarity")
+    ccdir=$(_se_ccdir "$ue_cc")
+    mclass=$(_se_class "$cur" "$plugged" "$units" "$polarity" "$ccdir" "$status")
     trust=$(_se_trust "$status" "$mclass" "$cur")
     conf=low
     { [ "$units" != unknown ] && [ "$cur" != null ]; } && conf=medium
@@ -420,8 +480,8 @@ write_state() {
       printf ',%s' "$inj"
       printf ',%s' "$(_se_charge "$invm" "$inim" "$cur" "$volt" "$status" "$tmp" "$lvl")"
       printf ',%s' "$(_se_native)"
-      printf ',"sensing":{"currentUnits":"%s","polarity":"%s","polaritySource":"%s","statusTrust":"%s","confidence":"%s"}' \
-        "$units" "$polarity" "$psrc" "$trust" "$conf"
+      printf ',"sensing":{"currentUnits":"%s","polarity":"%s","polaritySource":"%s","statusTrust":"%s","confidence":"%s","ccDir":"%s"}' \
+        "$units" "$polarity" "$psrc" "$trust" "$conf" "$ccdir"
       printf ',"switch":{"locked":"%s","userLocked":%s,"measuredClass":"%s"}' \
         "$(_se_esc "${chargingSwitch[*]-}")" "$userLocked" "$mclass"
       printf '}\n'
