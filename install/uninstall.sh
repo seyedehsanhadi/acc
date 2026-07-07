@@ -60,6 +60,34 @@ rm -rf \
 
 [ "${1:-}" = install ] || {
   # restore normal charging before removal -- ENABLE direction only, can never overcharge.
+
+  # (a0) rc13: CONFIG-DRIVEN restore FIRST -- replay ACC's own recorded stock values. The generic
+  # sweeps below un-cap by hardcoded node names + a */voltage_max_design sibling, but that misses
+  # (i) voltage_max nodes with NO _design sibling (battery/bms/main on curtana were left capped at
+  # the user's mcv=4300mV -> "charging did not recover after uninstall", field report), (ii) nodes
+  # OUTSIDE /sys/class/power_supply (e.g. /sys/class/qcom-battery/restrict_cur), and (iii) names not
+  # in the list (input_current_settled). maxChargingCurrent/Voltage store each node as
+  # node::ON::DEFAULT -- writing the DEFAULT restores the exact stock value ACC recorded when it
+  # first capped, for EVERY node it touched, wherever it lives. Numeric defaults only (a "3600mV"
+  # shorthand is skipped); done before the config is removed.
+  _cfg=/data/adb/$domain/${id}-data/config.txt
+  [ -f "$_cfg" ] || _cfg=$(readlink -f /data/adb/$domain/$id 2>/dev/null)/../${id}-data/config.txt
+  if [ -f "$_cfg" ]; then
+    for _key in maxChargingCurrent maxChargingVoltage; do
+      _line=$(grep "^$_key=" "$_cfg" 2>/dev/null | head -1)
+      [ -n "$_line" ] || continue
+      _line=${_line#*=(}; _line=${_line%)}
+      for _tok in $_line; do
+        case "$_tok" in *::*::*) ;; *) continue;; esac
+        _node=${_tok%%::*}; _def=${_tok##*::}
+        case "$_def" in ''|*[!0-9]*) continue;; esac
+        case "$_node" in /*) ;; *) _node=/sys/class/power_supply/$_node;; esac
+        [ -w "$_node" ] && echo "$_def" > "$_node" 2>/dev/null || :
+      done
+    done
+    unset _key _line _tok _node _def
+  fi
+
   # (a) re-enable cut/suspend/drain switches
   if cd /sys/class/power_supply 2>/dev/null; then
     for f in */charging_enabled */battery_charging_enabled */charge_enabled */charging_enable */enable_charging */enable_charger; do
@@ -120,6 +148,13 @@ rm -rf \
   # (c) MediaTek pair
   [ -w /proc/mtk_battery_cmd/current_cmd ] && echo "0 0" > /proc/mtk_battery_cmd/current_cmd 2>/dev/null || :
   [ -w /proc/mtk_battery_cmd/en_power_path ] && echo 1 > /proc/mtk_battery_cmd/en_power_path 2>/dev/null || :
+
+  # (c2) rc13: Qualcomm qcom-battery restrict family lives OUTSIDE /sys/class/power_supply, so the
+  # sweeps above never reached it. restrict_chg=1 + a low restrict_cur throttles/stops charging
+  # (curtana). Config-driven restore (a0) fixes the exact value; this is the generic fallback for a
+  # corrupt/absent config: lift the restriction (chg off, current high -- kernel clamps).
+  [ -w /sys/class/qcom-battery/restrict_chg ] && echo 0 > /sys/class/qcom-battery/restrict_chg 2>/dev/null || :
+  [ -w /sys/class/qcom-battery/restrict_cur ] && echo 5000000 > /sys/class/qcom-battery/restrict_cur 2>/dev/null || :
 
   # remove EVERY ACC path: the module dir (resolved + explicit), KSU staging, the systemless tree,
   # the data dir, ACC's busybox bin, then the parent and the KSU/APatch PATH symlinks (rc3).
