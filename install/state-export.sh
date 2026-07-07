@@ -125,7 +125,15 @@ _se_units() {
 #     calibrates bramble-style liars while plugged, without ever unplugging.
 # An earlier build used a falling VOLTAGE as the plugged discharge signal; a voltage dip during
 # normal charging then mislearned polarity as inverted (bramble showed "Charging" during a
-# drain-down). The cache carries sv=2; any cache without it is from that build and is discarded.
+# drain-down). The cache carries sv=3; any cache with an older/absent sv is discarded + re-learned.
+# rc13: the plugged SoC-delta learn now needs a >=2% coulomb move, not >=1%. A 1% move is inside
+# fuel-gauge noise -- on a slow charge (curtana / Redmi Note 9S, ~0.6A at low SoC) the FG dipped
+# 1% while current was a large POSITIVE, so a genuinely-charging phone laundered a discharge
+# sample and confirmed polarity=inverted -> the dashboard showed Draining and negative mA while
+# the cable was in (field report). 2% is a real trend a 1% jitter cannot fake; a real drain-down
+# still moves many %, so the anti-bramble physics is unchanged. The sv bump discards the wrong
+# curtana-style caches, and until a denoised 2% sample re-confirms, the bootstrap status cross-
+# check (Charging + positive current -> normal) reads the sign correctly.
 # A sample's own physics reading is echoed live (a live ground-truth read is never vetoed by the
 # cache); the persistent value needs 2 agreeing samples to confirm and 3 agreeing contradictions
 # to flip a confirmed one (self-heal). Plugged status opinions can never touch the cache.
@@ -148,7 +156,7 @@ _se_polarity() {
     esac
   done
   case "$n" in ''|*[!0-9]*) n=0;; esac
-  if [ -n "$line" ] && [ ".$sv" != .2 ]; then confirmed=; cand=; n=0; ac=; ats=; dirty=1; fi
+  if [ -n "$line" ] && [ ".$sv" != .3 ]; then confirmed=; cand=; n=0; ac=; ats=; dirty=1; fi
   cap="${5:-}"
   case "$cap" in ''|*[!0-9]*) cap=;; esac
   if [ "$a" -ge "$thr" ] 2>/dev/null; then
@@ -157,10 +165,10 @@ _se_polarity() {
       physics=1
     elif [ -n "$cap" ] && [ -n "${6:-}" ]; then
       if [ -n "$ac" ] && [ -n "$ats" ] && [ $(( $6 - ats )) -ge 0 ] 2>/dev/null && [ $(( $6 - ats )) -le 3600 ] 2>/dev/null; then
-        if [ $(( ac - cap )) -ge 1 ] 2>/dev/null; then
+        if [ $(( ac - cap )) -ge 2 ] 2>/dev/null; then
           case "$2" in -*) p=normal;; *) p=inverted;; esac
           physics=1; ac=$cap; ats=$6; dirty=1
-        elif [ $(( cap - ac )) -ge 1 ] 2>/dev/null; then
+        elif [ $(( cap - ac )) -ge 2 ] 2>/dev/null; then
           case "$2" in -*) p=inverted;; *) p=normal;; esac
           physics=1; ac=$cap; ats=$6; dirty=1
         fi
@@ -181,7 +189,7 @@ _se_polarity() {
     if [ -z "$confirmed" ] && [ "$n" -ge 2 ]; then confirmed=$p; cand=; n=0; dirty=1; fi
     if [ -n "$confirmed" ] && [ ".$p" != ".$confirmed" ] && [ "$n" -ge 3 ]; then confirmed=$p; cand=; n=0; dirty=1; fi
   fi
-  [ -n "$dirty" ] && echo "sv=2 confirmed=$confirmed cand=$cand n=$n ac=$ac ats=$ats" > "$pc" 2>/dev/null
+  [ -n "$dirty" ] && echo "sv=3 confirmed=$confirmed cand=$cand n=$n ac=$ac ats=$ats" > "$pc" 2>/dev/null
   if [ -n "$physics" ]; then echo "$p"; return; fi
   if [ -n "$confirmed" ]; then echo "$confirmed"; return; fi
   case "$1" in
