@@ -76,7 +76,9 @@ rm -rf \
     for _key in maxChargingCurrent maxChargingVoltage; do
       _line=$(grep "^$_key=" "$_cfg" 2>/dev/null | head -1)
       [ -n "$_line" ] || continue
-      _line=${_line#*=(}; _line=${_line%)}
+      # strip the key=( ... ) wrapper via sed: a bare '(' inside ${..#..} derails mksh's parser
+      # (the device /system/bin/sh), though bash tolerates it.
+      _line=$(printf '%s' "$_line" | sed -e 's/^[^(]*(//' -e 's/).*$//')
       for _tok in $_line; do
         case "$_tok" in *::*::*) ;; *) continue;; esac
         _node=${_tok%%::*}; _def=${_tok##*::}
