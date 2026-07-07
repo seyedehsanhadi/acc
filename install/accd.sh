@@ -668,7 +668,16 @@ if ! $_INIT; then
           # current reads -1.5A while charge_counter stays flat), which made not_charging=false and
           # skipped the rc5 clear -> charging stayed dead until a reboot. enable_charging already put
           # the switch in its ON state, so clearing the cut family here only ever ALLOWS charging.
-          for _di in */input_suspend */charge_disable */batt_slate_mode */op_disable_charge; do [ -w "$_di" ] && echo 0 > "$_di" 2>/dev/null || :; done
+          # rc13: the release now covers BOTH polarities. A killed switch test (SIGKILLed AMPS/scan,
+          # Android 15 phantom-process kills skip every trap) can leave an ENABLE-class node at 0
+          # (e.g. battery/charging_enabled) that is not the configured switch -- enable_charging
+          # never touches it and the 0-write cut sweep cannot revive it, so the phone sat plugged
+          # and Draining until a manual restart (curtana field report). Writing the enable family
+          # to 1 here is the same charge-allowing direction; during a hold above resume this code
+          # does not run, so a pause is never broken. disable_charging joins the cut list (it was
+          # already in the installer's fail-restore sweep, missed here).
+          for _di in */input_suspend */charge_disable */batt_slate_mode */op_disable_charge */disable_charging; do [ -w "$_di" ] && echo 0 > "$_di" 2>/dev/null || :; done
+          for _en in */charging_enabled */battery_charging_enabled */charge_enabled */charging_enable */enable_charging */enable_charger; do [ -w "$_en" ] && echo 1 > "$_en" 2>/dev/null || :; done
           # rc5 (#7): RESUME-side watchdog, symmetric to the rc19 breach monitor. enable_charging
           # wrote the switch ON value (+ the D8 rerun for current-cap), but on some current-cap
           # switches charging may STILL not restart -- an otherwise SILENT stall. If present and
@@ -685,7 +694,8 @@ if ! $_INIT; then
             if [ "${_ccResume0:-0}" -gt 0 ] && [ "$(cc_now)" -gt "$(( _ccResume0 + 1000 ))" ] 2>/dev/null; then
               rm $TMPDIR/.resumefail $TMPDIR/.resumewarned 2>/dev/null || :
             else
-            for _di in */input_suspend */charge_disable */batt_slate_mode */op_disable_charge; do [ -w "$_di" ] && echo 0 > "$_di" 2>/dev/null || :; done
+            for _di in */input_suspend */charge_disable */batt_slate_mode */op_disable_charge */disable_charging; do [ -w "$_di" ] && echo 0 > "$_di" 2>/dev/null || :; done
+            for _en in */charging_enabled */battery_charging_enabled */charge_enabled */charging_enable */enable_charging */enable_charger; do [ -w "$_en" ] && echo 1 > "$_en" 2>/dev/null || :; done
             for _rn in */apsd_rerun */rerun_aicl; do [ -w "$_rn" ] && echo 1 > "$_rn" 2>/dev/null || :; done
             rf=$(cat $TMPDIR/.resumefail 2>/dev/null || echo 0); rf=$((rf + 1)); echo $rf > $TMPDIR/.resumefail
             if [ $rf -ge 4 ] && [[ "${chargingSwitch[*]-}" = *\ -- ]]; then
