@@ -441,7 +441,8 @@ printf "$version ($versionCode) installed!\n\nRollback with acc -b if not satisf
 if [ -x /sbin/${id}d ] || grep -q '#exec_wrapper' /system/bin/${id}d 2>/dev/null; then
   _echo "Rebooting is unnecessary."
 elif $KSU; then
-  _echo "KernelSU/APatch: the 'acc' command works now via /data/adb/ksu/bin (or /data/adb/ap/bin). If your build lacks that dir, use the absolute path /data/adb/$domain/$id/acc.sh, or reboot once. AccA works either way."
+  _echo "KernelSU/APatch: the 'acc' command works now via /data/adb/ksu/bin (or /data/adb/ap/bin). If your build lacks that dir, use the absolute path /data/adb/$domain/$id/acc.sh, or reboot once. AccA works either way.
+NOTE: the manager will show this module GREYED with an 'Updated' label until you REBOOT - that is NORMAL and means the install SUCCEEDED (KernelSU applies staged modules at boot). If the manager's own flash button won't take, open the zip from a file explorer with 'Open with > KernelSU', which flashes the same way."
 else
   _echo "Note: If you're not rebooting now, prefix all acc executables with /dev/ (as in /dev/acc -i, /dev/accd). Reasoning: Magisk, KernelSU and similar, don't [re]mount/update modules without a reboot."
 fi

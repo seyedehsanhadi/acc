@@ -1108,6 +1108,15 @@ Refer back to `SETUP/USAGE > [Terminal Commands](#terminal-commands) > Exit Code
 This should be trivial.
 The simplest way is flashing acc from KernelSU/Magisk module manager.
 
+KernelSU notes:
+- After a successful flash the module card shows GREYED with an "Updated" label until you REBOOT.
+  That is normal and means the install succeeded - KernelSU applies staged modules at boot.
+- If the manager's own flash button will not take the zip, open the zip from a file explorer and
+  choose "Open with > KernelSU" - it flashes through the same pipeline and works reliably.
+- On some SuSFS-hardened setups, `/data/adb/modules` is hidden from terminal root shells; the
+  module list can look empty from a shell while the manager shows it fine. Judge by the manager
+  and by `acc -v` working, not by `ls /data/adb/modules`.
+
 Alternatively, `install.sh`, `install-online.sh` or `install-tarball.sh` can be used.
 For details, refer back to [install from local source or GitHub](#install-from-local-source-or-github).
 
