@@ -1,8 +1,8 @@
 id=acc
 domain=vr25
 name=Advanced Charging Controller (ACC)
-version=v2025.5.18-6.5.1-rc13
-versionCode=202505293
+version=v2025.5.18-6.5.1-rc14
+versionCode=202505294
 author=seyedehsanhadi (community fork of VR-25's ACC)
 description=Extend your battery's service life by limiting charging current, temperature, and voltage. 6.5 adds AMPS (Adaptive Multi-device Probe & Selector): a universal finder that detects and verifies the charge-control switch that actually works on your phone, on any device, built into the AccA app as Find my switch. It writes only reversible switches, snapshots every change, and restores on exit. Carries the full 6.4 line: a Magisk post-fs-data early cap that closes the boot-window overcharge gap, manual switch locks that are never auto-replaced, sustained-hold locking that rejects the re-arm overcharge family, fast resume, corrupt-config survival, and corrected battery-current and polarity reads on Pixel and Tensor. Existing configs are unchanged. Any root solution is supported; the install is always systemless. Works on Android and KaiOS.
 updateJson=https://raw.githubusercontent.com/seyedehsanhadi/acc/main/module.json

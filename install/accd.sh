@@ -676,8 +676,20 @@ if ! $_INIT; then
           # to 1 here is the same charge-allowing direction; during a hold above resume this code
           # does not run, so a pause is never broken. disable_charging joins the cut list (it was
           # already in the installer's fail-restore sweep, missed here).
-          for _di in */input_suspend */charge_disable */batt_slate_mode */op_disable_charge */disable_charging; do [ -w "$_di" ] && echo 0 > "$_di" 2>/dev/null || :; done
-          for _en in */charging_enabled */battery_charging_enabled */charge_enabled */charging_enable */enable_charging */enable_charger; do [ -w "$_en" ] && echo 1 > "$_en" 2>/dev/null || :; done
+          # 6.5.1-rc14 DEEP FIX: IDEMPOTENT revive -- only write a node that is NOT already at its
+          # charge-allowing value. Re-writing the same value every loop re-triggers AICL / the
+          # charge-pump FSM on fast-charge phones (PPS/PD/VOOC/QC-CP) -> fast charge collapses to the
+          # main buck charger and never re-engages ("only slow/normal after ACC"). Read first: a node
+          # the firmware drifted to a CUT value (!= target) is still re-armed, so the curtana stray-cut
+          # revive is preserved; only redundant same-value pokes are skipped, so a healthy fast charge
+          # is never disturbed. (Supersedes the rc14-test counter-gate: reading is more correct -- it
+          # also re-arms a drifted node WHILE charging, which the gate skipped, and needs no state file.)
+          for _di in */input_suspend */charge_disable */batt_slate_mode */op_disable_charge */disable_charging; do
+            [ -w "$_di" ] || continue; [ "$(cat "$_di" 2>/dev/null)" = 0 ] || echo 0 > "$_di" 2>/dev/null || :
+          done
+          for _en in */charging_enabled */battery_charging_enabled */charge_enabled */charging_enable */enable_charging */enable_charger; do
+            [ -w "$_en" ] || continue; [ "$(cat "$_en" 2>/dev/null)" = 1 ] || echo 1 > "$_en" 2>/dev/null || :
+          done
           # rc5 (#7): RESUME-side watchdog, symmetric to the rc19 breach monitor. enable_charging
           # wrote the switch ON value (+ the D8 rerun for current-cap), but on some current-cap
           # switches charging may STILL not restart -- an otherwise SILENT stall. If present and
@@ -805,9 +817,17 @@ if ! $_INIT; then
     case $start in ''|*[!0-9]*) start=75;; esac; [ "$start" -le 100 ] || start=100
     t=$(cat $temp 2>/dev/null || echo 0)
     [ "$t" -ge $(( ${temperature[1]:-50} * 10 )) ] 2>/dev/null && stop=$start
-    chmod 0644 $gcsl $gcst 2>/dev/null || :
-    echo "$start" > $gcst 2>/dev/null || :
-    echo "$stop"  > $gcsl 2>/dev/null || :
+    # 6.5.1-rc14 DEEP FIX (Pixel/Tensor fast-charge + wireless): IDEMPOTENT native sync. Only
+    # chmod+write a level node that is NOT already at target. Re-writing charge_start_level /
+    # charge_stop_level (and the chmod) on EVERY loop re-triggers the google_charger MSC state
+    # machine, which also gates the wireless (p9221) path via gcpm -> fast charge collapses and
+    # wireless wedges ("hangs at charging", "stays Charging after lifting the phone off"). The
+    # rc14 write() idempotency did NOT reach here: this path uses a raw echo, not write(). Reading
+    # first is strictly safer -- a node the firmware drifted off target is still re-synced; only
+    # redundant same-value pokes are skipped, so a healthy wired/wireless negotiation is never
+    # disturbed. The values still change on a config edit, a thermal pause, or firmware drift.
+    [ "$(cat $gcst 2>/dev/null)" = "$start" ] || { chmod 0644 $gcst 2>/dev/null || :; echo "$start" > $gcst 2>/dev/null || :; }
+    [ "$(cat $gcsl 2>/dev/null)" = "$stop"  ] || { chmod 0644 $gcsl 2>/dev/null || :; echo "$stop"  > $gcsl 2>/dev/null || :; }
   }
 
 

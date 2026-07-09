@@ -670,9 +670,30 @@ write() {
   local seq=5
   local one="$(eval echo $1)"
   local f=$dataDir/logs/write.log
+  local _cur _tgt
   blacklisted=false
 
-  if [ -f "$2" ] && chmod a+w $2; then
+  # 6.5.1-rc14 DEEP FIX (fast charge): IDEMPOTENT write. If the node already holds the target
+  # value, do NOTHING -- no chmod, no echo, no 5x retry below. ACC re-asserts the switch EVERY
+  # daemon loop while charging; re-writing the same value (and the chmod) re-triggers AICL / the
+  # charge-pump FSM on fast-charge phones (PPS/PD/VOOC/QC-CP), which drops fast charge to the main
+  # buck charger and never lets it re-engage -> the "only slow/normal after ACC, even charge-once
+  # cannot fast-charge" reports. Reading ground truth first is STRICTLY safer than a blind write:
+  # a node the firmware drifted OFF target (actual != target) is still written, so pause
+  # enforcement and cut re-arm are unchanged -- only redundant same-value pokes are skipped. Never
+  # skipped during a switch test/scan (exitCode_ set), which must write to measure. Write-only or
+  # value-transforming nodes (read-back != written, e.g. HyperOS smart_chg) never match here, so
+  # they behave exactly as before.
+  if [ -z "${exitCode_-}" ] && [ -f "$2" ]; then
+    _cur="$(cat "$2" 2>/dev/null)"
+    _tgt="$one"; [[ "$one" != */* ]] || _tgt="$(cat "$one" 2>/dev/null)"
+    if [ -n "$_cur" ] && [ "$_cur" = "$_tgt" ]; then
+      rm $TMPDIR/.nowrite 2>/dev/null || :
+      return 0
+    fi
+  fi
+
+  if [ -f "$2" ] && { [ -w "$2" ] || chmod a+w $2; }; then
     case "$(grep -E "^(#$2|$2)$" $f 2>/dev/null || :)" in
       \#*) [ -z "${lastNode-}" ] && { blacklisted=true; i=x; } || { eval "echo $1 > $2" || i=x; };;
       */*) eval "echo $1 > $2" || i=x;;
