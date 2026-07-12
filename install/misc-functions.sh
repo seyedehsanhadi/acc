@@ -693,12 +693,22 @@ write() {
     fi
   fi
 
-  if [ -f "$2" ] && { [ -w "$2" ] || chmod a+w $2; }; then
+  # rc15 REGRESSION FIX (vs VR-25): use `chmod a+w` as the writability gate, NOT `[ -w ]`.
+  # As root `[ -w "$2" ]` is ALWAYS true (CAP_DAC_OVERRIDE bypasses the mode bits), so the rc14
+  # `[ -w "$2" ] || chmod` NEVER chmodded and went straight to the echo -- on a read-only sysfs
+  # attribute (no store() method) the redirection open() then fails with EACCES and the shell
+  # prints "acc: can't create <node>: Permission denied" for every such node in the mcc/mcv
+  # sweep. VR-25's plain `chmod a+w` fails on exactly those nodes, so its `&&` short-circuits and
+  # the echo is never attempted -> clean. Restored here; the rc14 idempotent read-before-write
+  # above still runs first, so chmod only fires on a genuine value change (fast charge undisturbed).
+  # `2>/dev/null` on both chmod and echo silences the residual case (chmod succeeds but the driver
+  # still rejects the write, e.g. a value-clamping node) so no denial ever leaks to the user.
+  if [ -f "$2" ] && chmod a+w $2 2>/dev/null; then
     case "$(grep -E "^(#$2|$2)$" $f 2>/dev/null || :)" in
-      \#*) [ -z "${lastNode-}" ] && { blacklisted=true; i=x; } || { eval "echo $1 > $2" || i=x; };;
-      */*) eval "echo $1 > $2" || i=x;;
+      \#*) [ -z "${lastNode-}" ] && { blacklisted=true; i=x; } || { eval "echo $1 > $2" 2>/dev/null || i=x; };;
+      */*) eval "echo $1 > $2" 2>/dev/null || i=x;;
       *) echo $2 >> $f
-         eval "echo $1 > $2" || i=x;;
+         eval "echo $1 > $2" 2>/dev/null || i=x;;
     esac
   else
     i=x
@@ -719,7 +729,7 @@ write() {
 
   [ $i = x ] && return ${3-1} || {
     for i in $(seq $seq); do
-      if eval "echo $1 > $2"; then
+      if eval "echo $1 > $2" 2>/dev/null; then
         [ $i -eq $seq ] || usleep $((1000000 / $seq))
       else
         return 1
