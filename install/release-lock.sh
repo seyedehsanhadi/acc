@@ -16,3 +16,17 @@ if ! flock -n 0; then
   [ -z "$pid" ] || kill -KILL $pid >/dev/null
   flock 0
 fi) <>$TMPDIR/${id}.lock || :
+
+# rc15: the flock gate above is FOOLED under AccA. libsu keeps ONE persistent root shell, and
+# a leaked/inherited fd on this lock file makes `flock -n 0` wrongly SUCCEED even while the
+# daemon holds it -> the PID-kill above is skipped and the Stop button silently no-ops (field
+# report: "AccA didn't stop acc, I had to use the terminal"). Kill the daemon by its exact
+# command line too, which does not depend on the lock/fd state at all. SIGTERM first so accd's
+# EXIT trap runs and RESTORES NATIVE charging (releases the switch/cut); SIGKILL only a survivor.
+# The pattern is the full daemon-script path -> matches ONLY acc's own accd.sh, never the acca
+# caller (whose cmdline is ".../acca -D stop"), and pkill never signals its own pid.
+if command -v pkill >/dev/null 2>&1; then
+  _accd="${execDir:-/data/adb/${domain:-vr25}/${id}}/${id}d.sh"
+  pkill -f "$_accd" 2>/dev/null && { sleep 2; pkill -KILL -f "$_accd" 2>/dev/null || :; } || :
+  unset _accd
+fi
