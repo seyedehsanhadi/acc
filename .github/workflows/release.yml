@@ -32,7 +32,7 @@ jobs:
 
       # Release body = the top entry of changelog.md (everything up to the next "**v..." line).
       - name: Extract changelog entry
-        run: awk 'NR>1 && /^\*\*v/{exit} {print}' changelog.md > _release_body.md
+        run: awk '/^\*\*v/{c++} c==1{print} c==2{exit}' changelog.md > _release_body.md
 
       - name: Publish stable release
         uses: softprops/action-gh-release@v2

@@ -23,22 +23,21 @@ id=$(sed -n "s/^id=//p" module.prop)
 
 domain=$(sed -n "s/^domain=//p" module.prop)
 
-version="$(sed -n 1p changelog.md | sed 's/[*()]//g')"
+# version/versionCode come from module.prop (the canonical Magisk source), so the
+# changelog can be formatted freely (title/links first). module.json is ALWAYS
+# regenerated to match, so Magisk's updateJson sees this build's real version and a
+# zipUrl that points at the matching release asset (basename = id_version_versionCode).
+version=$(sed -n "s/^version=//p" module.prop)
 
-versionCode=${version#* }
-
-version=${version% *}
+versionCode=$(sed -n "s/^versionCode=//p" module.prop)
 
 basename=${id}_${version}_$versionCode
 
 tmpDir=.tmp/META-INF/com/google/android
 
 
-# update module info
-[ changelog.md -ot module.prop ] || {
-  set_prop version $version
-  set_prop versionCode $versionCode
-  cat << EOF > module.json
+# update module info (Magisk updateJson target)
+cat << EOF > module.json
 {
     "busybox": "https://github.com/Magisk-Modules-Repo/busybox-ndk",
     "changelog": "https://raw.githubusercontent.com/seyedehsanhadi/$id/main/changelog.md",
@@ -51,7 +50,6 @@ tmpDir=.tmp/META-INF/com/google/android
     "zipUrl": "https://github.com/seyedehsanhadi/$id/releases/download/$version/${basename}.zip"
 }
 EOF
-}
 
 
 # set ID

@@ -2,10 +2,10 @@
     "busybox": "https://github.com/Magisk-Modules-Repo/busybox-ndk",
     "changelog": "https://raw.githubusercontent.com/seyedehsanhadi/acc/main/changelog.md",
     "curl": "https://github.com/Zackptg5/Cross-Compiled-Binaries-Android/tree/master/curl",
-    "onlineInstaller": "https://github.com/seyedehsanhadi/acc/releases/download/v2025.5.18-stable.6.5/install-online.sh",
-    "tgz": "https://github.com/seyedehsanhadi/acc/releases/download/v2025.5.18-stable.6.5/acc_v2025.5.18-stable.6.5_202505280.tgz",
-    "tgzInstaller": "https://github.com/seyedehsanhadi/acc/releases/download/v2025.5.18-stable.6.5/install-tarball.sh",
+    "onlineInstaller": "https://github.com/seyedehsanhadi/acc/releases/download/v2025.5.18-6.5.1-rc14/install-online.sh",
+    "tgz": "https://github.com/seyedehsanhadi/acc/releases/download/v2025.5.18-6.5.1-rc14/acc_v2025.5.18-6.5.1-rc14_202505294.tgz",
+    "tgzInstaller": "https://github.com/seyedehsanhadi/acc/releases/download/v2025.5.18-6.5.1-rc14/install-tarball.sh",
     "version": "v2025.5.18-6.5.1-rc14",
     "versionCode": 202505294,
-    "zipUrl": "https://github.com/seyedehsanhadi/acc/releases/download/v2025.5.18-stable.6.5/acc_v2025.5.18-stable.6.5_202505280.zip"
+    "zipUrl": "https://github.com/seyedehsanhadi/acc/releases/download/v2025.5.18-6.5.1-rc14/acc_v2025.5.18-6.5.1-rc14_202505294.zip"
 }
