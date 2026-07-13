@@ -40,7 +40,7 @@ tmpDir=.tmp/META-INF/com/google/android
 cat << EOF > module.json
 {
     "busybox": "https://github.com/Magisk-Modules-Repo/busybox-ndk",
-    "changelog": "https://raw.githubusercontent.com/seyedehsanhadi/$id/main/changelog.md",
+    "changelog": "https://raw.githubusercontent.com/seyedehsanhadi/$id/dev/changelog.md",
     "curl": "https://github.com/Zackptg5/Cross-Compiled-Binaries-Android/tree/master/curl",
     "onlineInstaller": "https://github.com/seyedehsanhadi/$id/releases/download/$version/install-online.sh",
     "tgz": "https://github.com/seyedehsanhadi/$id/releases/download/$version/${basename}.tgz",
@@ -138,11 +138,10 @@ fi
 
   cp bin/${id}_flashable_uninstaller.zip install-online.sh install-tarball.sh _builds/${basename}/
 
-  # generate $id flashable zip
-  case $version in
-    *-rc*|*-pre*|*-beta*|*-dev*) basename_=${basename}_$(date +%H%M);;
-    *) basename_=$basename;;
-  esac
+  # generate $id flashable zip -- deterministic name (matches the zipUrl written into module.json
+  # above); an rc timestamp suffix here diverged the asset name from the manifest and broke
+  # Magisk's updateJson one-tap download.
+  basename_=$basename
   echo "=> _builds/${basename}/${basename_}.zip"
   zip -r9 _builds/${basename}/${basename_}.zip \
     * .gitattributes .gitignore .github \

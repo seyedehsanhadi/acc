@@ -8,6 +8,14 @@ Community fork of VR-25's ACC, maintained by seyedehsanhadi.
 
 Changes since the fork baseline (v2025.5.18-stable.6.5):
 
+**v2025.5.18-6.5.1-rc16 (202505296)**
+
+Update-delivery fix. Magisk's built-in module updater now sees new ACC releases - it was pointed at the wrong branch, and the flashable-zip filename did not match the update manifest, so even a version that did show could not download. No change to charging; AccA's in-app updater and notification were already unaffected (they read the GitHub releases API directly, which is also why they were the only surface that caught updates before).
+
+- updateJson tracks the active release branch, so the Magisk Modules tab shows a new ACC the day it ships instead of staying silent on the last stable.
+- Flashable-zip name is deterministic again and matches the manifest, so Magisk's one-tap update downloads and flashes instead of failing.
+- Update popup shows the current changelog.
+
 **v2025.5.18-6.5.1-rc15 (202505295)**
 
 Brick-safety hardening. A bad charging switch can no longer loop a device into a panic/reboot cycle - the class that ends in a Qualcomm CrashDump / EDL on some phones. Two boot-path guards, both additive and fail-open; healthy boots and normal charging are unchanged. Built, flashed and reboot-verified on a Mi A3 (mksh).
