@@ -1563,6 +1563,7 @@ Configure day and night profiles:
 
 - [Telegram Group](https://t.me/+hU1oF-BCf5hmM2Rk)
 - [Buy me a coffee](https://buymeacoffee.com/seyedehsanhadi)
+- [Ko-fi](https://ko-fi.com/seyedehsanhadi)
 - [Fork Repository](https://github.com/seyedehsanhadi/acc)
 - [AccA App](https://github.com/seyedehsanhadi/AccA)
 
