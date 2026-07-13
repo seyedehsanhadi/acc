@@ -335,7 +335,7 @@ if ! $_INIT; then
 
       $cooldown || {
         resetBattStatsOnUnplug=true
-        if $resetBattStatsOnPlug && ${resetBattStats[2]}; then
+        if $resetBattStatsOnPlug && ${resetBattStats[2]:-false}; then
           sleep ${loopDelay[0]}
           not_charging || {
             resetbs
@@ -370,7 +370,7 @@ if ! $_INIT; then
 
       $cooldown || {
         resetBattStatsOnPlug=true
-        if $resetBattStatsOnUnplug && ${resetBattStats[1]}; then
+        if $resetBattStatsOnUnplug && ${resetBattStats[1]:-false}; then
           sleep ${loopDelay[1]}
           ! not_charging Discharging || {
             resetbs
@@ -498,7 +498,7 @@ if ! $_INIT; then
             disable_charging || :
             force_off
           fi
-          ! ${resetBattStats[0]} || {
+          ! ${resetBattStats[0]:-false} || {
             # reset battery stats on pause
             resetbs
           }
@@ -1064,7 +1064,7 @@ if ! $_INIT; then
     local battCap=$(batt_cap)
     local maskedCap=
 
-    if ${capacity[4]} && [ ${capacity[3]} -le 100 ] && [ ${capacity[3]:-0} -gt ${capacity[0]:-0} ]; then
+    if ${capacity[4]:-false} && [ ${capacity[3]} -le 100 ] && [ ${capacity[3]:-0} -gt ${capacity[0]:-0} ]; then
       # the && pause>shutdown guard prevents a divide-by-zero in the masked-capacity
       # formula below when pause_capacity == shutdown_capacity.
 

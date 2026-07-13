@@ -125,8 +125,10 @@ set_ch_curr() {
         } || return 1
     }
 
-    # [0-9999] milliamps range
-    if [ $1 -ge 0 -a $1 -le 9999 ]; then
+    # [0-9999] milliamps range. Guard the numeric test (2>/dev/null + quoted) exactly like the
+    # not-charging path above: a non-numeric mcc that slipped through write-config's scalar gate
+    # would make "[ abc -ge 0 ]" error out every daemon tick.
+    if [ "$1" -ge 0 ] 2>/dev/null && [ "$1" -le 9999 ] 2>/dev/null; then
       apply_current $1 || return 1
     else
       $isAccd || echo "[0-9999]$(print_mA; print_only)"

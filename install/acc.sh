@@ -36,6 +36,10 @@ daemon_ctrl() {
 
     restart)
       if $isRunning; then
+        # release the running daemon's lock FIRST: exec'ing accd without this leaves the old
+        # daemon holding acc.lock, so the new accd hits `flock -n 0 || exit 13` in acquire-lock
+        # and dies instantly while the stale daemon keeps running (restart silently no-op'd).
+        . $execDir/release-lock.sh
         print_restarted
       else
         print_started
@@ -69,7 +73,7 @@ edit() {
          rm $TMPDIR/.tmp
        fi
        unset two
-       echo "$@" | sed 's/,/;/' >> $file;;
+       echo "$@" | sed 's/,/;/g' >> $file;;
 
     d) shift; sed -Ei "\#$*#d" $file;;
 
@@ -182,7 +186,7 @@ exxit() {
   set +eux
   ! ${noEcho:-false} && ${verbose:-true} && echo
   [[ "$exitCode" = [05689] ]] || {
-    eq "$exitCode" "[127]|10" && logf --export
+    eq "$exitCode" "127|10" && logf --export
     echo
   }
   cd /
@@ -438,6 +442,7 @@ case "${1-}" in
 
     [ -n "$mAh" ] || { echo "${0##*/} $1 <mAh>"; exit; }
     [ -n "$counter" ] || { echo "!"; exit; }
+    [ "${level:-0}" -ge 1 ] 2>/dev/null || { echo "!"; exit; }
 
     [ $counter -lt 10000 ] || counter=$(calc $counter / 1000)
     health=$(calc "$counter * 100 / $level * 100 / $mAh" | xargs printf %.1f)

@@ -71,7 +71,7 @@ at() {
   if [ ! -f $file ] && [ $((10#$(date +%H%M))) -ge $((10#${file##*/})) ] && [ $((10#$(date +%H))) -eq $((10#${1%:*})) ]; then
     mkdir -p ${file%/*}
     shift
-    echo "$@" | sed 's/,/\;/g; s|^acc|/dev/acc|g; s| acc| /dev/acc|g' > $file
+    echo "$@" | sed 's/,/\;/g; s|^acc$|/dev/acc|; s|^acc |/dev/acc |; s| acc$| /dev/acc|; s| acc | /dev/acc |g' > $file
     . $file || :
   elif [ $((10#$(date +%H%M))) -lt $((10#${file##*/})) ]; then
     rm $file 2>/dev/null || :

@@ -72,7 +72,7 @@ _cut() {
   while [ $# -ge 3 ] && [ -f "$1" ]; do
     _off=$3
     [ "$_off" = pcap ] && _off=$_pz
-    case ${_off:-x} in ''|*[!0-9-]*) shift 3; continue;; esac
+    case ${_off:-x} in ''|*[!0-9]*) shift 3; continue;; esac
     chmod a+w "$1" 2>/dev/null || :
     if echo "$_off" > "$1" 2>/dev/null; then _wrote="$_wrote $1"; fi
     shift 3

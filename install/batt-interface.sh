@@ -6,7 +6,7 @@ idle_discharging() {
   case "${_DPOL-}" in
     +) [ $curNow -ge 0 ] && _status=Discharging || _status=Charging;;
     -) [ $curNow -lt 0 ] && _status=Discharging || _status=Charging;;
-    *) [ $curThen = null ] || {
+    *) [ "${curThen:-null}" = null ] || {
           eq "$curThen,$curNow" "-*,[0-9]*|[0-9]*,-*" && _status=Discharging || _status=Charging
        };;
   esac
@@ -152,17 +152,23 @@ set_temp_level() {
   local a=
   local b=battery/siop_level
   local l=${1:-${tempLevel-}}
+  local _t=
   [ -n "$l" ] || return 0
   [[ $l -eq 0 && ! -f $f ]] && return 0 || :
+  # IDEMPOTENT (fast charge): write a level/limit node ONLY when its value must change. These are
+  # raw writes (not via write()), and charge_control_limit_max / siop_level re-trigger AICL / the
+  # charge FSM on every write, so re-asserting the same value each loop while warm throttles fast
+  # charge continuously. Read-before-write leaves a healthy charge undisturbed and still re-arms
+  # the instant the firmware drifts the node off target.
   if [ -f $b ]; then
-    chmod a+w $b && echo $((100 - $l)) > $b || :
+    _t=$((100 - $l)); [ "$(cat $b 2>/dev/null)" = "$_t" ] || { chmod a+w $b && echo $_t > $b; } || :
   else
     for a in */num_system_temp*levels; do
       b=$(echo $a | sed 's/\/num_/\//; s/s$//')
       if [ ! -f $a ] || [ ! -f $b ]; then
         continue
       fi
-      chmod a+w $b && echo $(( ($(cat $a) * l) / 100 )) > $b || :
+      _t=$(( ($(cat $a) * l) / 100 )); [ "$(cat $b 2>/dev/null)" = "$_t" ] || { chmod a+w $b && echo $_t > $b; } || :
     done
   fi
   for a in */charge_control_limit_max; do
@@ -170,7 +176,7 @@ set_temp_level() {
     if [ ! -f $a ] || [ ! -f $b ]; then
       continue
     fi
-    chmod a+w $b && echo $(( ($(cat $a) * l) / 100 )) > $b || :
+    _t=$(( ($(cat $a) * l) / 100 )); [ "$(cat $b 2>/dev/null)" = "$_t" ] || { chmod a+w $b && echo $_t > $b; } || :
   done
   [ $l -ne 0 ] && touch $f || rm $f 2>/dev/null || :
 }
@@ -182,6 +188,11 @@ status() {
   local return1=false
   local csw2=${chargingSwitch[2]-}
   local curNow=$(cat $currFile)
+  # N1 (coerce): a transient empty/garbage current_now read (common on some fuel gauges during a
+  # mode switch) would make idle_discharging's "[ ${curNow#-} -le N ]" and the calc below a 2-arg
+  # test / arithmetic error, aborting this hot loop under set -eu (charging limit lost). Same
+  # hardening the sibling volt_now/batt_cap/temp_now reads already carry; curNow was the gap.
+  case ${curNow#-} in ''|*[!0-9]*) curNow=0;; esac
 
   _status=$(read_status)
 
