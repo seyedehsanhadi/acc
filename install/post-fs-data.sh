@@ -80,11 +80,37 @@ _cut() {
   echo "$_wrote"
 }
 
+# _pending_check: run ONCE at boot (production path). If the previous boot ARMED the early-cap
+# journal but never disarmed it, our early-cut write kernel-panicked / crash-rebooted the device
+# mid-write. Permanently blacklist that switch (so neither early-cap nor accd ever writes it again)
+# and latch early-cap off. Returns 0 when it fired (caller exits), 1 otherwise. Brick-safe: this is
+# what turns a #305-class panic into ONE crash instead of an EDL-bound boot loop.
+_pending_check() {
+  [ -f "$dataDir/.earlycap-pending" ] || return 1
+  _ecp=$(cat "$dataDir/.earlycap-pending" 2>/dev/null)
+  if [ -n "$_ecp" ]; then
+    if [ ! -f "$dataDir/.probe-blacklist" ] || ! grep -qxF "$_ecp" "$dataDir/.probe-blacklist" 2>/dev/null; then
+      printf '%s\n' "$_ecp" >> "$dataDir/.probe-blacklist" 2>/dev/null || :
+    fi
+    echo "$(_ts) early-cut write crash-rebooted last boot; blacklisted + latch ($_ecp)" >> "$log" 2>/dev/null
+  fi
+  rm -f "$dataDir/.earlycap-pending" 2>/dev/null || :
+  touch "$dataDir/.no-early-cap" 2>/dev/null || :
+  return 0
+}
+
 # The capping decision + action. cwd-independent (cd's into $PS itself). Always returns 0 -- boot
 # must never see a nonzero from here.
 _run() {
   sw=$(grep -m1 '^chargingSwitch=' "$config" 2>/dev/null | sed -e 's/^chargingSwitch=(//' -e 's/).*$//')
   case "$sw" in ''|'--'*) echo "$(_ts) no switch configured; skip" >> "$log" 2>/dev/null; return 0;; esac
+  # Brick-safe (GitHub #305): never early-write a switch accd already blacklisted for kernel-
+  # panicking on a prior boot. early-cap runs BEFORE accd, so without this it would re-fire a
+  # known-deadly node at the most panic-sensitive boot stage (and accd's blacklist would never
+  # get the chance to protect it).
+  if [ -f "$dataDir/.probe-blacklist" ] && grep -qxF "$sw" "$dataDir/.probe-blacklist" 2>/dev/null; then
+    echo "$(_ts) switch on panic-blacklist; skip early-cap ($sw)" >> "$log" 2>/dev/null; return 0
+  fi
   pause=$(_pause "$config")
   case ${pause:-x} in ''|*[!0-9]*) echo "$(_ts) bad/absent pause '$pause'; skip" >> "$log" 2>/dev/null; return 0;; esac
   { [ "$pause" -ge 1 ] && [ "$pause" -le 100 ]; } || { echo "$(_ts) pause $pause out of range; skip" >> "$log" 2>/dev/null; return 0; }
@@ -94,7 +120,14 @@ _run() {
     return 0
   fi
   cd "$PS" 2>/dev/null || { echo "$(_ts) no $PS; skip" >> "$log" 2>/dev/null; return 0; }
+  # Write-ahead journal (1-strike): persist the switch about to be written + flush to disk BEFORE
+  # _cut. If _cut kernel-panics mid-write, this record survives the crash; next boot _pending_check
+  # blacklists it and bows out -> one brick at most, never a loop. Kept separate from accd's
+  # .probe-pending so the two can never race.
+  printf '%s\n' "$sw" > "$dataDir/.earlycap-pending" 2>/dev/null || :
+  sync 2>/dev/null || :
   wrote=$(_cut "$sw" "$pause")
+  rm -f "$dataDir/.earlycap-pending" 2>/dev/null || :
   case "$wrote" in
     *[!\ ]*) echo "$(_ts) level $level >= pause $pause -> early-cut wrote:$wrote" >> "$log" 2>/dev/null;;
     *)       echo "$(_ts) level $level >= pause $pause but no node written (switch not present early?)" >> "$log" 2>/dev/null;;
@@ -115,7 +148,7 @@ _selftest() {
   _check() { # desc expected actual
     if [ "$2" = "$3" ]; then _pass=$((_pass+1)); else _fail=$((_fail+1)); echo "  FAIL: $1 (want [$2] got [$3])"; fi
   }
-  _do() { ( EARLYCAP_CFG="$_T/config" EARLYCAP_PS="$_T/ps" config="$_T/config" PS="$_T/ps" log=/dev/null; _run ) >/dev/null 2>&1; }
+  _do() { ( EARLYCAP_CFG="$_T/config" EARLYCAP_PS="$_T/ps" config="$_T/config" PS="$_T/ps" dataDir="$_T/data" log=/dev/null; mkdir -p "$_T/data"; _run ) >/dev/null 2>&1; }
 
   # 1: over-limit single-node input-cut -> OFF(1) written
   _mkps; _node battery/capacity 80; _node battery/input_suspend 0
@@ -162,6 +195,27 @@ _selftest() {
   _cfg "" "5 101 72 74 false"; _do
   _check "empty switch no-op" 0 "$(_read battery/input_suspend)"
 
+  # 10 (brick-safe): switch on the panic-blacklist -> NOT written, even over the limit
+  _mkps; _node battery/capacity 80; _node battery/input_suspend 0; mkdir -p "$_T/data"
+  printf 'battery/input_suspend 0 1 --\n' > "$_T/data/.probe-blacklist"
+  _cfg "battery/input_suspend 0 1 --" "5 101 72 74 false"; _do
+  _check "blacklisted switch skipped" 0 "$(_read battery/input_suspend)"
+  rm -f "$_T/data/.probe-blacklist"
+
+  # 11 (journal): a clean cut leaves NO armed pending record (disarmed after the write returns)
+  _mkps; _node battery/capacity 80; _node battery/input_suspend 0; mkdir -p "$_T/data"
+  rm -f "$_T/data/.earlycap-pending"
+  _cfg "battery/input_suspend 0 1 --" "5 101 72 74 false"; _do
+  _check "journal disarmed after clean write" "" "$(cat "$_T/data/.earlycap-pending" 2>/dev/null)"
+
+  # 12 (self-heal): a leftover pending (= last boot panicked mid-write) -> blacklist it + latch off
+  mkdir -p "$_T/data"; rm -f "$_T/data/.probe-blacklist" "$_T/data/.no-early-cap"
+  printf 'battery/input_suspend 0 1 --\n' > "$_T/data/.earlycap-pending"
+  ( dataDir="$_T/data" log=/dev/null; _pending_check )
+  _check "pending -> blacklisted" "battery/input_suspend 0 1 --" "$(cat "$_T/data/.probe-blacklist" 2>/dev/null)"
+  _check "pending -> latched off" "yes" "$([ -f "$_T/data/.no-early-cap" ] && echo yes || echo no)"
+  _check "pending -> cleared" "" "$(cat "$_T/data/.earlycap-pending" 2>/dev/null)"
+
   rm -rf "$_T" 2>/dev/null
   echo "early-cap selftest: $_pass passed, $_fail failed"
   [ $_fail -eq 0 ]
@@ -183,6 +237,11 @@ MODDIR=${0%/*}
 [ -f "$dataDir/.no-early-cap" ] && exit 0   # user opt-out OR a prior self-heal latch
 [ -f "$config" ] || exit 0                  # nothing configured (fresh install) -> nothing to cap
 mkdir -p "$dataDir/logs" 2>/dev/null || :
+
+# 1-strike self-heal: did last boot's early-cut write crash-reboot the device mid-write? If so,
+# blacklist that switch + latch off, and do NOT arm/write again this boot. Must run before anything
+# writes a node. Turns a panic-node into one crash, never an EDL-bound loop.
+_pending_check && exit 0
 
 # bootloop self-heal: increment here, service.sh clears on a good boot. 3 unreached-late_start
 # boots => assume we are implicated and latch off. Counter parse is garbage-proof.

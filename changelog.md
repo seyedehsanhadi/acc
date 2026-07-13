@@ -8,6 +8,10 @@ Community fork of VR-25's ACC, maintained by seyedehsanhadi.
 
 Changes since the fork baseline (v2025.5.18-stable.6.5):
 
+**v2025.5.18-6.5.1-rc15 (202505295)**
+
+- Brick-safe boot (GitHub #305 class). The boot-time early-cap - which writes your charging switch at the most panic-sensitive stage, before the daemon starts - now (1) honors the same panic-blacklist the daemon builds, and (2) write-ahead-journals its own write. If a charge node kernel-panicked the device mid-write on a prior boot, early-cap blacklists it and disables itself after ONE crash instead of re-firing it every boot. A bad charge switch can no longer become an endless panic/reboot loop (the class that ends in a Qualcomm CrashDump / EDL on some phones). Device-verified on mksh; +5 selftest cases; healthy boots are unchanged.
+
 **v2025.5.18-6.5.1-rc14 (202505294)**
 
 - Fast charge: charge-control writes are now idempotent (read-before-write), so ACC no longer re-triggers the charger's input negotiation (AICL/APSD) and drops fast charge to slow on charge-pump / PPS / PD / VOOC / wireless phones. Steady charging touches nothing; a stray drift still re-arms instantly.
