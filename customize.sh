@@ -225,6 +225,7 @@ fi
 echo "$name $version ($versionCode)
 Fork by seyedehsanhadi - based on VR-25's ACC. Original (c) 2017-2024 VR-25, GPLv3+.
 Telegram: https://t.me/+hU1oF-BCf5hmM2Rk
+Buy me a coffee: https://buymeacoffee.com/seyedehsanhadi
 
 Installing in $installDir/$id/..."
 
