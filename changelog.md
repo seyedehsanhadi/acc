@@ -10,7 +10,10 @@ Changes since the fork baseline (v2025.5.18-stable.6.5):
 
 **v2025.5.18-6.5.1-rc15 (202505295)**
 
-- Brick-safe boot (GitHub #305 class). The boot-time early-cap - which writes your charging switch at the most panic-sensitive stage, before the daemon starts - now (1) honors the same panic-blacklist the daemon builds, and (2) write-ahead-journals its own write. If a charge node kernel-panicked the device mid-write on a prior boot, early-cap blacklists it and disables itself after ONE crash instead of re-firing it every boot. A bad charge switch can no longer become an endless panic/reboot loop (the class that ends in a Qualcomm CrashDump / EDL on some phones). Device-verified on mksh; +5 selftest cases; healthy boots are unchanged.
+Brick-safety hardening. A bad charging switch can no longer loop a device into a panic/reboot cycle - the class that ends in a Qualcomm CrashDump / EDL on some phones. Two boot-path guards, both additive and fail-open; healthy boots and normal charging are unchanged. Built, flashed and reboot-verified on a Mi A3 (mksh).
+
+- Early-cap brick-safe (GitHub #305). The one write ACC makes before the daemon starts now honors the daemon's panic-blacklist and write-ahead-journals itself - a switch that kernel-panics mid-write gets blacklisted and early-cap self-disables after ONE crash, instead of re-firing it every boot. +5 selftest cases.
+- rebootResume loop-guard. The opt-in "reboot to resume charging" reboots at most twice, then warns instead of rebooting again - so a resume that never works can't loop forever. The counter resets on a healthy charge, so a genuine one-off is never penalized.
 
 **v2025.5.18-6.5.1-rc14 (202505294)**
 

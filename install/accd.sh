@@ -113,6 +113,21 @@ if ! $_INIT; then
   }
 
 
+  # rebootResume loop-guard (rc15): return 0 (ok to reboot) for at most 2 attempts, then 1 (capped),
+  # so a reboot-to-resume that never actually fixes charging can NOT reboot the phone forever (which
+  # on some phones ends in a Qualcomm CrashDump/EDL). The counter persists across reboots (dataDir)
+  # and is cleared by a healthy charging resume, so a genuine one-off reboot is never penalized.
+  _reboot_resume_allowed() {
+    local _rrc
+    _rrc=$(cat "$dataDir/.reboot-resume-count" 2>/dev/null || echo 0)
+    case ${_rrc:-0} in ''|*[!0-9]*) _rrc=0;; esac
+    [ "$_rrc" -lt 2 ] || return 1
+    echo $(( _rrc + 1 )) > "$dataDir/.reboot-resume-count" 2>/dev/null || :
+    sync 2>/dev/null || :
+    return 0
+  }
+
+
   _uptime() {
     [ $(cut -d '.' -f 1 /proc/uptime) -ge $1 ]
   }
@@ -355,18 +370,25 @@ if ! $_INIT; then
       set_ch_volt ${maxChargingVoltage[0]:--}
       { $restrictCurr && [[ .${cooldownCurrent-} = .*% ]]; } || set_temp_level
       shutdownWarnings=true
+      # rebootResume loop-guard (rc15): charging is being applied here = a healthy resume, so reset
+      # the reboot-attempt counter. A genuine one-off reboot-to-resume is never penalized.
+      [ ! -f "$dataDir/.reboot-resume-count" ] || rm -f "$dataDir/.reboot-resume-count" 2>/dev/null || :
 
     else
 
-      $rebootResume \
-        && _le_resume_cap \
-        && [ $(temp_now) -lt $(( ${temperature[1]} * 10 )) ] && {
-          notif "⚠️ System will reboot in 60 seconds to re-enable charging! Run \"accd.\" to abort."
+      if $rebootResume && _le_resume_cap && [ $(temp_now) -lt $(( ${temperature[1]} * 10 )) ]; then
+        # LOOP-GUARD (rc15): only reboot if we haven't already burned our attempts -- a resume that
+        # never works must not reboot the phone forever. After the cap, warn instead of rebooting.
+        if _reboot_resume_allowed; then
+          notif "⚠️ System will reboot in 60 seconds to re-enable charging! Run \"accd.\" to abort." || :
           sleep 60
           ! not_charging || {
             /system/bin/reboot || reboot
           }
-        } || :
+        else
+          warn_once_per reboot-resume-giveup 3600 "⚠️ ACC: charging still won't resume after repeated reboots; not rebooting again. Unplug + replug the cable, or check your charging switch in AccA." || :
+        fi
+      fi
 
       $cooldown || {
         resetBattStatsOnPlug=true
