@@ -1561,17 +1561,10 @@ Configure day and night profiles:
 ---
 ## LINKS
 
-- [Donate - Credit/Debit Card](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=iprj25@gmail.com&lc=US&item_name=VR25+is+creating+free+and+open+source+software.+Donate+to+suppport+their+work.&no_note=0&cn=&currency_code=USD&bn=PP-DonationsBF:btn_donateCC_LG.gif:NonHosted)
-- [Donate - Liberapay](https://liberapay.com/vr25)
-- [Donate - Patreon](https://patreon.com/vr25)
-- [Donate - PayPal Me](https://paypal.me/vr25xda)
+- [Telegram Group](https://t.me/+hU1oF-BCf5hmM2Rk)
+- [Fork Repository](https://github.com/seyedehsanhadi/acc)
+- [AccA App](https://github.com/seyedehsanhadi/AccA)
 
 - [Must Read - How to Prolong Lithium Ion Batteries Lifespan](https://batteryuniversity.com/article/bu-808-how-to-prolong-lithium-based-batteries)
 
-- [Telegram Channel](https://t.me/vr25_xda)
-- [Telegram Group](https://t.me/acc_group)
-- [Telegram Profile](https://t.me/vr25xda)
-
-- [Upstream Repository](https://github.com/VR-25/acc)
-
-- [XDA Thread](https://forum.xda-developers.com/apps/magisk/module-magic-charging-switch-cs-v2017-9-t3668427)
+- Fork maintained by seyedehsanhadi. Original ACC by VR-25 (GPLv3): [Upstream Repository](https://github.com/VR-25/acc)

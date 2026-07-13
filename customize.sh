@@ -223,8 +223,8 @@ fi
 
 ###
 echo "$name $version ($versionCode)
-Copyright 2017-2024, $author
-GPLv3+
+Fork by seyedehsanhadi - based on VR-25's ACC. Original (c) 2017-2024 VR-25, GPLv3+.
+Telegram: https://t.me/+hU1oF-BCf5hmM2Rk
 
 Installing in $installDir/$id/..."
 
