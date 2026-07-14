@@ -1,8 +1,8 @@
 id=acc
 domain=vr25
 name=Advanced Charging Controller (ACC)
-version=v2025.5.18-6.5.1-rc16
-versionCode=202505296
+version=v2025.5.18-6.5.1-rc17
+versionCode=202505297
 author=seyedehsanhadi (community fork of VR-25's ACC)
 description=Extend battery lifespan by limiting charging current, temperature, and voltage. Includes AMPS (Find my switch): a universal charge-control finder that detects and verifies the switch that works on your phone, writes only reversible switches, and restores on exit. Systemless; works on any root (Magisk / KernelSU / APatch). Community fork of VR-25's ACC, maintained by seyedehsanhadi. Telegram: https://t.me/+hU1oF-BCf5hmM2Rk
 updateJson=https://raw.githubusercontent.com/seyedehsanhadi/acc/dev/module.json

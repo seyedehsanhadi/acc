@@ -237,6 +237,33 @@ cp -aH /data/adb/$domain/$id/* $config $data_dir/backup/ 2>/dev/null || :
 
 export KSU=${KSU:-false}
 $KSU || { [ -d /data/adb/ksu ] || [ -d /data/adb/ap ] || [ -f /data/adb/ksu/bin/busybox ] || [ -f /data/adb/ap/bin/busybox ]; } && KSU=true || :   # rc6 (B2): match KSU/APatch bin ONLY, not the wildcard /data/adb/*/bin/busybox that also hit ACC's own vr25/bin (mis-flagged KSU on Magisk + 2+-match `[ -f a b ]` breakage)
+
+# rc17: HOW does this root manager mount a module's system/ dir? It decides whether shipping one
+# is harmless or bricks the phone -- $magisk above only means "/data/adb/modules exists", which is
+# equally true on KernelSU and APatch, so it must NOT be used for this.
+#   Magisk            magic mount, per FILE. /system/bin/acc is added and every other file in
+#                     /system/bin keeps its own label. Safe.
+#   KernelSU (incl. Next / SukiSU / ReSukiSU), APatch, Magisk + magisk_overlayfs
+#                     OverlayFS, per DIRECTORY. A module system/ relabels the WHOLE merged
+#                     /system/bin: /system/bin/sh stops being shell_exec and every app and system
+#                     process that shells out dies with "Exec '/system/bin/sh' failed: Permission
+#                     denied" -- the root manager itself will not open and only recovery can undo
+#                     it (GitHub #197).
+# FAIL SAFE: treat anything not positively confirmed as Magisk magic mount as OverlayFS. A phone
+# that merely lacks the `acc` PATH shortcut still boots; a phone with a poisoned /system/bin does
+# not. This also makes a recovery flash safe, where no root manager exports its env at all.
+overlayMount=true
+if ! $KSU \
+  && [ -z "${APATCH:-}" ] \
+  && [ ! -d /data/adb/ap ] \
+  && [ ! -d /data/adb/ksu ] \
+  && [ ! -d $magiskModDir/magisk_overlayfs ] \
+  && { [ -d /data/adb/magisk ] || [ -n "${MAGISK_VER_CODE:-}" ]; }
+then
+  overlayMount=false
+fi
+$overlayMount && echo "Root: OverlayFS-mounted (KernelSU/APatch/overlayfs). system/ overlay disabled - prevents the #197 /system/bin brick." \
+             || echo "Root: Magisk magic mount. system/ overlay enabled (acc on PATH)."
 /system/bin/sh $srcDir/install/uninstall.sh install
 mkdir -p $installDir/$id
 cp -R $srcDir/install/* $installDir/$id/
@@ -321,7 +348,9 @@ mkdir -p $tmpd
 
 
 ###
-! $magisk || {
+# rc17: only a magic-mount root gets the system/ overlay. On OverlayFS roots it is never created
+# in the first place (acc/acca/accd reach PATH via /data/adb/{ksu,ap}/bin instead, below).
+! $magisk || $overlayMount || {
 
   # create executable wrappers to avoid rebooting unnecessarily
   mkdir -p $installDir/system/bin
@@ -398,6 +427,28 @@ case $installDir in
   ;;
 esac
 
+
+# rc17: PREVENTION + RESCUE. On every OverlayFS root, guarantee the module carries no system/
+# tree -- neither a fresh one nor a poisonous one left behind by an older install. This is what
+# makes flashing this build enough to UN-BRICK a phone that is already stuck: from recovery it
+# strips the overlay in place, so the next boot has a clean /system/bin and no uninstall is
+# needed. skip_mount is the belt to that braces: even if a stale system/ somehow survives, the
+# root manager is told never to mount it. Runs BEFORE the module is staged, so no copy can carry
+# the overlay back. Covers the live dir and MODPATH (the staged dir the manager applies on boot).
+! $overlayMount || {
+  for d in $installDir ${MODPATH:-}; do
+    [ -n "$d" ] && [ -d "$d" ] || continue
+    rm -rf "$d"/system 2>/dev/null || :
+    : > "$d"/skip_mount 2>/dev/null || :
+  done
+}
+
+# Magisk magic mount WANTS the overlay: clear a skip_mount left by a previous KernelSU/APatch
+# install so `acc` on PATH is not silently lost after switching root manager.
+$overlayMount || {
+  rm -f $installDir/skip_mount 2>/dev/null || :
+  [ -z "${MODPATH:-}" ] || rm -f "$MODPATH"/skip_mount 2>/dev/null || :
+}
 
 ! $KSU || {
   upModDir=${magiskModDir}_update

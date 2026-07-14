@@ -8,6 +8,17 @@ Community fork of VR-25's ACC, maintained by seyedehsanhadi.
 
 Changes since the fork baseline (v2025.5.18-stable.6.5):
 
+**v2025.5.18-6.5.1-rc17 (202505297)**
+
+Critical fix for every OverlayFS root: KernelSU (including Next, SukiSU and ReSukiSU), APatch, and Magisk running magisk_overlayfs. On those, installing ACC could make every app crash after the next reboot - the root manager itself would not open, and recovery was the only way out. Magisk on its own was never affected.
+
+Already stuck? Just flash this build from recovery. It strips the bad overlay in place, so the next boot comes up clean. You do not have to uninstall ACC first.
+
+- The cause. ACC shipped a system/ overlay (the /system/bin/acc wrappers). Magisk magic-mounts those file by file and leaves the rest of /system/bin alone. OverlayFS roots mount the whole directory instead, which relabels the merged /system/bin: /system/bin/sh stops being executable, so every app and system process that shells out dies with "Exec '/system/bin/sh' failed: Permission denied" (GitHub #197).
+- The installer now detects HOW the root manager mounts modules, instead of assuming Magisk just because a modules directory exists. That old assumption treated KernelSU and APatch as Magisk, and is what wrote the overlay onto them in the first place. On an OverlayFS root the overlay is never created, an existing one is removed before the module is staged, and skip_mount is set so a stale one can never be mounted even if it reappears.
+- It fails safe. Anything not positively confirmed as Magisk magic mount is treated as OverlayFS, so an unknown root, a future fork, or a recovery flash with no root environment at all takes the safe path. A phone missing the acc PATH shortcut still boots; a phone with a poisoned /system/bin does not.
+- Nothing is lost. acc, acca and accd are symlinked onto /data/adb/ksu/bin and /data/adb/ap/bin, which are already on PATH, so the commands behave exactly as before. Magisk keeps its overlay and is unchanged.
+
 **v2025.5.18-6.5.1-rc16 (202505296)**
 
 Update-delivery fix. Magisk's built-in module updater now sees new ACC releases - it was pointed at the wrong branch, and the flashable-zip filename did not match the update manifest, so even a version that did show could not download. No change to charging; AccA's in-app updater and notification were already unaffected (they read the GitHub releases API directly, which is also why they were the only surface that caught updates before).
