@@ -19,6 +19,12 @@ Already stuck? Just flash this build from recovery. It strips the bad overlay in
 - It fails safe. Anything not positively confirmed as Magisk magic mount is treated as OverlayFS, so an unknown root, a future fork, or a recovery flash with no root environment at all takes the safe path. A phone missing the acc PATH shortcut still boots; a phone with a poisoned /system/bin does not.
 - Nothing is lost. acc, acca and accd are symlinked onto /data/adb/ksu/bin and /data/adb/ap/bin, which are already on PATH, so the commands behave exactly as before. Magisk keeps its overlay and is unchanged.
 
+AMPS (Find my switch) v7.1.5 - three fixes to the charger/speed report, which was accusing healthy phones of charging slowly. Found from a Realme GT Neo 2 (65W SuperDart) run.
+
+- Charger not found on the `ac` path. AMPS looked for the charger only on usb/main/dc/wireless/pc_port. On Qualcomm and OPLUS phones (Realme, OPPO, OnePlus) the mains path reports online on `ac` while usb sits at online=0 mid-charge, so nothing matched and the report said "not plugged / no input supply reports online" while the phone was actively charging, with the input current and voltage all reading zero. AMPS now scans every supply, takes whichever one the firmware marks online, and reads the limits from wherever they actually live.
+- A negative cap is an error code, not a value. -22 is -EINVAL, the kernel saying "property not supported". AMPS stripped the minus sign and reported "IC cap (CCC)=22mA", which also suppressed the fallback to the real ceiling and could fire a false "IC/THERMAL-CAPPED" verdict blaming your charge IC. Caps now reject negatives and fall through to the next source.
+- Model spoofing. A ROM that fakes ro.product.* (this one reported itself as a Galaxy S23 Ultra) would file its switches into the device database under someone else's model, misleading every real owner of that phone. AMPS now cross-checks the vendor partition, the device tree and the charger-driver family, says plainly that the model is spoofed, and keys the database on the hardware identity instead.
+
 **v2025.5.18-6.5.1-rc16 (202505296)**
 
 Update-delivery fix. Magisk's built-in module updater now sees new ACC releases - it was pointed at the wrong branch, and the flashable-zip filename did not match the update manifest, so even a version that did show could not download. No change to charging; AccA's in-app updater and notification were already unaffected (they read the GitHub releases API directly, which is also why they were the only surface that caught updates before).
