@@ -19,6 +19,8 @@ Already stuck? Just flash this build from recovery. It strips the bad overlay in
 - It fails safe. Anything not positively confirmed as Magisk magic mount is treated as OverlayFS, so an unknown root, a future fork, or a recovery flash with no root environment at all takes the safe path. A phone missing the acc PATH shortcut still boots; a phone with a poisoned /system/bin does not.
 - Nothing is lost. acc, acca and accd are symlinked onto /data/adb/ksu/bin and /data/adb/ap/bin, which are already on PATH, so the commands behave exactly as before. Magisk keeps its overlay and is unchanged.
 
+- The flashable zip never actually shipped the AMPS engine. install.sh copied only install/*, but acc-compat.sh and amps.sh live at the package root, so flashing a new ACC left the module running whatever engine it already had - a test phone on rc17 was still executing the v7.1.3 engine, three versions stale - and a clean flash got none at all. Only the tarball ever carried it. The current engine is now copied on every install.
+
 AMPS (Find my switch) v7.1.5 - three fixes to the charger/speed report, which was accusing healthy phones of charging slowly. Found from a Realme GT Neo 2 (65W SuperDart) run.
 
 - Charger not found on the `ac` path. AMPS looked for the charger only on usb/main/dc/wireless/pc_port. On Qualcomm and OPLUS phones (Realme, OPPO, OnePlus) the mains path reports online on `ac` while usb sits at online=0 mid-charge, so nothing matched and the report said "not plugged / no input supply reports online" while the phone was actively charging, with the input current and voltage all reading zero. AMPS now scans every supply, takes whichever one the firmware marks online, and reads the limits from wherever they actually live.

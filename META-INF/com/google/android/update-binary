@@ -269,6 +269,14 @@ mkdir -p $installDir/$id
 cp -R $srcDir/install/* $installDir/$id/
 installDir=$(readlink -f $installDir/$id)
 cp $srcDir/module.prop $installDir/
+# rc17: the AMPS engine (acc-compat.sh / amps.sh -- the same engine under two names) lives at the
+# package ROOT, not under install/, so the `cp -R $srcDir/install/*` above never shipped it. A phone
+# flashing a NEW ACC therefore kept executing whatever engine it already had (an A3 running rc17 was
+# still on the v7.1.3 engine, three versions stale), and a clean flash got none at all -- only the
+# tarball path ever carried it. Copy the current engine on every install.
+for _e in acc-compat.sh amps.sh; do
+  [ -f "$srcDir/$_e" ] && cp -f "$srcDir/$_e" "$installDir/$_e" || :
+done
 cp -f $srcDir/README.* $data_dir/
 
 
