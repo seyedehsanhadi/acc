@@ -1099,10 +1099,13 @@ if ! $_INIT; then
       [ $maskedCap -le 100 ] || maskedCap=100
       [ $maskedCap -ge 2 ] || maskedCap=2
 
-      ! $cooldown || isCharging=true
-      $isCharging && dsys_batt set ac 1 || dsys_batt unplug
-
-      isCharging=$isCharging_
+      # rc18: the spoofed plug state follows the PHYSICAL cable (present/online), not isCharging.
+      # isCharging mis-reads on inverted-polarity / bypass phones (charging reads negative; a bypass
+      # switch reports status=Charging while the battery is idle), so after an unplug the daemon kept
+      # writing 'set ac 1' and the status bar froze on 'charging' (the mask uses dumpsys battery set,
+      # which stops Android's own battery updates). present() is the physical truth, and during a
+      # cooldown pause the cable is still attached, so it correctly stays 'plugged'.
+      if present 2>/dev/null; then dsys_batt set ac 1; else dsys_batt unplug; fi
       dsys_batt set level $maskedCap
       dsys_batt set temp $(temp_now)
 

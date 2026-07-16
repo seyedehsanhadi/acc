@@ -8,6 +8,12 @@ Community fork of VR-25's ACC, maintained by seyedehsanhadi.
 
 Changes since the fork baseline (v2025.5.18-stable.6.5):
 
+**v2025.5.18-6.5.1-rc18 (202505298)**
+
+Fixes a status bar stuck on "charging" after you unplug, on phones that use the Capacity Mask. The mask shows a remapped battery percentage by writing Android's own battery state, and it decided plugged-or-not from the charging reading. On phones that report charging as a negative current, or that hold the battery idle with a bypass switch, that reading is unreliable, so after the cable came out the status bar could stay frozen on charging until a reboot. It now reads the physical cable directly, so the status bar follows the real plug state. AccA's dashboard was always correct; only the system status bar was affected.
+
+- Capacity Mask: the plug state written to Android now follows the physical charger (present/online), not the charging-current reading. Reproduced and verified on a Mi A3.
+
 **v2025.5.18-6.5.1-rc17 (202505297)**
 
 Critical fix for every OverlayFS root: KernelSU (including Next, SukiSU and ReSukiSU), APatch, and Magisk running magisk_overlayfs. On those, installing ACC could make every app crash after the next reboot - the root manager itself would not open, and recovery was the only way out. Magisk on its own was never affected.
