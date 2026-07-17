@@ -122,25 +122,36 @@ fi
 : ${rt:=40}
 : ${ct:=45}
 
-! [[ $rt -ge $mt || $((mt - $rt)) -gt 10 ]] || rt=$((mt - 1))
+# resume_temp must sit below max_temp; an at/above value collapses to a minimal 1 C swing.
+# A resume set MORE than 10 C below max is capped to a 10 C hysteresis (a lower resume could
+# never be reached in a warm room -> charging stuck off), NOT crushed to mt-1 as the old
+# combined guard did -- that 1 C swing rapid-toggled AND cascaded into cooldown_temp, forcing
+# the band rebuild below to discard the user's cooldown_temp as well.
+[ $rt -lt $mt ] 2>/dev/null || rt=$((mt - 1))
+[ $((mt - rt)) -le 10 ] 2>/dev/null || rt=$((mt - 10))
 
 # cooldown_temp must stay below max_temp -- if they are equal, the cooldown cycle enters and
 # immediately breaks at max_temp, so it never actually throttles. Keep a gap below max_temp,
 # and never let cooldown_temp fall below resume_temp.
 [ $ct -lt $mt ] || ct=$((mt - 5))
 [ $ct -ge $rt ] || ct=$rt
-# D3: the incremental clamps above can collapse a GARBAGE band into a near-max one (e.g.
-# (40 60 90 65) -> (59 60 59 65)) where cooldown_temp ~= max_temp and the cooldown stage never
-# throttles. If the cooldown->max gap collapsed (<3 C), the input was garbage -> reset to the
-# proven default band rather than ship a dead cooldown stage.
-[ $((mt - ct)) -ge 3 ] || { ct=45; mt=50; rt=40; }
+# D3: the incremental clamps above can collapse the band (e.g. (40 60 90 65) -> (59 60 59 65))
+# where cooldown_temp ~= max_temp and the cooldown stage never throttles. When the cooldown->max
+# gap collapses (<3 C), REBUILD the band around max_temp (ct = mt-5, rt = mt-10, the default band
+# shape) instead of resetting mt to 50. max_temp is already validated to [20..60] above, so a
+# LOW but valid pause temp (e.g. a user who sets only max_temp=40, leaving cooldown/resume at the
+# 45/40 defaults) must survive -- the old reset silently reverted it to 50, so the thermal pause
+# never fired until 50 C and the battery ran hot past the user's setting.
+[ $((mt - ct)) -ge 3 ] || { ct=$((mt - 5)); rt=$((mt - 10)); }
 
 # rc6 (A3): shutdown_temp is the HARD over-temperature cutoff -- it must sit at/above the
 # operating band, never below it. The non-numeric guard above let a low NUMERIC value (e.g.
 # st=8) through, and the daemon then shuts the phone down whenever battery temp >= st (8C is
-# always true). Keep st in a sane band [max(max_temp,40) .. 70]; outside that = garbage -> 55.
+# always true). Keep st in a sane band [max(max_temp,40) .. 70]; outside that = garbage.
+# Reset to an mt-AWARE default (mt+5 for a high max_temp) so st>=max_temp ALWAYS holds -- a
+# fixed 55 sat BELOW a high max_temp (e.g. mt=57) and the phone shut down before it ever paused.
 case ${st:-55} in *[!0-9]*) st=55;; esac
-{ [ ${st:-55} -ge $mt ] && [ ${st:-55} -ge 40 ] && [ ${st:-55} -le 70 ]; } 2>/dev/null || st=55
+{ [ ${st:-55} -ge $mt ] && [ ${st:-55} -ge 40 ] && [ ${st:-55} -le 70 ]; } 2>/dev/null || st=$(( mt <= 50 ? 55 : mt + 5 ))
 
 
 # reset switch (in auto-mode) if pbim has changed and another switch is not being set

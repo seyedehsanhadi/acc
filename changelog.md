@@ -14,6 +14,14 @@ Fixes a status bar stuck on "charging" after you unplug, on phones that use the 
 
 - Capacity Mask: the plug state written to Android now follows the physical charger (present/online), not the charging-current reading. Reproduced and verified on a Mi A3.
 
+It also fixes the temperature pause. Setting a max temperature on its own did not stick: ACC reset it to 50°C internally, so charging never paused at your limit and the battery could run hotter than you asked. One user set max_temp=40 and watched it reach 43. Three faults in the config sanitizer, all cases of a valid setting being silently changed:
+
+- max_temp reset. Lowering max_temp below the default cooldown temperature, with cooldown and resume left at their defaults, collapsed the temperature band. The guard that catches a collapsed band then reset all three values to the 45/50/40 default, so 40 became 50. It now rebuilds the band around your max_temp (cooldown 5° under, resume 10° under), so any value from 20 to 60°C holds.
+- Resume window. A resume temperature more than 10° below max was snapped to one degree under max, a 1° swing that toggled rapidly and discarded your cooldown value too. It is now capped at a 10° swing.
+- Shutdown below max. With a high max_temp (56 to 60°C) the shutdown cutoff could sit below it, so the phone shut down before it ever paused. Shutdown now always sits at or above max_temp.
+
+Verified on a Mi A3: the acc -s / acc -i round-trip matches on eight temperature scenarios, and the daemon pauses at the set max and resumes after cooldown.
+
 **v2025.5.18-6.5.1-rc17 (202505297)**
 
 Critical fix for every OverlayFS root: KernelSU (including Next, SukiSU and ReSukiSU), APatch, and Magisk running magisk_overlayfs. On those, installing ACC could make every app crash after the next reboot - the root manager itself would not open, and recovery was the only way out. Magisk on its own was never affected.
