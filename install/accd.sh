@@ -370,6 +370,20 @@ if ! $_INIT; then
           && { [ -z "${maxChargingCurrent[1]-}" ] || [[ "${maxChargingCurrent[1]-}" = -* ]]; } \
           && grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null
         then
+          # alpha2 (attribution): on a pump phone (Xiaomi HyperCharge tiers via
+          # quick_charge_type), a max charging current below the pump's draw (~6A) makes the
+          # firmware refuse pump mode entirely -- the phone then sits on the slow 9V buck path
+          # and it LOOKS like ACC broke fast charge (Redmi Note 9S field case: mcc=4450, pump
+          # needs ~6100mA -> "the original ACC is faster", when the only difference was the
+          # cap). Name the cause and the exact undo, once a day. A test hook (.pumpwarn-force)
+          # lets a phone without the node exercise this path on the bench.
+          case "${maxChargingCurrent[0]}" in
+            *[!0-9]*) :;;
+            *) if [ "${maxChargingCurrent[0]}" -lt 5500 ] 2>/dev/null \
+                && { [[ " ${_fcNodes:-} " = *quick_charge_type* ]] || [ -f $TMPDIR/.pumpwarn-force ]; }; then
+                warn_once_per pumpcap 86400 "ACC: your max charging current (${maxChargingCurrent[0]} mA) is below what this phone's fast-charge pump needs, so the firmware stays on the slow path. Clear it with: acc -s max_charging_current="
+              fi;;
+          esac
           set_ch_curr ${maxChargingCurrent[0]} || :
           . $execDir/write-config.sh
         fi
@@ -899,7 +913,14 @@ if ! $_INIT; then
     for _n in ${_fcNodes:-}; do
       _v=
       { read -r _v < "$_n"; } 2>/dev/null || :
-      case "$_v" in ''|0|*[!0-9]*) :;; *) return 0;; esac
+      case "$_n" in
+        # alpha2: Xiaomi quick_charge_type idles at 1 on a plain 5V/9V charger -- only the
+        # real fast tiers (>=2, HyperCharge/QC pump modes) count as a live session, so the
+        # cooldown guard does not engage on an ordinary charge. (Verified on a Redmi Note 9S:
+        # qct=1 while on a generic USB-PD brick with the pump never engaged.)
+        */quick_charge_type) case "$_v" in ''|0|1|*[!0-9]*) :;; *) return 0;; esac;;
+        *) case "$_v" in ''|0|*[!0-9]*) :;; *) return 0;; esac;;
+      esac
     done
     return 1
   }
