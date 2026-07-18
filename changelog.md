@@ -19,7 +19,7 @@ Standby battery drain, deep-fixed. A field report of 7% overnight drain (about t
 
 New: plugged-and-paused - the overnight-on-charger state - holds in a 30-second fork-free nap instead of the 9-second cycle. Unplugging or editing settings still wakes it within about a second. Resume detection moves from 9s to 30s worst case, against a battery that self-drains about 1% an hour: no practical change, far fewer wakeups.
 
-Measured after, same phone, same idle state: zero dumpsys calls, daemon CPU cut to a small fraction of one core, fork rate down to a trickle. AccA was audited too: its meter only ticks while the screen is on and stops when it goes off, and update checks run when you open the app - no change needed there.
+Measured on the same phone in the real overnight state (screen off, plugged, holding at the limit): the old daemon used 31% of a CPU core and was 83% of all process activity on the sleeping phone; rc19 runs the same state at 8% of a core with the fork rate down 6x, and zero dumpsys calls at rest. AccA was audited too: its meter only ticks while the screen is on and stops when it goes off, and update checks run when you open the app - no change needed there.
 
 **v2025.5.18-6.5.1-rc18 (202505298)**
 
