@@ -430,13 +430,13 @@ enable_charging() {
           *current_max*|*input_current*|*constant_charge_current*)
             if present && not_charging; then
               for _rn in */apsd_rerun */rerun_aicl; do
-                [ -w "$_rn" ] && echo 1 > "$_rn" 2>/dev/null || :
+                [ -w "$_rn" ] && { _wlog "rekick $_rn <- 1" 2>/dev/null; echo 1 > "$_rn" 2>/dev/null; } || :
               done
             fi ;;
           *suspend*|*bypass*|*vbus*)
             if present && ! online; then
               for _rn in */apsd_rerun */rerun_aicl; do
-                [ -w "$_rn" ] && echo 1 > "$_rn" 2>/dev/null || :
+                [ -w "$_rn" ] && { _wlog "rekick $_rn <- 1" 2>/dev/null; echo 1 > "$_rn" 2>/dev/null; } || :
               done
             fi ;;
         esac
@@ -664,6 +664,19 @@ wait_plug() {
 }
 
 
+_wlog() {
+  # rc20-alpha: write ledger. Every ACTUAL node write the daemon performs lands here with a
+  # timestamp, so a fast-charge drop can be correlated to the exact write that preceded it
+  # ("what did ACC touch at 20:31:04?" answered from the phone, no reproduction needed).
+  # Healthy charging writes nothing (rc14/rc19 idempotency), so this stays tiny; trimmed lazily.
+  echo "$(date '+%m-%d %H:%M:%S' 2>/dev/null || date +%s) $*" >> $TMPDIR/.write-ledger 2>/dev/null || :
+  if [ "$(wc -l < $TMPDIR/.write-ledger 2>/dev/null || echo 0)" -gt 400 ]; then
+    tail -n 200 $TMPDIR/.write-ledger > $TMPDIR/.write-ledger.t 2>/dev/null \
+      && mv -f $TMPDIR/.write-ledger.t $TMPDIR/.write-ledger 2>/dev/null || :
+  fi
+}
+
+
 write() {
 
   local i=y
@@ -692,6 +705,9 @@ write() {
       return 0
     fi
   fi
+  # rc20-alpha: only reached when a REAL value change is about to be written (the idempotent
+  # gate above returned for same-value pokes) -- exactly the writes worth ledgering.
+  _wlog "write $2 <- $one (was ${_cur:-?})"
 
   # rc15 REGRESSION FIX (vs VR-25): use `chmod a+w` as the writability gate, NOT `[ -w ]`.
   # As root `[ -w "$2" ]` is ALWAYS true (CAP_DAC_OVERRIDE bypasses the mode bits), so the rc14

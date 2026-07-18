@@ -321,8 +321,8 @@ if ! $_INIT; then
     # Then self-init to re-pick + lock. (Re-arm runs ONLY on an explicit user reset.)
     [ -f $dataDir/.rediscover ] && {
       rm -f $dataDir/.rediscover $TMPDIR/.sw-blacklist 2>/dev/null || :
-      for _en in /sys/class/power_supply/*/charging_enabled /sys/class/power_supply/*/battery_charging_enabled /sys/class/power_supply/*/charge_enabled; do [ -w "$_en" ] && echo 1 > "$_en" 2>/dev/null || :; done
-      for _di in /sys/class/power_supply/*/input_suspend /sys/class/power_supply/*/charge_disable /sys/class/power_supply/*/batt_slate_mode /sys/class/power_supply/*/op_disable_charge; do [ -w "$_di" ] && echo 0 > "$_di" 2>/dev/null || :; done
+      for _en in /sys/class/power_supply/*/charging_enabled /sys/class/power_supply/*/battery_charging_enabled /sys/class/power_supply/*/charge_enabled; do [ -w "$_en" ] && { _wlog "exit $_en <- 1" 2>/dev/null; echo 1 > "$_en" 2>/dev/null; } || :; done
+      for _di in /sys/class/power_supply/*/input_suspend /sys/class/power_supply/*/charge_disable /sys/class/power_supply/*/batt_slate_mode /sys/class/power_supply/*/op_disable_charge; do [ -w "$_di" ] && { _wlog "exit $_di <- 0" 2>/dev/null; echo 0 > "$_di" 2>/dev/null; } || :; done
       unset _en _di 2>/dev/null || :
       exec $TMPDIR/accd --init
     }
@@ -634,6 +634,20 @@ if ! $_INIT; then
             break
           fi
 
+          # rc20-alpha: cooldown toggles the charging switch (or pokes current caps), and that
+          # tears down a live VOOC/SuperDart/HyperCharge session -- the firmware then falls back
+          # to 500mA USB until a physical replug, so ONE cooldown cycle ruins the whole charge
+          # (Realme GT Neo 2 field report: full 4400mA below the cooldown level, 500-600mA stuck
+          # above it, normal with ACC off -- AccA's cooldown picker defaults to 60%, his exact
+          # boundary). Skip the cycle while a session is live and say so once a day. Safety is
+          # untouched: max_temp pause and shutdown_temp still fire; only the comfort throttle is
+          # skipped. Testers: touch $TMPDIR/.fcguard-off restores the old behavior live.
+          if $cooldown && fast_session; then
+            warn_once_per fcguard 86400 "ACC: skipped the cooldown cycle while fast charge is active - toggling would drop it to slow USB until you replug. (Override: create $TMPDIR/.fcguard-off)"
+            cooldown=false
+            break
+          fi
+
           _lt_pause_cap && [ $(temp_now) -lt $(( ${temperature[1]} * 10 )) ] && is_charging || break
 
           if [ -z "${cooldownCurrent-}" ]; then
@@ -746,10 +760,10 @@ if ! $_INIT; then
           # is never disturbed. (Supersedes the rc14-test counter-gate: reading is more correct -- it
           # also re-arms a drifted node WHILE charging, which the gate skipped, and needs no state file.)
           for _di in */input_suspend */charge_disable */batt_slate_mode */op_disable_charge */disable_charging; do
-            [ -w "$_di" ] || continue; [ "$(cat "$_di" 2>/dev/null)" = 0 ] || echo 0 > "$_di" 2>/dev/null || :
+            [ -w "$_di" ] || continue; [ "$(cat "$_di" 2>/dev/null)" = 0 ] || { _wlog "sweep $_di <- 0 (cut-release)"; echo 0 > "$_di" 2>/dev/null; } || :
           done
           for _en in */charging_enabled */battery_charging_enabled */charge_enabled */charging_enable */enable_charging */enable_charger; do
-            [ -w "$_en" ] || continue; [ "$(cat "$_en" 2>/dev/null)" = 1 ] || echo 1 > "$_en" 2>/dev/null || :
+            [ -w "$_en" ] || continue; [ "$(cat "$_en" 2>/dev/null)" = 1 ] || { _wlog "sweep $_en <- 1 (enable-revive)"; echo 1 > "$_en" 2>/dev/null; } || :
           done
           # rc5 (#7): RESUME-side watchdog, symmetric to the rc19 breach monitor. enable_charging
           # wrote the switch ON value (+ the D8 rerun for current-cap), but on some current-cap
@@ -767,9 +781,13 @@ if ! $_INIT; then
             if [ "${_ccResume0:-0}" -gt 0 ] && [ "$(cc_now)" -gt "$(( _ccResume0 + 1000 ))" ] 2>/dev/null; then
               rm $TMPDIR/.resumefail $TMPDIR/.resumewarned 2>/dev/null || :
             else
-            for _di in */input_suspend */charge_disable */batt_slate_mode */op_disable_charge */disable_charging; do [ -w "$_di" ] && echo 0 > "$_di" 2>/dev/null || :; done
-            for _en in */charging_enabled */battery_charging_enabled */charge_enabled */charging_enable */enable_charging */enable_charger; do [ -w "$_en" ] && echo 1 > "$_en" 2>/dev/null || :; done
-            for _rn in */apsd_rerun */rerun_aicl; do [ -w "$_rn" ] && echo 1 > "$_rn" 2>/dev/null || :; done
+            for _di in */input_suspend */charge_disable */batt_slate_mode */op_disable_charge */disable_charging; do
+              [ -w "$_di" ] || continue; [ "$(cat "$_di" 2>/dev/null)" = 0 ] || { _wlog "stall $_di <- 0"; echo 0 > "$_di" 2>/dev/null; } || :
+            done
+            for _en in */charging_enabled */battery_charging_enabled */charge_enabled */charging_enable */enable_charging */enable_charger; do
+              [ -w "$_en" ] || continue; [ "$(cat "$_en" 2>/dev/null)" = 1 ] || { _wlog "stall $_en <- 1"; echo 1 > "$_en" 2>/dev/null; } || :
+            done
+            for _rn in */apsd_rerun */rerun_aicl; do [ -w "$_rn" ] && { _wlog "rekick $_rn <- 1"; echo 1 > "$_rn" 2>/dev/null; } || :; done
             rf=$(cat $TMPDIR/.resumefail 2>/dev/null || echo 0); rf=$((rf + 1)); echo $rf > $TMPDIR/.resumefail
             if [ $rf -ge 4 ] && [[ "${chargingSwitch[*]-}" = *\ -- ]]; then
               # rc(6.4.1): tell "switch won't resume" apart from "charger died". If the cable is still
@@ -864,6 +882,26 @@ if ! $_INIT; then
       sleep 1
     done &
     set -x
+  }
+
+
+  fast_session() {
+    # rc20-alpha: is a PROPRIETARY fast-charge session live right now (VOOC/SuperDart, Xiaomi
+    # HyperCharge/QC tiers, OPLUS fast_chg)? These sessions are fragile one-shot handshakes:
+    # a switch toggle or a charge-node poke tears them down and the firmware falls back to
+    # 500mA USB until a PHYSICAL replug. Detection is read-only builtin reads of the vendor
+    # session nodes (cached list, computed at init). Test hooks: .fcguard-force pretends a
+    # session is live (bench testing); .fcguard-off disables the guard entirely (A/B on the
+    # tester's phone without reflashing).
+    [ ! -f $TMPDIR/.fcguard-off ] || return 1
+    [ ! -f $TMPDIR/.fcguard-force ] || return 0
+    local _n= _v=
+    for _n in ${_fcNodes:-}; do
+      _v=
+      { read -r _v < "$_n"; } 2>/dev/null || :
+      case "$_v" in ''|0|*[!0-9]*) :;; *) return 0;; esac
+    done
+    return 1
   }
 
 
@@ -1207,6 +1245,13 @@ if ! $_INIT; then
   if [ -p $TMPDIR/.wake ]; then
     { exec 9<>$TMPDIR/.wake; } 2>/dev/null && hasWakeFifo=true || hasWakeFifo=false
   fi
+  # rc20-alpha: proprietary fast-charge session nodes (see fast_session). Computed once; a
+  # phone without any of these never pays more than this one init scan.
+  _fcNodes=
+  for _fn in usb/quick_charge_type usb/fastcharge_mode bms/fastcharge_mode \
+    /sys/class/oplus_chg/battery/voocchg_ing /sys/class/oplus_chg/usb/fast_chg_type; do
+    [ -f "$_fn" ] && _fcNodes="$_fcNodes $_fn"
+  done
   mtReached=false
   resetBattStatsOnPlug=false
   resetBattStatsOnUnplug=false
