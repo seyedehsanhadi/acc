@@ -547,29 +547,6 @@ else
 fi
 
 
-# rc20-alpha3: one-shot migration for pump phones (Xiaomi HyperCharge tiers). A saved
-# max-charging-current below the pump's draw (~6A) makes the firmware refuse pump mode
-# entirely, so the cap never delivers what was asked - the phone just sits on the ~2A buck
-# path ("the original is faster" field case: leftover mcc=4450, fresh original had none).
-# Clear it once at install, with the voltage cap that was set alongside it; a new limit can
-# be set in AccA any time. Fires only when the pump node exists AND the cap is below 5500.
-# The daemon re-reads the config on change, so this applies within a loop even though the
-# daemon may already be starting.
-_cfg=/data/adb/vr25/acc-data/config.txt
-if [ -f /sys/class/power_supply/usb/quick_charge_type ] && [ -f "$_cfg" ]; then
-  _mcc=$(sed -n 's/^maxChargingCurrent=(\([0-9]*\).*/\1/p' "$_cfg" 2>/dev/null)
-  case ${_mcc:-x} in
-    ''|*[!0-9]*) :;;
-    *) if [ "$_mcc" -ge 3000 ] 2>/dev/null && [ "$_mcc" -lt 5500 ] 2>/dev/null; then
-         sed -i 's/^maxChargingCurrent=(.*/maxChargingCurrent=()/; s/^maxChargingVoltage=(.*/maxChargingVoltage=()/' "$_cfg" 2>/dev/null || :
-         ui_print "- Cleared a saved charging-current cap (${_mcc} mA) that was blocking"
-         ui_print "  this phone's fast-charge pump (it needs ~6A). Set a new limit in"
-         ui_print "  AccA any time if you want one."
-       fi;;
-  esac
-fi
-
-
 # magic_overlayfs support
 
 OVERLAY_IMAGE_EXTRA=0     # number of kb need to be added to overlay.img

@@ -347,7 +347,14 @@ batt_cap() {
   local l= l2= r= ck= cl=
   { read -r l2 < $battCapacity; } 2>/dev/null || l2=
   case $l2 in *[!0-9]*) l2=;; esac
-  if ${capacity[4]:-false}; then
+  # rc20 CRITICAL: if WE have frozen Android's battery state (.dsys-override -- the capacity
+  # mask, or the cooldown cycle's own `set ac 1`), Android's level is a snapshot we wrote, not
+  # a live reading. Trusting it is circular: during a sustained cooldown the level stops moving,
+  # so _lt_pause_cap stays true, the cooldown cycle never breaks, the pause never fires and the
+  # cell runs to 100% (field report, rc19). While an override is in force the kernel percent is
+  # the only honest source, so use it directly. The mask already did this by design; this simply
+  # extends the same rule to every override.
+  if ${capacity[4]:-false} || { [ -f $TMPDIR/.dsys-override ] && [ -n "$l2" ]; }; then
     r=$l2
   elif [ -n "$l2" ]; then
     { read -r ck cl < $TMPDIR/.bc-cache; } 2>/dev/null || { ck=; cl=; }
@@ -357,6 +364,17 @@ batt_cap() {
     else
       l=$(dsys_batt get level)
       case ${l:-x} in *[!0-9]*) l=;; esac
+      # rc20 SAFETY (defense in depth): Android's level and the kernel percent come from the
+      # same fuel gauge and normally agree within a point. A wide gap means Android's battery
+      # state is FROZEN (something called `dumpsys battery set/unplug` and never reset -- ACC's
+      # own cooldown did exactly that before rc20, but a third-party app or a killed switch test
+      # can do it too). A frozen level never reaches the pause level, so the limit never fires
+      # and the cell runs to 100%. When they diverge by more than 5, trust the kernel: it is
+      # ground truth and it cannot be spoofed by a stale broadcast. The mask path above is
+      # unaffected (it already uses the kernel value by design).
+      if [ -n "$l" ] && { [ $(( l - l2 )) -gt 5 ] || [ $(( l2 - l )) -gt 5 ]; } 2>/dev/null; then
+        l=
+      fi
       if [ -n "$l" ]; then
         r=$l
         echo "$l2 $l" > $TMPDIR/.bc-cache 2>/dev/null || :

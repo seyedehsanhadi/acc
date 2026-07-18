@@ -104,11 +104,26 @@ if ! $_INIT; then
 
 
   _le_shutdown_cap() {
+    local _sd= _rs=
     case ${capacity[0]-} in ''|*[!0-9]*) return 1;; esac
-    if [ ${capacity[0]} -gt 3000 ]; then
-      [ $(volt_now) -le ${capacity[0]} ]
+    # rc20 CRITICAL: refuse to act on an INCONSISTENT shutdown level, not just a non-numeric
+    # one. A numeric but absurd value (a hand-edited 99, a restored/foreign config, a partial
+    # write) passes the guard above and then powers the phone OFF at a high battery level --
+    # the same class of hole that let a numeric shutdown_temp=9 shut the phone down at room
+    # temperature. write-config enforces shutdown < resume on the write path; this is the
+    # daemon-side equivalent for a config that never went through it. Compared within one
+    # domain only (percent <=100 vs millivolt >3000), so mV configs are unaffected, and the
+    # legitimate low-battery protection (e.g. 5% with resume 65%) is untouched.
+    _sd=${capacity[0]}; _rs=${capacity[2]-}
+    case "$_rs" in ''|*[!0-9]*) _rs=;; esac
+    if [ $_sd -gt 3000 ]; then
+      [ $_sd -le 5000 ] || return 1
+      [ -z "$_rs" ] || [ $_rs -le 3000 ] || [ $_sd -lt $_rs ] || return 1
+      [ $(volt_now) -le $_sd ]
     else
-      [ $(batt_cap) -le ${capacity[0]} ]
+      [ $_sd -le 100 ] || return 1
+      [ -z "$_rs" ] || [ $_rs -gt 3000 ] || [ $_sd -lt $_rs ] || return 1
+      [ $(batt_cap) -le $_sd ]
     fi
   }
 
@@ -235,9 +250,11 @@ if ! $_INIT; then
     [ -n "$1" ] && exitCode=$1
     [ -n "$2" ] && print "$2"
     $persistLog || exec > /dev/null 2>&1
-    # rc19: reset Android's battery overrides only if the mask actually set them (marker),
-    # instead of unconditionally -- symmetric with mask_capacity's transition gating.
-    [ ! -f $TMPDIR/.mask-on ] || { dsys_batt reset >/dev/null; rm -f $TMPDIR/.mask-on $TMPDIR/.mask-last $TMPDIR/.mask-n 2>/dev/null; } || :
+    # rc19: reset Android's battery overrides only if something actually set them (marker),
+    # instead of unconditionally. rc20 CRITICAL: the marker is .dsys-override, written by
+    # dsys_batt for EVERY set/unplug (mask, cooldown, charge-once), not the mask-only marker
+    # -- on exit the daemon must never leave Android's battery state frozen.
+    [ ! -f $TMPDIR/.dsys-override ] || { dsys_batt reset >/dev/null; rm -f $TMPDIR/.mask-on $TMPDIR/.mask-last $TMPDIR/.mask-n 2>/dev/null; } || :
     grep -Ev '^$|^#' $config > $TMPDIR/.config
     config=$TMPDIR/.config
     applyOnPlug=(${applyOnPlug[*]-} ${applyOnBoot[*]-})
@@ -372,6 +389,15 @@ if ! $_INIT; then
     # Coerce a garbage/empty shutdown-temp so a hand-edited / partially-migrated config cannot
     # trigger a SPURIOUS shutdown (non-numeric -> arithmetic 0 -> the -lt test fails -> shutdown).
     _st=${temperature[3]}; case "$_st" in ''|*[!0-9]*) _st=55;; esac
+    # rc20 CRITICAL: BAND-check too, not just "is it a number". A low NUMERIC shutdown_temp
+    # (st=9) is a number, passes the guard above, and then "temp >= 9C" is true at any room
+    # temperature -- so the daemon powers the phone off on its very next loop. write-config
+    # clamps this on the write path, but the daemon is the last line of defence for a config
+    # that never went through it: a hand edit, a restored/older backup, a partially written
+    # file, or another tool. Device-proven: st=9 fired the shutdown branch at 26C.
+    # Battery temperatures are always Celsius here (no millivolt domain), so a fixed sane
+    # band is safe; anything outside it is garbage, not a user preference.
+    { [ "$_st" -ge 40 ] && [ "$_st" -le 70 ]; } 2>/dev/null || _st=55
     [ $(temp_now) -lt $(( _st * 10 )) ] || shutdown
 
     [ -z "${cooldownCurrent-}" ] || {
@@ -684,6 +710,18 @@ if ! $_INIT; then
             disable_charging || :
             sleep ${cooldownRatio[1]:-${loopDelay[0]}}
             enable_charging
+            # rc20 CRITICAL: un-freeze for the CHARGING half of every cooldown cycle. The
+            # `set ac 1` above is cosmetic (it stops the notification flickering while the
+            # switch is toggled) but it also stops Android's battery updates, and a long
+            # cooldown on a hot phone never leaves this loop -- so the level stayed frozen for
+            # the whole cooling period: the reading users saw stuck, and "charging" still shown
+            # after unplugging. Releasing it here keeps the anti-flicker benefit during the
+            # pause half while the level still advances every cycle.
+            # Only when the Capacity Mask is OFF: with the mask on, that override belongs to
+            # mask_capacity (it is the whole feature), and releasing it here would wipe the
+            # mask a moment after it was applied -- device-caught: the mask never survived a
+            # loop. With the mask on, the mask's own re-assert keeps the plug state correct.
+            ${capacity[4]:-false} || dsys_batt reset >/dev/null 2>&1 || :
             sleep ${cooldownRatio[0]:-${loopDelay[0]}}
           else
             (set_ch_curr ${cooldownCurrent:--} || :)
@@ -696,6 +734,15 @@ if ! $_INIT; then
             sleep ${cooldownRatio[0]:-${loopDelay[0]}}
           fi
         done
+
+        # rc20 CRITICAL: the cooldown cycle above calls `dsys_batt set ac 1` to keep Android
+        # showing "charging" while it toggles the switch, which stops Android's battery updates.
+        # The loop-top cleanup cannot run while we are inside that while-loop, so un-freeze here,
+        # the moment cooling ends. Without this the level stayed frozen after every cooldown --
+        # the reading users saw stuck, "charging" after unplug, and (before the batt_cap override
+        # rule) a limit that could never fire. No-op when nothing is frozen, and skipped when
+        # the Capacity Mask owns the override (see the in-cycle release above).
+        ${capacity[4]:-false} || [ ! -f $TMPDIR/.dsys-override ] || dsys_batt reset >/dev/null 2>&1 || :
 
         cooldown=false
         _nap ${loopDelay[0]}
@@ -765,6 +812,15 @@ if ! $_INIT; then
           rm $TMPDIR/.forceoff* 2>/dev/null && sleep ${loopDelay[0]} || :
           _ccResume0=$(cc_now)
           enable_charging
+          # rc20: re-apply the charging-current limit IMMEDIATELY on resume. enable_charging
+          # writes the switch's ON value, and on a current-class switch that ON value IS the
+          # uncapped default (e.g. constant_charge_current_max 3000000 0), so the user's limit
+          # was released and only restored on the next loop that reached the charging branch --
+          # a multi-second window at full current, which users see as "my 1000 mA limit is
+          # ignored every time it resumes" (field report). Idempotent: set_ch_curr skips nodes
+          # already at target, so a healthy charge is undisturbed.
+          [ ! -f $TMPDIR/.mcc-read ] || [ -z "${maxChargingCurrent[0]-}" ] \
+            || (set_ch_curr ${maxChargingCurrent[0]} || :)
           # 6.5.1: below the resume level the intent is unambiguously to CHARGE, so release any
           # stray hard cut from ANY source (a killed test, a prior leak_backstop, an OEM app)
           # right here -- unconditionally, BEFORE the not_charging gate below. The status/current
@@ -1252,8 +1308,14 @@ if ! $_INIT; then
     else
       # rc19: with the mask OFF this used to fire `dumpsys battery reset` every loop,
       # forever, to clear overrides that were never set. Reset once on the on->off
-      # transition (marker present), then do nothing at all.
-      if [ -f $TMPDIR/.mask-on ]; then
+      # transition, then do nothing at all.
+      # rc20 CRITICAL: gate on .dsys-override (set by dsys_batt for ANY set/unplug), not on
+      # the mask marker. The cooldown cycle freezes Android's battery state too, and gating
+      # on the mask alone left that freeze permanent - level stuck, "charging" shown after
+      # unplug, and the limit unable to fire (overcharge). This restores the pre-rc19
+      # guarantee (Android is always un-frozen when the mask is off) while keeping rc19's
+      # drain fix: with nothing frozen there is no marker, so no dumpsys call at all.
+      if [ -f $TMPDIR/.dsys-override ]; then
         dsys_batt reset >/dev/null
         rm -f $TMPDIR/.mask-on $TMPDIR/.mask-last $TMPDIR/.mask-n 2>/dev/null || :
       fi
@@ -1276,6 +1338,15 @@ if ! $_INIT; then
   # forks per second, replacing sleep+stat spawns); writing anything to $TMPDIR/.wake wakes
   # the daemon instantly (future front-end nudge). Survives the exec-reload (fd 9 inherited;
   # the -p guard skips a re-mkfifo). Falls back to sleep ticks if mkfifo is unavailable.
+  # rc20 CRITICAL (clean slate): un-freeze Android's battery state ONCE at daemon start,
+  # unconditionally. A marker only covers freezes THIS daemon caused - it cannot know about
+  # one inherited from a previous version (rc19 froze via the cooldown cycle and left no
+  # marker, so an upgrade would stay frozen forever: level stuck, "charging" after unplug,
+  # limit unable to fire), nor one left by a third-party app or a SIGKILLed switch test.
+  # One dumpsys per daemon start is free; from here the marker keeps the loop silent.
+  dsys_batt reset >/dev/null 2>&1 || :
+  rm -f $TMPDIR/.dsys-override $TMPDIR/.mask-on $TMPDIR/.mask-last $TMPDIR/.mask-n 2>/dev/null || :
+
   hasWakeFifo=false
   [ -p $TMPDIR/.wake ] || mkfifo $TMPDIR/.wake 2>/dev/null || :
   if [ -p $TMPDIR/.wake ]; then
