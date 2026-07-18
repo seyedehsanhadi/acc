@@ -701,12 +701,18 @@ if ! $_INIT; then
           # boundary). Skip the cycle while a session is live and say so once a day. Safety is
           # untouched: max_temp pause and shutdown_temp still fire; only the comfort throttle is
           # skipped. Testers: touch $TMPDIR/.fcguard-off restores the old behavior live.
-          # OPT-IN for rc20 ($TMPDIR/.fcguard-on). Skipping the cooldown cycle is a real behaviour
-          # change on phones with vendor fast-charge nodes, and it has one field confirmation so
-          # far. rc20's job is to undo the rc19 damage and be attributable: with this off by
-          # default, any new report on rc20 points at the freeze fix and nothing else. Flip it on
-          # in rc21 once more phones have reported.
-          if $cooldown && { [ -f $TMPDIR/.fcguard-on ] || [ -f $TMPDIR/.fcguard-force ]; } && fast_session; then
+          # ON by default: this is a confirmed fix, not a policy. The cooldown cycle toggles the
+          # charging switch, and a VOOC/SuperDart/HyperCharge handshake does not survive a toggle -
+          # the charger drops to 500 mA USB until the cable is physically pulled. So on those
+          # phones the cycle does not throttle a fast charge, it destroys it for the rest of the
+          # session. Confirmed on a Realme GT Neo 2: full speed below the cooldown level, 500 mA
+          # stuck above it, normal with ACC off.
+          # Reachable only when ALL of: the phone exposes a live-session node (see _fcNodes), the
+          # user enabled cooldown, and a session is actually live. On every other phone this line
+          # is dead code. Temperature safety is untouched - max_temp still pauses and shutdown_temp
+          # still fires; only the comfort throttle is skipped, and the user is told once a day.
+          # $TMPDIR/.fcguard-off disables it live, no reflash.
+          if $cooldown && fast_session; then
             warn_once_per fcguard 86400 "ACC: skipped the cooldown cycle while fast charge is active - toggling would drop it to slow USB until you replug. (Override: create $TMPDIR/.fcguard-off)"
             cooldown=false
             break
@@ -1363,8 +1369,16 @@ if ! $_INIT; then
   fi
   # rc20-alpha: proprietary fast-charge session nodes (see fast_session). Computed once; a
   # phone without any of these never pays more than this one init scan.
+  # LIVE-SESSION indicators only. Each one below was observed in a field report MOVING with the
+  # session (voocchg_ing 1->0 and fast_chg_type 20->0 the moment charging stopped), or carrying a
+  # session tier (quick_charge_type). `fastcharge_mode` is deliberately NOT here: it read 0 on a
+  # Xiaomi that was actively charging, so there is no evidence it reports a live session, and on
+  # several ROMs a node by that name is a user-facing "fast charge" SETTING. Treating a setting as
+  # a session would skip cooldown for everyone who ticked that box - a silent behaviour change on
+  # phones with no fast-charge problem at all. Leaving it out cannot cost anything: the confirmed
+  # fix works through the three below.
   _fcNodes=
-  for _fn in usb/quick_charge_type usb/fastcharge_mode bms/fastcharge_mode \
+  for _fn in usb/quick_charge_type \
     /sys/class/oplus_chg/battery/voocchg_ing /sys/class/oplus_chg/usb/fast_chg_type; do
     [ -f "$_fn" ] && _fcNodes="$_fcNodes $_fn"
   done
