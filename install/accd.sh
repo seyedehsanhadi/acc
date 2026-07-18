@@ -378,10 +378,14 @@ if ! $_INIT; then
     case "${maxChargingCurrent[0]-}" in
       ''|*[!0-9]*) :;;
       *) if [ "${maxChargingCurrent[0]}" -ge 3000 ] 2>/dev/null && [ "${maxChargingCurrent[0]}" -lt 5500 ] 2>/dev/null \
-          && { [[ " ${_fcNodes:-} " = *quick_charge_type* ]] || [ -f $TMPDIR/.pumpwarn-force ]; } \
-          && [ ! -f $TMPDIR/.pumpcap-enforce ]; then
-          warn_once_per pumpcap 86400 "ACC: your max charging current (${maxChargingCurrent[0]} mA) is below what this phone's fast-charge pump needs, so it cannot work as a real limit - the phone would just fall to slow charging. ACC is NOT applying it. Clear it (acc -s max_charging_current=) to silence this, or create $TMPDIR/.pumpcap-enforce to force it anyway."
-          maxChargingCurrent=()
+          && { [[ " ${_fcNodes:-} " = *quick_charge_type* ]] || [ -f $TMPDIR/.pumpwarn-force ]; }; then
+          # TELL the user either way: this is information, it changes nothing.
+          warn_once_per pumpcap 86400 "ACC: your max charging current (${maxChargingCurrent[0]} mA) is below what this phone's fast-charge pump needs, so the phone falls back to slow charging instead of honouring it. Clear it with: acc -s max_charging_current="
+          # ACTING on it (refusing to apply the cap) overrides what the user asked for, so it is
+          # OPT-IN only: create $TMPDIR/.pumpcap-veto to enable. Default behaviour is unchanged
+          # from rc19, which keeps this release attributable - if something regresses on rc20 it
+          # is the freeze fix, not a new policy nobody asked for.
+          [ ! -f $TMPDIR/.pumpcap-veto ] || maxChargingCurrent=()
         fi;;
     esac
 
@@ -697,7 +701,12 @@ if ! $_INIT; then
           # boundary). Skip the cycle while a session is live and say so once a day. Safety is
           # untouched: max_temp pause and shutdown_temp still fire; only the comfort throttle is
           # skipped. Testers: touch $TMPDIR/.fcguard-off restores the old behavior live.
-          if $cooldown && fast_session; then
+          # OPT-IN for rc20 ($TMPDIR/.fcguard-on). Skipping the cooldown cycle is a real behaviour
+          # change on phones with vendor fast-charge nodes, and it has one field confirmation so
+          # far. rc20's job is to undo the rc19 damage and be attributable: with this off by
+          # default, any new report on rc20 points at the freeze fix and nothing else. Flip it on
+          # in rc21 once more phones have reported.
+          if $cooldown && { [ -f $TMPDIR/.fcguard-on ] || [ -f $TMPDIR/.fcguard-force ]; } && fast_session; then
             warn_once_per fcguard 86400 "ACC: skipped the cooldown cycle while fast charge is active - toggling would drop it to slow USB until you replug. (Override: create $TMPDIR/.fcguard-off)"
             cooldown=false
             break
