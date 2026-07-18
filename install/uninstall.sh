@@ -61,6 +61,13 @@ rm -rf \
 [ "${1:-}" = install ] || {
   # restore normal charging before removal -- ENABLE direction only, can never overcharge.
 
+  # rc20: hand Android's battery state back FIRST. The Capacity Mask works by writing that state
+  # (`dumpsys battery set`), which also STOPS Android's own battery updates until a reset. Nothing
+  # in the removal path undid it, so uninstalling while the mask was on left the phone showing a
+  # frozen, made-up percentage (and "charging" after unplug) until the next reboot -- ACC gone,
+  # symptom still there. Unconditional and harmless when no mask was ever set.
+  /system/bin/dumpsys battery reset >/dev/null 2>&1 || :
+
   # (a0) rc13: CONFIG-DRIVEN restore FIRST -- replay ACC's own recorded stock values. The generic
   # sweeps below un-cap by hardcoded node names + a */voltage_max_design sibling, but that misses
   # (i) voltage_max nodes with NO _design sibling (battery/bms/main on curtana were left capped at
