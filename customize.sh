@@ -560,7 +560,7 @@ if [ -f /sys/class/power_supply/usb/quick_charge_type ] && [ -f "$_cfg" ]; then
   _mcc=$(sed -n 's/^maxChargingCurrent=(\([0-9]*\).*/\1/p' "$_cfg" 2>/dev/null)
   case ${_mcc:-x} in
     ''|*[!0-9]*) :;;
-    *) if [ "$_mcc" -lt 5500 ] 2>/dev/null; then
+    *) if [ "$_mcc" -ge 3000 ] 2>/dev/null && [ "$_mcc" -lt 5500 ] 2>/dev/null; then
          sed -i 's/^maxChargingCurrent=(.*/maxChargingCurrent=()/; s/^maxChargingVoltage=(.*/maxChargingVoltage=()/' "$_cfg" 2>/dev/null || :
          ui_print "- Cleared a saved charging-current cap (${_mcc} mA) that was blocking"
          ui_print "  this phone's fast-charge pump (it needs ~6A). Set a new limit in"
