@@ -50,7 +50,7 @@ if ! $_INIT; then
 
 
   temp_now() {  # D10: coerce an empty/garbage temp read to a benign 250 (25.0C) so a transient sensor
-    local _t=$(cat "$temp" 2>/dev/null); case "$_t" in ''|*[!0-9-]*) _t=250;; esac; echo "$_t"   # blip can't make a [ $(temp_now) -lt N ] test a syntax error -> set -eu abort -> exxit. Mirrors volt_now/batt_cap.
+    local _t=; { read -r _t < "$temp"; } 2>/dev/null || :; case "$_t" in ''|*[!0-9-]*) _t=250;; esac; echo "$_t"   # blip can't make a [ $(temp_now) -lt N ] test a syntax error -> set -eu abort -> exxit. Mirrors volt_now/batt_cap. rc19: builtin read, no cat spawn.
   }
 
 
@@ -133,20 +133,34 @@ if ! $_INIT; then
   }
 
 
+  _tick() {
+    # rc19 (standby): the shared 1-second wait for every nap. Each tick used to be a sleep
+    # spawn plus a stat spawn (config-mtime watch) -- roughly 200k forks a night doing
+    # nothing. Now: a timed builtin read on the daemon's wake fifo (zero forks; writing
+    # anything to $TMPDIR/.wake wakes the daemon instantly), and the config watch is the
+    # builtin -nt test against a tmpfs ref file the caller refreshes at nap start.
+    # Returns 1 (break the nap) when the config changed; degrades to sleep if the fifo
+    # could not be created at init. mksh read -t returns >128 on timeout -- swallowed.
+    if $hasWakeFifo; then read -t 1 -u9 _wk 2>/dev/null || :; else sleep 1; fi
+    [ ! $config -nt $TMPDIR/.nap-ref ]
+  }
+
+
   _nap() {
     # fix10: interruptible sleep. The daemon already re-reads the config every loop,
     # so the only thing delaying a settings change is this wait. Wake as soon as the
     # config file changes, so AccA edits (limits, temps, switch, ...) apply within
-    # ~1s -- live, no daemon restart, no UI freeze. Degrades to a plain wait if stat
-    # is unavailable (both reads return "x" -> never an early break).
-    local left=${1:-5} ts
+    # ~1s -- live, no daemon restart, no UI freeze. rc19: fork-free ticks (see _tick);
+    # xtrace is silenced inside the wait so the log does not grow 3 lines per second.
+    local left=${1:-5}
     case $left in ''|*[!0-9]*) left=5;; esac
-    ts=$(stat -c %Y $config 2>/dev/null || echo x)
+    : > $TMPDIR/.nap-ref 2>/dev/null || :
+    set +x
     while [ $left -gt 0 ]; do
-      sleep 1
       left=$((left - 1))
-      [ "$(stat -c %Y $config 2>/dev/null || echo x)" = "$ts" ] || break
+      _tick || break
     done
+    set -x
   }
 
 
@@ -160,11 +174,13 @@ if ! $_INIT; then
     # shutdown_capacity check is unaffected: the caller only takes this longer path
     # when no shutdown action is pending, and re-reads config + re-checks every wake.
     # Degrades safely to a plain countdown if stat/online are unavailable.
-    local left=${1:-60} ts
+    # rc19: fork-free ticks (_tick) + a cached, builtin-read present() -- this loop used to
+    # spawn sleep+stat+ls+grep+cat every second, all night, on every unplugged phone.
+    local left=${1:-60}
     case $left in ''|*[!0-9]*) left=60;; esac
-    ts=$(stat -c %Y $config 2>/dev/null || echo x)
+    : > $TMPDIR/.nap-ref 2>/dev/null || :
+    set +x
     while [ $left -gt 0 ]; do
-      sleep 1
       left=$((left - 1))
       # charger attached -> wake now so charging logic runs immediately. rc9: gate on
       # present (cable attached), not online -- an input-cut switch holds online=0 while
@@ -172,9 +188,30 @@ if ! $_INIT; then
       # edits). present stays 1 whenever the cable is in. Written "! present || break"
       # so the truly-unplugged case returns 0 under set -e, like _nap's mtime guard.
       ! present || break
-      # config changed -> wake now so AccA edits apply live
-      [ "$(stat -c %Y $config 2>/dev/null || echo x)" = "$ts" ] || break
+      # config changed -> wake now so AccA edits apply live (via _tick's -nt test)
+      _tick || break
     done
+    set -x
+  }
+
+
+  _nap_hold() {
+    # rc19 (standby): plugged-and-paused is the overnight-on-charger state -- nothing is
+    # actionable until the battery drifts down to the resume level (about 1% per hour) or
+    # the cable moves, yet the loop kept its 9s cadence all night. Hold in fork-free 1s
+    # ticks like _nap_idle, but break on UNPLUG (present gone) instead of plug-in; config
+    # edits still break within ~1s. Worst-case resume detection moves from 9s to ~30s
+    # against a multi-hour drain curve -- nothing a battery can do in 30s matters here.
+    local left=${1:-30}
+    case $left in ''|*[!0-9]*) left=30;; esac
+    : > $TMPDIR/.nap-ref 2>/dev/null || :
+    set +x
+    while [ $left -gt 0 ]; do
+      left=$((left - 1))
+      present || break
+      _tick || break
+    done
+    set -x
   }
 
 
@@ -198,7 +235,9 @@ if ! $_INIT; then
     [ -n "$1" ] && exitCode=$1
     [ -n "$2" ] && print "$2"
     $persistLog || exec > /dev/null 2>&1
-    dsys_batt reset >/dev/null
+    # rc19: reset Android's battery overrides only if the mask actually set them (marker),
+    # instead of unconditionally -- symmetric with mask_capacity's transition gating.
+    [ ! -f $TMPDIR/.mask-on ] || { dsys_batt reset >/dev/null; rm -f $TMPDIR/.mask-on $TMPDIR/.mask-last $TMPDIR/.mask-n 2>/dev/null; } || :
     grep -Ev '^$|^#' $config > $TMPDIR/.config
     config=$TMPDIR/.config
     applyOnPlug=(${applyOnPlug[*]-} ${applyOnBoot[*]-})
@@ -795,6 +834,12 @@ if ! $_INIT; then
         # every loop churns the CPU; present here keeps a plugged device on the clean short nap.
         if ! present && { ! _le_shutdown_cap || [ "${capacity[0]:-0}" -lt 1 ] 2>/dev/null; }; then
           _nap_idle ${idleDelay:-120}
+        elif present 2>/dev/null && _gt_resume_cap 2>/dev/null && [ ! -f $TMPDIR/.minCapMax ]; then
+          # rc19 (standby): plugged and holding ABOVE the resume level = the overnight-on-
+          # charger state. Nothing needs the 9s cadence until the level drifts down to
+          # resume or the cable moves -- take the long fork-free hold (breaks on unplug
+          # and config edits within ~1s; see _nap_hold).
+          _nap_hold 30
         else
           _nap ${loopDelay[1]}
         fi
@@ -1081,36 +1126,63 @@ if ! $_INIT; then
 
     is_android || return 0
 
-    isCharging=${isCharging:-false}
-    local isCharging_=$isCharging
-    local battCap=$(batt_cap)
-    local maskedCap=
+    local battCap= maskedCap= plug=0 t= lastPlug= lastCap= lastT= n=
 
     if ${capacity[4]:-false} && [ ${capacity[3]} -le 100 ] && [ ${capacity[3]:-0} -gt ${capacity[0]:-0} ]; then
       # the && pause>shutdown guard prevents a divide-by-zero in the masked-capacity
       # formula below when pause_capacity == shutdown_capacity.
+      # rc19 (standby): change-gated. The three dumpsys writes (plus the calc/awk spawn
+      # chain) ran EVERY loop around the clock. Now: plug state on transitions, level when
+      # the kernel percent moves, temp on a >=0.3 C move -- and a full re-assert every 20th
+      # pass, so an external `dumpsys battery reset` can never leave the mask silently dead.
+      # The tmpfs marker (.mask-on) records that BatteryService holds our overrides, so the
+      # off-path and the exit trap reset only when something was actually set (a daemon
+      # reload can no longer strand a frozen status bar either).
+      battCap=$(batt_cap)
+      present 2>/dev/null && plug=1 || plug=0
+      t=$(temp_now)
+      { read -r lastPlug lastCap lastT < $TMPDIR/.mask-last; } 2>/dev/null || :
+      { read -r n < $TMPDIR/.mask-n; } 2>/dev/null || n=0
+      case ${n:-0} in ''|*[!0-9]*) n=0;; esac
+      n=$((n + 1))
+      if [ $n -ge 20 ] || [ ! -f $TMPDIR/.mask-on ]; then
+        lastPlug=; lastCap=; lastT=; n=0
+      fi
+      echo $n > $TMPDIR/.mask-n 2>/dev/null || :
 
-      if [ ${capacity[0]} -le 0 ]; then
-        maskedCap=$(calc $battCap \* 100 / ${capacity[3]} | xargs printf %.f)
-      else
-        maskedCap=$(calc "($battCap - ${capacity[0]}) * 100 / (${capacity[3]} - ${capacity[0]})" | xargs printf %.f)
+      if [ ".$plug" != ".$lastPlug" ] || [ ".$battCap" != ".$lastCap" ] \
+        || [ $(( t - ${lastT:-99999} )) -ge 3 ] 2>/dev/null || [ $(( ${lastT:-99999} - t )) -ge 3 ] 2>/dev/null
+      then
+        if [ ${capacity[0]} -le 0 ]; then
+          maskedCap=$(calc $battCap \* 100 / ${capacity[3]} | xargs printf %.f)
+        else
+          maskedCap=$(calc "($battCap - ${capacity[0]}) * 100 / (${capacity[3]} - ${capacity[0]})" | xargs printf %.f)
+        fi
+
+        [ $maskedCap -le 100 ] || maskedCap=100
+        [ $maskedCap -ge 2 ] || maskedCap=2
+
+        # rc18: the spoofed plug state follows the PHYSICAL cable (present/online), not isCharging.
+        # isCharging mis-reads on inverted-polarity / bypass phones (charging reads negative; a bypass
+        # switch reports status=Charging while the battery is idle), so after an unplug the daemon kept
+        # writing 'set ac 1' and the status bar froze on 'charging' (the mask uses dumpsys battery set,
+        # which stops Android's own battery updates). present() is the physical truth, and during a
+        # cooldown pause the cable is still attached, so it correctly stays 'plugged'.
+        [ $plug = 1 ] && dsys_batt set ac 1 || dsys_batt unplug
+        dsys_batt set level $maskedCap
+        dsys_batt set temp $t
+        touch $TMPDIR/.mask-on 2>/dev/null || :
+        echo "$plug $battCap $t" > $TMPDIR/.mask-last 2>/dev/null || :
       fi
 
-      [ $maskedCap -le 100 ] || maskedCap=100
-      [ $maskedCap -ge 2 ] || maskedCap=2
-
-      # rc18: the spoofed plug state follows the PHYSICAL cable (present/online), not isCharging.
-      # isCharging mis-reads on inverted-polarity / bypass phones (charging reads negative; a bypass
-      # switch reports status=Charging while the battery is idle), so after an unplug the daemon kept
-      # writing 'set ac 1' and the status bar froze on 'charging' (the mask uses dumpsys battery set,
-      # which stops Android's own battery updates). present() is the physical truth, and during a
-      # cooldown pause the cable is still attached, so it correctly stays 'plugged'.
-      if present 2>/dev/null; then dsys_batt set ac 1; else dsys_batt unplug; fi
-      dsys_batt set level $maskedCap
-      dsys_batt set temp $(temp_now)
-
     else
-      dsys_batt reset >/dev/null
+      # rc19: with the mask OFF this used to fire `dumpsys battery reset` every loop,
+      # forever, to clear overrides that were never set. Reset once on the on->off
+      # transition (marker present), then do nothing at all.
+      if [ -f $TMPDIR/.mask-on ]; then
+        dsys_batt reset >/dev/null
+        rm -f $TMPDIR/.mask-on $TMPDIR/.mask-last $TMPDIR/.mask-n 2>/dev/null || :
+      fi
     fi
   }
 
@@ -1126,6 +1198,15 @@ if ! $_INIT; then
   cooldown=false
   dischgStatusCode=""
   export isAccd=true   # D7: export so the daemon's own `acca --set` subprocesses are recognized as daemon-originated (write-config must not clear a user lock on a daemon write)
+  # rc19 (standby): wake fifo. Every nap ticks on a timed builtin read of this fifo (zero
+  # forks per second, replacing sleep+stat spawns); writing anything to $TMPDIR/.wake wakes
+  # the daemon instantly (future front-end nudge). Survives the exec-reload (fd 9 inherited;
+  # the -p guard skips a re-mkfifo). Falls back to sleep ticks if mkfifo is unavailable.
+  hasWakeFifo=false
+  [ -p $TMPDIR/.wake ] || mkfifo $TMPDIR/.wake 2>/dev/null || :
+  if [ -p $TMPDIR/.wake ]; then
+    { exec 9<>$TMPDIR/.wake; } 2>/dev/null && hasWakeFifo=true || hasWakeFifo=false
+  fi
   mtReached=false
   resetBattStatsOnPlug=false
   resetBattStatsOnUnplug=false

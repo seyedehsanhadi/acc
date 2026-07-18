@@ -8,6 +8,19 @@ Community fork of VR-25's ACC, maintained by seyedehsanhadi.
 
 Changes since the fork baseline (v2025.5.18-stable.6.5):
 
+**v2025.5.18-6.5.1-rc19 (202505299)**
+
+Standby battery drain, deep-fixed. A field report of 7% overnight drain (about twice normal) checked out: the daemon was quietly burning about a quarter of a CPU core around the clock while doing nothing. Measured on a Mi A3 before the fix, sitting idle: about 30 dumpsys calls into Android per minute and 20+ process spawns per second, all night, with every feature at rest. Four sources, all fixed:
+
+- Every battery-percent check spawned a full dumpsys (a binder call into system_server), and the cap checks run several times per loop. The Android level is now cached and re-read only when the kernel percent actually moves. Blind devices with no kernel percent node keep the old per-call behavior.
+- With the Capacity Mask off, the mask code still called `dumpsys battery reset` every loop, forever, clearing overrides that were never set. It now resets once when you turn the mask off, then stays silent. With the mask on, the three dumpsys writes fire only when something changed (plug state, percent, or 0.3°C of temperature), plus a periodic full re-assert so an external reset can never silently kill the mask - which also means a daemon reload can no longer strand a frozen status bar.
+- Every 1-second wait tick spawned a sleep and a stat: roughly 200,000 forks a night spent waiting. The waits now tick on a timed builtin read of a wake fifo (zero forks), and the config watch is a builtin file test. Settings edits still apply within a second, and writing anything to the fifo wakes the daemon instantly.
+- The charger-node list was recomputed with ls+grep every second inside the idle nap. Now computed once.
+
+New: plugged-and-paused - the overnight-on-charger state - holds in a 30-second fork-free nap instead of the 9-second cycle. Unplugging or editing settings still wakes it within about a second. Resume detection moves from 9s to 30s worst case, against a battery that self-drains about 1% an hour: no practical change, far fewer wakeups.
+
+Measured after, same phone, same idle state: zero dumpsys calls, daemon CPU cut to a small fraction of one core, fork rate down to a trickle. AccA was audited too: its meter only ticks while the screen is on and stops when it goes off, and update checks run when you open the app - no change needed there.
+
 **v2025.5.18-6.5.1-rc18 (202505298)**
 
 Fixes a status bar stuck on "charging" after you unplug, on phones that use the Capacity Mask. The mask shows a remapped battery percentage by writing Android's own battery state, and it decided plugged-or-not from the charging reading. On phones that report charging as a negative current, or that hold the battery idle with a bypass switch, that reading is unreliable, so after the cable came out the status bar could stay frozen on charging until a reboot. It now reads the physical cable directly, so the status bar follows the real plug state. AccA's dashboard was always correct; only the system status bar was affected.

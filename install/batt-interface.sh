@@ -122,14 +122,22 @@ online_f() {
 # watchdog (it read online=0 -> "unplugged" -> cleared the breach). POWER_SUPPLY_PRESENT
 # stays 1 across an input cut. Falls back to online() on kernels with no present node.
 present_f() {
-  ls -1 */present 2>/dev/null | grep -Ei '^ac/|^dc/|^mains/|^main-?charger/|^mtk\-.*(chg|charger)/|^pc_port/|^smb[0-9]{3}\-usb/|^usb/|ucsi.*pmic|oplus.*chg|.*glink.*charg|^wireless/' || :
+  # rc19 (standby): the supply list is fixed hardware -- compute the ls|grep once per process
+  # and reuse. present() runs every second inside the idle naps; two forks per call added up
+  # to tens of thousands of spawns a night. Power-supply entries exist from boot, so a
+  # process-lifetime cache cannot miss one.
+  [ -n "${_presentF+x}" ] || _presentF=$(ls -1 */present 2>/dev/null | grep -Ei '^ac/|^dc/|^mains/|^main-?charger/|^mtk\-.*(chg|charger)/|^pc_port/|^smb[0-9]{3}\-usb/|^usb/|ucsi.*pmic|oplus.*chg|.*glink.*charg|^wireless/' || :)
+  printf '%s\n' "$_presentF"
 }
 
 present() {
-  local i= seen=false
-  for i in $(present_f); do
+  local i= v= seen=false
+  [ -n "${_presentF+x}" ] || present_f >/dev/null
+  for i in $_presentF; do
     seen=true
-    case "$(cat $i 2>/dev/null)" in 1) return 0;; esac
+    v=
+    { read -r v < $i; } 2>/dev/null || :
+    case "$v" in 1) return 0;; esac
   done
   # no usable present node -> defer to online (a path that is energized is plugged)
   $seen && return 1 || online
@@ -221,7 +229,11 @@ volt_now() {
   # N1: a transiently-empty/garbage voltage_now read used to emit nothing -> "[ -ge NN ]" syntax
   # error -> daemon abort under set -eu (charging limit lost). Coerce an unreadable node to a
   # fail-safe HIGH value (forces a pause, never a false shutdown) so the loop survives.
-  local v=$(grep -o '^....' $voltNow 2>/dev/null)
+  # rc19 (standby): builtin read + prefix trim replace the per-call grep spawn (same first-4
+  # digits: uV -> mV). A short/garbage read still coerces to the fail-safe 9999.
+  local v=
+  { read -r v < $voltNow; } 2>/dev/null || :
+  v=${v%"${v#????}"}
   case $v in ''|*[!0-9]*) v=9999;; esac
   echo $v
 }
@@ -322,13 +334,40 @@ fi
 [ -f $curThen ] || echo null > $curThen
 
 batt_cap() {
-  local l=$(dsys_batt get level)
-  local l2=$(cat $battCapacity)
-  local r=
+  # rc19 (standby): the Android level (a full dumpsys = fork + binder into system_server) is
+  # now CACHED and re-read only when the kernel percent moves. The cap checks call this 4-7x
+  # per loop, which was ~30 binder calls/min around the clock -- the single biggest standby
+  # cost (measured 26% of a core with children on a Mi A3). The kernel node is a builtin read
+  # (no fork); the cache (tmpfs, subshell-safe) is keyed to the kernel percent, so a stale
+  # Android read can never outlive a real 1% move -- the same 1-frame framework lag exists on
+  # a per-call read too. Blind devices (no kernel node) keep the per-call dumpsys as before.
   # N1: never emit empty/garbage -- a blank capacity makes "[ -ge NN ]" a syntax error and aborts
   # the loop under set -eu (limit lost). capacity_mask(=[4]) -> kernel level; else prefer Android's
   # level, fall back to kernel; coerce an unreadable result to 100 (fail-safe pause, never overcharge).
-  ${capacity[4]:-false} && r=$l2 || { [ -n "$l" ] && r=$l || r=$l2; }
+  local l= l2= r= ck= cl=
+  { read -r l2 < $battCapacity; } 2>/dev/null || l2=
+  case $l2 in *[!0-9]*) l2=;; esac
+  if ${capacity[4]:-false}; then
+    r=$l2
+  elif [ -n "$l2" ]; then
+    { read -r ck cl < $TMPDIR/.bc-cache; } 2>/dev/null || { ck=; cl=; }
+    case ${cl:-x} in *[!0-9]*) cl=;; esac
+    if [ ".$ck" = ".$l2" ] && [ -n "$cl" ]; then
+      r=$cl
+    else
+      l=$(dsys_batt get level)
+      case ${l:-x} in *[!0-9]*) l=;; esac
+      if [ -n "$l" ]; then
+        r=$l
+        echo "$l2 $l" > $TMPDIR/.bc-cache 2>/dev/null || :
+      else
+        r=$l2
+      fi
+    fi
+  else
+    l=$(dsys_batt get level)
+    r=$l
+  fi
   case $r in ''|*[!0-9]*) r=100;; esac
   echo $r
 }

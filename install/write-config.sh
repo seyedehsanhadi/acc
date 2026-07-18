@@ -269,4 +269,11 @@ cat $TMPDIR/.scripts $TMPDIR/.config-help >> $config.tmp
 # permission loss) leaves the previous config intact instead of truncating it.
 mv -f $config.tmp $config 2>/dev/null || rm -f $config.tmp 2>/dev/null
 rm $TMPDIR/.scripts
+# rc19 (standby): nudge the daemon's wake fifo so a settings change applies within ~1s even
+# mid-nap. The nap's mtime watch has 1-second granularity and misses an edit landing in the
+# same second a tick starts -- harmless at the old 9s naps, but the new 30s/120s holds made
+# that a visible lag. CLI writes only (the daemon's own config persists skip it via isAccd);
+# gated on a LIVE daemon because opening a reader-less fifo for write would block forever.
+${isAccd:-false} || [ ! -p ${TMPDIR:-/dev/.vr25/acc}/.wake ] || ! pgrep -f accd.sh >/dev/null 2>&1 \
+  || echo w > ${TMPDIR:-/dev/.vr25/acc}/.wake 2>/dev/null || :
 set -u)
