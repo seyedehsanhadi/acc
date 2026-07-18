@@ -8,6 +8,58 @@ Community fork of VR-25's ACC, maintained by seyedehsanhadi.
 
 Changes since the fork baseline (v2025.5.18-stable.6.5):
 
+**v2025.5.18-6.5.1-rc20 (202505300)**
+
+rc19 shipped a bug that could let a battery charge to 100% with the limit switched on. If you are
+on rc19, update. This release exists to undo it.
+
+What went wrong. ACC can freeze Android's battery state, which is how the Capacity Mask shows you
+a different percentage than the real one. rc19 added a marker so that only the mask would release
+that freeze, but the cooldown cycle freezes the same state and never sets the marker. rc18 had
+been clearing it every loop by accident, so nobody noticed. Once the cooldown cycle ran, the
+freeze became permanent: the reading stopped moving, the phone still showed charging after the
+cable came out, temperature went stale, and because the charge limit reads Android's level, the
+limit could no longer fire. Reproduced on a Mi A3, which reported AC powered while the cable state
+said discharging.
+
+The fix has four parts, so no single mistake can bring it back. The marker now lives inside the
+function that does the freezing, so every caller sets it rather than only the one we remembered.
+The daemon clears any freeze once at startup, which covers a phone upgrading from rc19 with a
+frozen state and no marker. While any freeze is in force, the battery percentage used for control
+decisions is read from the kernel instead of from a value we wrote ourselves. And if Android and
+the kernel ever disagree by more than 5 points, the kernel wins, so no freeze from any source can
+stop a pause. The rule behind all four: what you see may follow Android, what charges must follow
+the kernel.
+
+Uninstalling now hands Android's battery state back. Removing rc19 while a mask or a cooldown
+freeze was in force left the phone showing a fake percentage until reboot.
+
+Fast charge no longer dies when the cooldown cycle runs. On phones whose charger negotiates a
+proprietary fast mode (VOOC, SuperDart, HyperCharge), that handshake does not survive the charging
+switch being toggled, and the charger drops to 500 mA USB until the cable is physically unplugged.
+So above the cooldown level the cycle was not slowing a fast charge down, it was ending it for the
+rest of the session. A Realme GT Neo 2 owner saw 4400 mA below the cooldown level and 500-600 mA
+stuck above it, with normal speed when ACC was off; that phone is confirmed fixed. ACC now skips
+the cooldown cycle while a fast-charge session is live and tells you once a day that it did.
+Temperature protection is unchanged: max_temp still pauses charging and shutdown_temp still fires.
+This only affects phones that expose a vendor fast-charge node and have cooldown turned on. To
+switch it off, create the file `/dev/.vr25/acc/.fcguard-off`.
+
+Two hazards inherited from before the fork, both found while auditing the above:
+
+- A numeric but absurd `shutdown_temp` was accepted as valid. A hand-edited or restored config
+  containing `9` powered the phone off at room temperature. Device-proven, now band-checked, and
+  the same class of problem with `shutdown_capacity` at a high battery level is checked too. Real
+  over-temperature and low-battery protection still fire.
+- The charging-current limit was released for a few seconds on every resume, because on a phone
+  whose charging switch is a current node, the switch's ON value is the uncapped default. The
+  limit is now re-applied immediately on resume. This is the "my 1000 mA limit is ignored when
+  charging resumes" report.
+
+Also new: a write ledger recording every node write with a timestamp, so the next report of this
+kind can be answered from evidence instead of guesswork, and a notice for Xiaomi owners whose
+current limit sits in the range that stops the fast-charge pump from engaging.
+
 **v2025.5.18-6.5.1-rc19 (202505299)**
 
 Standby battery drain, deep-fixed. A field report of 7% overnight drain (about twice normal) checked out: the daemon was quietly burning about a quarter of a CPU core around the clock while doing nothing. Measured on a Mi A3 before the fix, sitting idle: about 30 dumpsys calls into Android per minute and 20+ process spawns per second, all night, with every feature at rest. Four sources, all fixed:
