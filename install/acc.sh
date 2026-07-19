@@ -79,9 +79,19 @@ edit() {
        # tick printed. Measured on a Mi A3: a 3-line config came back 1 line.
        # A name per process cannot collide with the caller's file or with a
        # concurrent acc.
-       _et=$TMPDIR/.edit.$$.tmp
+       # Stage NEXT TO the target, not in $TMPDIR, and publish by rename.
+       # Two reasons. A rename is only atomic within one filesystem, and $TMPDIR
+       # is tmpfs while the config lives on /data - so a temp there could never
+       # be renamed into place and the code had to `cat` over the original,
+       # truncating it. The daemon sources the config on every loop, and under
+       # `set -u` a half-written one aborts it, which fires the exit trap and
+       # re-enables charging. write-config.sh already publishes this way
+       # ($config.tmp then mv -f), so `acc -s` was safe while `acc -c` was not.
+       # Staging beside the target also keeps this correct when $file is itself
+       # the import staging file in tmpfs, since that is one filesystem too.
+       _et=$file.edit.$$.tmp
        if grep -iv "^: ${two[1]%?};" $file > $_et; then
-         cat $_et > $file
+         mv -f $_et $file 2>/dev/null || cat $_et > $file
        fi
        rm -f $_et
        unset two _et
