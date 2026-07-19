@@ -68,11 +68,23 @@ edit() {
     a) echo >> $file
        shift
        two=($*)
-       if grep -iv "^: ${two[1]%?};" $file > $TMPDIR/.tmp; then
-         cat $TMPDIR/.tmp > $file
-         rm $TMPDIR/.tmp
+       # The scratch file MUST NOT be able to be the file being edited. It was
+       # $TMPDIR/.tmp, and set-prop.sh's config-import path builds the incoming
+       # config in exactly that path and then calls this function on it:
+       #     acca $TMPDIR/.tmp --config a "$line"
+       # so $file and the scratch became the same file. The redirect truncates
+       # the target before grep opens it, grep then reads nothing and exits
+       # non-zero, the restore below is skipped, and the rule is appended to an
+       # empty file - the user's whole config replaced by its rule lines, with a
+       # tick printed. Measured on a Mi A3: a 3-line config came back 1 line.
+       # A name per process cannot collide with the caller's file or with a
+       # concurrent acc.
+       _et=$TMPDIR/.edit.$$.tmp
+       if grep -iv "^: ${two[1]%?};" $file > $_et; then
+         cat $_et > $file
        fi
-       unset two
+       rm -f $_et
+       unset two _et
        echo "$@" | sed 's/,/;/g' >> $file;;
 
     d) shift; sed -Ei "\#$*#d" $file;;

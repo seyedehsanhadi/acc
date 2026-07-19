@@ -121,14 +121,29 @@ set_prop() {
     *)
       if [ -f "${1:-//}" ]; then
         # import config
-        cat $config > $TMPDIR/.tmp
-        dos2unix < "$1" | grep -Ev '^:|=""$' >> $TMPDIR/.tmp || :
+        # Per-process staging file. $TMPDIR/.tmp is a generic name that acc.sh's
+        # edit() also used as its own scratch, and this path hands that very file
+        # to edit() - so the import destroyed the config it was building. Keeping
+        # a distinct name here means the two can never be the same file even if
+        # one of them is changed again later.
+        _imp=$TMPDIR/.import.$$.tmp
+        cat $config > $_imp
+        dos2unix < "$1" | grep -Ev '^:|=""$' >> $_imp || :
         dos2unix < "$1" | grep '^:' | while IFS= read -r line; do
-          $TMPDIR/acca $TMPDIR/.tmp --config a "$line"
+          $TMPDIR/acca $_imp --config a "$line"
         done
-        $TMPDIR/acca $TMPDIR/.tmp --set dummy=
-        cat $TMPDIR/.tmp > $config
-        echo "✅"
+        $TMPDIR/acca $_imp --set dummy=
+        # only overwrite the live config if the staged one actually has content;
+        # an empty staging file must never be allowed to become the config
+        if [ -s "$_imp" ]; then
+          cat $_imp > $config
+          rm -f $_imp
+          echo "✅"
+        else
+          rm -f $_imp
+          echo "Import produced an empty config - your existing settings were left alone."
+          return 1
+        fi
         return 0
       else
         # print current config (full)
