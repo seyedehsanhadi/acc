@@ -10,90 +10,24 @@ Changes since the fork baseline (v2025.5.18-stable.6.5):
 
 **v2025.5.18-6.5.1-rc20 (202505300)**
 
-rc19 shipped a bug that could let a battery charge to 100% with the limit switched on. If you are
-on rc19, update. This release exists to undo it.
+rc19 could let a battery charge to 100% with the limit on. If you are on rc19, update.
 
-What went wrong. ACC can freeze Android's battery state, which is how the Capacity Mask shows you
-a different percentage than the real one. rc19 added a marker so that only the mask would release
-that freeze, but the cooldown cycle freezes the same state and never sets the marker. rc18 had
-been clearing it every loop by accident, so nobody noticed. Once the cooldown cycle ran, the
-freeze became permanent: the reading stopped moving, the phone still showed charging after the
-cable came out, temperature went stale, and because the charge limit reads Android's level, the
-limit could no longer fire. Reproduced on a Mi A3, which reported AC powered while the cable state
-said discharging.
+Fixed
+- **Overcharge.** rc19 froze Android's battery state and never released it, so the phone kept showing "charging" after unplugging, the percentage stopped moving, and the limit could never fire. Charging decisions now read the kernel, never a value ACC wrote itself. Four independent guards, so no single mistake brings it back.
+- **AccA showing a different percentage from Android.** The state export was built in one scratch file shared by every writer, so the daemon and the app truncated each other and published broken JSON. Measured before: 13 of 40 reads malformed. After: 40 of 40 clean.
+- **Importing a config wiped every setting.** `acc -s <file>` handed the staging file to the rule editor, which used the same path as its own scratch and emptied it. A 389-line config came back as its rule lines, with a tick printed. Config edits now publish by atomic rename, and an empty import is refused instead of applied.
+- **Capacity Mask did nothing on Pixel and Tensor.** Those phones hand the limit to firmware and take a branch that skips the code applying the mask. Long-standing, not new.
+- **Daemon log grew without bound on the same phones.** It lives in RAM: 10.7 MB after 24 minutes on a Pixel 9a, never freed until reboot. Same build on a Mi A3 sat at 128 KB.
+- **Fast charge died at the cooldown level** on VOOC / SuperDart / HyperCharge phones. Toggling the switch ends the handshake and the charger drops to 500 mA until you replug. ACC now skips the cooldown cycle during a live fast-charge session, and says so once a day. Confirmed fixed by the reporter. Temperature limits are unaffected. Opt out: `/dev/.vr25/acc/.fcguard-off`.
+- **Two hazards inherited from before the fork.** A numeric but absurd `shutdown_temp` (like `9`) was accepted and powered the phone off at room temperature. The charging-current limit was released for a few seconds on every resume.
+- Removing ACC now hands Android's battery state back instead of leaving a fake percentage until reboot.
 
-The fix has four parts, so no single mistake can bring it back. The marker now lives inside the
-function that does the freezing, so every caller sets it rather than only the one we remembered.
-The daemon clears any freeze once at startup, which covers a phone upgrading from rc19 with a
-frozen state and no marker. While any freeze is in force, the battery percentage used for control
-decisions is read from the kernel instead of from a value we wrote ourselves. And if Android and
-the kernel ever disagree by more than 5 points, the kernel wins, so no freeze from any source can
-stop a pause. The rule behind all four: what you see may follow Android, what charges must follow
-the kernel.
+Added
+- Warning when something else keeps changing your charge limit. On Pixel, ACC, Adaptive Charging and Battery Defender all write the same node; two owners fighting collapses fast charging and wedges wireless. Turn off Adaptive Charging and let one thing own it.
+- Notice for Xiaomi owners whose current cap sits below what the fast-charge pump needs, with the command to clear it.
+- A timestamped ledger of every node write, so the next report of this kind is answered from evidence.
 
-Uninstalling now hands Android's battery state back. Removing rc19 while a mask or a cooldown
-freeze was in force left the phone showing a fake percentage until reboot.
-
-Fast charge no longer dies when the cooldown cycle runs. On phones whose charger negotiates a
-proprietary fast mode (VOOC, SuperDart, HyperCharge), that handshake does not survive the charging
-switch being toggled, and the charger drops to 500 mA USB until the cable is physically unplugged.
-So above the cooldown level the cycle was not slowing a fast charge down, it was ending it for the
-rest of the session. A Realme GT Neo 2 owner saw 4400 mA below the cooldown level and 500-600 mA
-stuck above it, with normal speed when ACC was off; that phone is confirmed fixed. ACC now skips
-the cooldown cycle while a fast-charge session is live and tells you once a day that it did.
-Temperature protection is unchanged: max_temp still pauses charging and shutdown_temp still fires.
-This only affects phones that expose a vendor fast-charge node and have cooldown turned on. To
-switch it off, create the file `/dev/.vr25/acc/.fcguard-off`.
-
-Two hazards inherited from before the fork, both found while auditing the above:
-
-- A numeric but absurd `shutdown_temp` was accepted as valid. A hand-edited or restored config
-  containing `9` powered the phone off at room temperature. Device-proven, now band-checked, and
-  the same class of problem with `shutdown_capacity` at a high battery level is checked too. Real
-  over-temperature and low-battery protection still fire.
-- The charging-current limit was released for a few seconds on every resume, because on a phone
-  whose charging switch is a current node, the switch's ON value is the uncapped default. The
-  limit is now re-applied immediately on resume. This is the "my 1000 mA limit is ignored when
-  charging resumes" report.
-
-Also new: a write ledger recording every node write with a timestamp, so the next report of this
-kind can be answered from evidence instead of guesswork, and a notice for Xiaomi owners whose
-current limit sits in the range that stops the fast-charge pump from engaging.
-
-**"AccA shows a different percentage from Android."** This one has a specific cause and it is
-fixed. AccA reads ACC's state export, and that export was built into a single scratch file shared
-by every writer. The daemon refreshes it on its own loop and every `acc --state` call refreshes it
-too, so an app polling while the daemon ticks meant two builds running at once, one truncating the
-other, and the half-written result being published as if it were complete. Measured on a Mi A3
-before the fix: 13 of 40 reads came back as malformed JSON, including 3 of 16 issued strictly one
-at a time, because the daemon alone is enough of a second writer. An app handed that either shows
-stale numbers or falls back to zero, which is exactly what people were seeing. After the fix, 40
-of 40 reads are well formed across serial, two-way and three-way overlap. The same shared-scratch
-mistake in the switch parser is fixed too.
-
-**Three things were silently dead on Pixel and Tensor phones.** Those devices hand the charge
-limit to the firmware, and that path returns early in the daemon's loop, skipping everything after
-it. Two of the casualties are fixed here:
-
-- The Capacity Mask did nothing at all. Turning it on stored correctly, reported correctly, and
-  had no effect whatsoever. It now applies on these phones like everywhere else.
-- The daemon trims its own log to stay under 256 KB, and the trim was in the skipped region. That
-  log lives in RAM. A Pixel 9a was measured at 10.7 MB after 24 minutes, roughly 450 KB a minute,
-  never released until reboot; the same build on a Mi A3 sat at 128 KB. The trim now runs on every
-  phone, at the same rate it always did on the others.
-
-Pausing on idle apps and on encore mode are also skipped on those phones. Restoring them means
-changing how charging is held on a whole device family, so it is not being guessed at in a release
-whose job is to undo damage. It is written up for the next one.
-
-Neither of these is new. Both trace back to the original native-limit work on the old 6.x line,
-long before this fork existed, so every Pixel and Tensor user has had them all along.
-
-One more for Pixel owners: ACC, Android's Adaptive Charging and Google's Battery Defender all
-write the same firmware limit. When two of them disagree, each correction re-triggers the charger
-state machine, and that is what collapses fast charging and wedges the wireless path. ACC now
-notices when something keeps undoing its limit and says so once, suggesting you turn Adaptive
-Charging off and let one thing own it. It is a message only; the limit is enforced either way.
+Verified on a Pixel 9a (firmware-limit path) and a Mi A3 (switch path): 44/44 and 31/33 checks, plus 12/12 endurance - the pause held 10 minutes with no overshoot, 6 of 6 pause/resume cycles, 3 of 3 temperature stops and releases. Every verdict read from the kernel.
 
 **v2025.5.18-6.5.1-rc19 (202505299)**
 
