@@ -322,6 +322,13 @@ idleThreshold=${idleThreshold:-10}
 _STI=\${_STI:-35}
 temp=$temp
 voltNow=$voltNow" > $TMPDIR/.batt-interface.sh
+# This is the only TRUNCATING write of the cache; sdp() and amp_recheck() only
+# append to it. All three are reached from inside accd alone - _INIT is set
+# nowhere but accd.sh, and sdp/amp_recheck are daemon-loop calls - so they are
+# one process and cannot race each other. The one window where two writers exist
+# is a daemon restart, where the outgoing daemon can still append while the
+# incoming one truncates; the cost there is a lost _DPOL or ampFactor_ line in a
+# cache that is re-derived on the next pass, so it is not worth a rename.
 
   _INIT=false
 

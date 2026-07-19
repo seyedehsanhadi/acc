@@ -60,6 +60,41 @@ Also new: a write ledger recording every node write with a timestamp, so the nex
 kind can be answered from evidence instead of guesswork, and a notice for Xiaomi owners whose
 current limit sits in the range that stops the fast-charge pump from engaging.
 
+**"AccA shows a different percentage from Android."** This one has a specific cause and it is
+fixed. AccA reads ACC's state export, and that export was built into a single scratch file shared
+by every writer. The daemon refreshes it on its own loop and every `acc --state` call refreshes it
+too, so an app polling while the daemon ticks meant two builds running at once, one truncating the
+other, and the half-written result being published as if it were complete. Measured on a Mi A3
+before the fix: 13 of 40 reads came back as malformed JSON, including 3 of 16 issued strictly one
+at a time, because the daemon alone is enough of a second writer. An app handed that either shows
+stale numbers or falls back to zero, which is exactly what people were seeing. After the fix, 40
+of 40 reads are well formed across serial, two-way and three-way overlap. The same shared-scratch
+mistake in the switch parser is fixed too.
+
+**Three things were silently dead on Pixel and Tensor phones.** Those devices hand the charge
+limit to the firmware, and that path returns early in the daemon's loop, skipping everything after
+it. Two of the casualties are fixed here:
+
+- The Capacity Mask did nothing at all. Turning it on stored correctly, reported correctly, and
+  had no effect whatsoever. It now applies on these phones like everywhere else.
+- The daemon trims its own log to stay under 256 KB, and the trim was in the skipped region. That
+  log lives in RAM. A Pixel 9a was measured at 10.7 MB after 24 minutes, roughly 450 KB a minute,
+  never released until reboot; the same build on a Mi A3 sat at 128 KB. The trim now runs on every
+  phone, at the same rate it always did on the others.
+
+Pausing on idle apps and on encore mode are also skipped on those phones. Restoring them means
+changing how charging is held on a whole device family, so it is not being guessed at in a release
+whose job is to undo damage. It is written up for the next one.
+
+Neither of these is new. Both trace back to the original native-limit work on the old 6.x line,
+long before this fork existed, so every Pixel and Tensor user has had them all along.
+
+One more for Pixel owners: ACC, Android's Adaptive Charging and Google's Battery Defender all
+write the same firmware limit. When two of them disagree, each correction re-triggers the charger
+state machine, and that is what collapses fast charging and wedges the wireless path. ACC now
+notices when something keeps undoing its limit and says so once, suggesting you turn Adaptive
+Charging off and let one thing own it. It is a message only; the limit is enforced either way.
+
 **v2025.5.18-6.5.1-rc19 (202505299)**
 
 Standby battery drain, deep-fixed. A field report of 7% overnight drain (about twice normal) checked out: the daemon was quietly burning about a quarter of a CPU core around the clock while doing nothing. Measured on a Mi A3 before the fix, sitting idle: about 30 dumpsys calls into Android per minute and 20+ process spawns per second, all night, with every feature at rest. Four sources, all fixed:

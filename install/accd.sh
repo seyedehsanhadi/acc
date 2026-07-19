@@ -255,6 +255,15 @@ if ! $_INIT; then
     # dsys_batt for EVERY set/unplug (mask, cooldown, charge-once), not the mask-only marker
     # -- on exit the daemon must never leave Android's battery state frozen.
     [ ! -f $TMPDIR/.dsys-override ] || { dsys_batt reset >/dev/null; rm -f $TMPDIR/.mask-on $TMPDIR/.mask-last $TMPDIR/.mask-n 2>/dev/null; } || :
+    # $TMPDIR/.config is written here AND by acc.sh's -t path, but the two can
+    # never be live together, so this does not need the per-process name that
+    # .state.json / .parse_switches / .tmp did. The -t path calls daemon_ctrl
+    # stop first, which sources release-lock.sh, and that BLOCKS on
+    # `timeout 10 flock 0` (and then a plain `flock 0`) until this daemon has
+    # released the lock. The lock is held for the daemon's whole lifetime, so it
+    # only comes free once this trap has finished and the process is gone. Even
+    # if that ordering were somehow broken, the -t path's own acquire-lock.sh
+    # uses `flock -n`, which fails outright rather than racing.
     grep -Ev '^$|^#' $config > $TMPDIR/.config
     config=$TMPDIR/.config
     applyOnPlug=(${applyOnPlug[*]-} ${applyOnBoot[*]-})
@@ -512,9 +521,6 @@ if ! $_INIT; then
     [ $_enc -ne 1 ] || pause_now
     set -u
 
-    # log buffer reset
-    [ $(du -k $log | cut -f 1) -lt 256 ] || : > $log
-
     $isCharging && return 0 || return 1
   }
 
@@ -558,6 +564,14 @@ if ! $_INIT; then
       write_state || :
       flight_rec || :
 
+      # Trim the daemon log. This used to live at the end of is_charging(), which
+      # meant it never ran on a native-firmware-limit phone: that branch continues
+      # before is_charging() is called. The daemon `exec >> $log 2>&1` for its whole
+      # life, so on Pixel/Tensor the log grew without bound in tmpfs - RAM that is
+      # never given back until reboot. Here it runs once per loop on every phone,
+      # which is exactly the cadence it had before for the generic path.
+      [ "$(du -k $log 2>/dev/null | cut -f 1)" -lt 256 ] 2>/dev/null || : > $log
+
       # rc24: shared plug-transition tracker. freshPlug is true on the loop where the
       # charger goes offline->online; it drives native_unlatch (Pixel) and generic_rearm
       # (everything else) so a real re-plug re-arms charging exactly once -- no sawtooth,
@@ -575,6 +589,16 @@ if ! $_INIT; then
         sync_native_limit
         native_unlatch || :
         native_verify_backstop || :
+        # The Capacity Mask has to run here too. It is a DISPLAY feature and has
+        # nothing to do with how charging is held, but it lives inside
+        # is_charging(), and this branch continues before is_charging() is ever
+        # called - so on every native-firmware-limit phone (Pixel / Tensor, via
+        # google,charger/charge_stop_level) enabling the mask did nothing at all,
+        # silently. Confirmed on a Pixel 9a: config read back as
+        # capacity_mask=true, acc -sp agreed, and the daemon never created
+        # .mask-n or .mask-on and never froze Android's level, while the same
+        # build masked correctly on a Mi A3 whose switch is not native.
+        mask_capacity
         _nap ${loopDelay[1]:-9}
         continue
       fi
@@ -603,6 +627,11 @@ if ! $_INIT; then
             config=$TMPDIR/.cfg
             prioritizeBattIdleMode=no
             cycle_switches_off
+            # Shared name with acc.sh's test_charging_switch_, and safe for the
+            # same reason as .config above: every CLI arm that writes .sw (-t,
+            # -e, -d) stops this daemon and takes the lock before it does, so a
+            # writer here and a writer there cannot exist at the same moment.
+            # enable_charging consumes and deletes it, which is the handoff.
             echo "chargingSwitch=(${chargingSwitch[@]-})" > $TMPDIR/.sw
             force_off)
             chDisabledByAcc=true
@@ -1039,7 +1068,25 @@ if ! $_INIT; then
     # redundant same-value pokes are skipped, so a healthy wired/wireless negotiation is never
     # disturbed. The values still change on a config edit, a thermal pause, or firmware drift.
     [ "$(cat $gcst 2>/dev/null)" = "$start" ] || { chmod 0644 $gcst 2>/dev/null || :; echo "$start" > $gcst 2>/dev/null || :; }
-    [ "$(cat $gcsl 2>/dev/null)" = "$stop"  ] || { chmod 0644 $gcsl 2>/dev/null || :; echo "$stop"  > $gcsl 2>/dev/null || :; }
+    if [ "$(cat $gcsl 2>/dev/null)" = "$stop" ]; then
+      _nlDrift=0
+    else
+      chmod 0644 $gcsl 2>/dev/null || :; echo "$stop" > $gcsl 2>/dev/null || :
+      # ACC is not the only thing that writes these nodes. Android's Adaptive
+      # Charging and Google's Battery Defender manage the same firmware limit,
+      # and when two owners disagree each correction re-triggers the
+      # google_charger state machine -- the very thing the idempotent write above
+      # exists to avoid (it collapses fast charge and wedges the wireless path).
+      # A one-off correction is normal: a config edit, a thermal pause, or the
+      # firmware settling. A sustained run of them means something else is
+      # actively fighting, and the user is the only one who can resolve that.
+      # Warning only; the limit itself is still enforced either way.
+      _nlDrift=$(( ${_nlDrift:-0} + 1 ))
+      if [ "${_nlDrift:-0}" -ge 20 ] 2>/dev/null; then
+        _nlDrift=0
+        warn_once_per nativedrift 21600 "ACC: something else keeps changing this phone's charge limit, and ACC keeps putting it back. That fight can break fast and wireless charging. Turn off Adaptive Charging (Settings > Battery > Charging optimisation > Standard) and let ACC own the limit." || :
+      fi
+    fi
   }
 
 
