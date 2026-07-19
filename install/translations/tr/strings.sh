@@ -318,7 +318,7 @@ listesine ekle
   15. Idle mod destekleniyor (--test)
   16. Şarj aktif etme işlemi başarısız (--test)
 
-  Loglar ("--log --export") çıkış kodları 1,2 ve 7'de otomatik olark yazdırılır
+  Loglar ("--log --export") çıkış kodları 7 ve 10'da otomatik olark yazdırılır
 
 
 Tavsiyeler

@@ -238,7 +238,7 @@ Exit-Codes:
     11. Strom (mA) außerhalb des Bereichs
     12. Initialisierung fehlgeschlagen
     13. Sperren von /dev/.vr25/acc/acc.lock fehlgeschlagen
-    Die Protokolle werden automatisch exportiert ("--log --export") bei den Exit-Codes 1, 2, 7 und 10.
+    Die Protokolle werden automatisch exportiert ("--log --export") bei den Exit-Codes 7 und 10.
 Tipps:
     Befehle können für eine erweiterte Funktionalität verkettet werden.
         z.B. 30 Minuten laden, Ladepause für 6 Stunden, auf 85% laden und den Daemon neu starten

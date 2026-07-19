@@ -213,6 +213,13 @@ Options
 
   -s|--set file   Get config from file (in "acc -s" format); the file's path must be absolute; partial config is supported
     e.g., acc -s /data/config
+    Note: this MERGES over the current config; settings absent from the file are kept.
+    For a clean restore, run "acc -s --reset" first.
+
+  -E|--export file   Write the current config to file (backup)
+    e.g.,
+      acc --export /sdcard/Download/acc-backup.txt   (back up)
+      acc -s /sdcard/Download/acc-backup.txt         (restore)
 
   -s|--set prop1=value "prop2=value1 value2"   Set [multiple] properties
     e.g.,
@@ -346,7 +353,7 @@ Exit Codes
   15. Idle mode is supported (--test)
   16. Failed to enable charging (--test)
 
-  Logs are exported automatically ("--log --export") on exit codes 1, 2 and 7.
+  Logs are exported automatically ("--log --export") on exit codes 7 and 10.
 
 
 Tips

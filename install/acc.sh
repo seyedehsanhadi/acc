@@ -208,7 +208,13 @@ exxit() {
   set +eux
   ! ${noEcho:-false} && ${verbose:-true} && echo
   [[ "$exitCode" = [05689] ]] || {
-    eq "$exitCode" "127|10" && logf --export
+    # Upstream wrote "[127]|10" -- a character class meaning 1, 2, 7 or 10 --
+    # and rc15 dropped the brackets, leaving the literal 127 and killing the
+    # auto-export almost entirely. Restoring the class verbatim is wrong now
+    # that a mistyped command exits 2: every typo would drop a tarball in
+    # Downloads, which is the exact confusion this was reported for. Export on
+    # the codes that mean charge control actually failed.
+    eq "$exitCode" "7|10" && logf --export
     echo
   }
   cd /
@@ -376,6 +382,19 @@ case "${1-}" in
   ;;
 
   [0-9]*)
+    # rc21 (A1): this pattern matches anything merely STARTING with a digit, so
+    # "12abc" arrived here as a capacity. write-config.sh then blanks it as
+    # non-numeric and ": ${pc:=75}" substitutes the default, so `acc 12abc`
+    # produced byte-identical output to `acc 75` and still printed the success
+    # tick. Reject a malformed capacity instead of silently guessing one.
+    # Digits and spaces only; "75", "75 70" and "3900" are unaffected.
+    case "$1${2+ $2}" in
+      *[!0-9\ ]*)
+        echo "Invalid capacity: $1${2+ $2}" >&2
+        echo "Expected 0-100 (percent) or 3001-5000 (mV), e.g. acc 75 70" >&2
+        exit 2
+      ;;
+    esac
     pause_capacity=$1
     resume_capacity=${2:-5000}
     . $execDir/write-config.sh
@@ -790,10 +809,34 @@ case "${1-}" in
     done
   ;;
 
-  *)
+  -E|--export)
+    [ -n "${2-}" ] || { echo "Usage: acc --export <file>"; exit 2; }
+    cat $config > "$2" 2>/dev/null \
+      && echo "✅ $2" \
+      || { echo "Could not write $2"; exit 1; }
+  ;;
+
+  # Line 346 shifts a leading config path away before this case runs, so */* is
+  # not normally reachable; it is kept so that any path-shaped argument which
+  # does reach here prints help rather than being called a typo.
+  -h|--help|help|*/*)
     . $execDir/print-help.sh
     shift
     print_help_ "$@"
+  ;;
+
+  # Anything else is a typo. rc20 and earlier printed help and still exited 0,
+  # so a front-end or macro could not tell a mistyped command from a successful
+  # one; that is how "acca config --export" looked like it had worked. The
+  # message goes to stderr because help floods stdout right after it.
+  *)
+    _bad=$1
+    echo "Unknown command: $_bad" >&2
+    . $execDir/print-help.sh
+    shift
+    print_help_ "$@"
+    echo "Unknown command: $_bad. Run 'acc --help' for the command list." >&2
+    exit 2
   ;;
 
 esac

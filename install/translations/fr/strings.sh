@@ -317,7 +317,7 @@ Codes de sortie
   15. Le mode de veille est supporté (--test)
   16. N'a pas pu activer le chargement (--test)
 
-  Les logs sont exportés automatiquement ("--log --export") lors des codes de sortie 1, 2 et 7.
+  Les logs sont exportés automatiquement ("--log --export") lors des codes de sortie 7 et 10.
 
 
 Astuces

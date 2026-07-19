@@ -92,6 +92,14 @@ fi
   [ $pc -gt 3000 ] && rc=$((pc - 150)) || rc=$((pc - 5))
 }
 
+# rc21 (A2): every rc derivation above ("rc=$((pc - 5))", "rc=$((pc - 150))")
+# runs AFTER the 0-100 / 3001-5000 range check, and its result is never
+# re-validated. A very low pause therefore produced a NEGATIVE resume that no
+# clamp caught -- `acc 0` wrote capacity=(0 101 -5 0 false). The daemon compares
+# level <= resume, and level is never negative, so such a config can never
+# resume. Floor the derived value; sc is already floored by its own guard below.
+[ $rc -ge 0 ] || rc=0
+
 # rc(6.4.1 / N5): shutdown_capacity must share pc/rc's unit domain. A leftover percent sc
 # (e.g. 5) in an mV config (pc>3000) means "shut down at 5 mV" -- never reached -- silently
 # disabling low-battery shutdown protection. Coerce into the active domain BEFORE the sc<rc

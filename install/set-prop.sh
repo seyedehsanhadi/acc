@@ -146,6 +146,15 @@ set_prop() {
         fi
         return 0
       else
+        # A path that does not exist is a typo, not a request to print the
+        # config. rc20 and earlier dumped the config and returned 0, so a
+        # mistyped restore looked exactly like a successful one.
+        case "${1-}" in
+          */*)
+            echo "No such config file: $1"
+            return 1
+          ;;
+        esac
         # print current config (full)
         . $execDir/print-config.sh | more
         return 0

@@ -8,6 +8,30 @@ Community fork of VR-25's ACC, maintained by seyedehsanhadi.
 
 Changes since the fork baseline (v2025.5.18-stable.6.5):
 
+**v2025.5.18-6.5.1-rc21 (202505301)**
+
+Two user reports turned into eight fixes. Nothing here changes how charging is controlled.
+
+Fixed
+- **A menu key could silently erase your charging switch.** In the switch selector, any key the menu did not recognise (including `z`, which exits every other ACC menu) reset your hand-picked switch to Automatic, said nothing, and reported success. Anyone who had chosen a switch manually could lose it by pressing the key ACC itself teaches. `z` now exits every menu, and an unrecognised key re-prompts instead of writing anything.
+- **A mistyped command reported success.** `acc --bogus` printed the help text and exited 0, so AccA, a macro, or a script could not tell a typo from a working command. Unknown commands now exit 2 and say what was not understood.
+- **A mistyped restore path looked like it worked.** `acc -s /wrong/path` printed your whole config and exited 0. It now reports "No such config file" and exits non-zero.
+- **`acc 12abc` silently became `acc 75`.** Any argument starting with a digit was accepted as a capacity; the non-numeric part was discarded and the default substituted, with a success tick. Malformed capacities are now rejected.
+- **`acc 0` wrote a negative resume level.** The resume value derived from a very low pause was never re-checked against the valid range. It is now floored at 0.
+- **Log auto-export had been dead since rc15.** A pattern edit turned the character class `[127]` into the literal `127`, so the automatic diagnostic bundle almost never fired. It now fires on the codes that mean charge control actually failed (7 and 10), and the documentation in all five languages matches the code again.
+
+Added
+- `acc --export <file>` writes your current config, and re-running it refreshes the file. Previously the only way to export was a side effect that silently refused to overwrite, so repeat backups went stale without warning.
+- Backup and restore are documented in `acc --help`, including that restore merges over your current settings rather than replacing them.
+
+Unchanged
+- Charge control, the daemon, AMPS and AccA compatibility. Every command AccA issues returns exactly what it returned in rc20.
+
+Note for scripts
+- Unknown commands now exit 2 instead of 0. Anything relying on ACC returning success for an unrecognised flag needs updating. `acc -L` was never a real command and is affected.
+
+---
+
 **v2025.5.18-6.5.1-rc20 (202505300)**
 
 rc19 could let a battery charge to 100% with the limit on. If you are on rc19, update.
