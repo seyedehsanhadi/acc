@@ -407,7 +407,16 @@ _se_native() {
 write_state() {
   ( set +eu
     local f="$TMPDIR/state.json"
-    local t="$TMPDIR/.state.json.tmp"
+    # PER-WRITER temp name. There is never only one writer: the daemon refreshes
+    # state on its loop, and every `acc --state` / `acca --state` call refreshes
+    # it too, so a front-end polling while the daemon ticks means two builds are
+    # in flight at once. With a single shared temp name the second writer
+    # truncates the first one's file mid-build, and the first one's `mv` then
+    # publishes a half-written body - observed as JSON with an empty ",," where
+    # the device object should be, or simply cut off with unbalanced braces.
+    # A name per process plus the existing atomic rename makes each writer's
+    # publish all-or-nothing.
+    local t="$TMPDIR/.state.json.$$.tmp"
     local lvl volt cur tmp status ts userLocked
     local ue ue_st ue_cur ue_cap ue_volt ue_temp
 
@@ -486,6 +495,8 @@ write_state() {
         "$(_se_esc "${chargingSwitch[*]-}")" "$userLocked" "$mclass"
       printf '}\n'
     } > "$t" 2>/dev/null && mv -f "$t" "$f" 2>/dev/null
+    # never leave a half-built temp behind if the build or the rename failed
+    rm -f "$t" 2>/dev/null || :
   ) 2>/dev/null || :
 }
 
