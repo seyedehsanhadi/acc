@@ -196,7 +196,15 @@ exxit() {
 
 parse_switches() {
 
-  local f=$TMPDIR/.parse_switches.tmp
+  # Per-process scratch name. A single shared path is the same defect that made
+  # write_state publish half-built JSON: a second caller truncates the first
+  # one's file mid-read and both get garbage. Only the deliberate -t scan
+  # reaches this, so overlap is far less likely than it was for state.json, but
+  # the cost of not sharing the name is nil.
+  # Deliberately no trap here: the -t path installs its own EXIT/INT/TERM/HUP
+  # trap (exxit) and setting one in this function would replace it, so the
+  # scanner would stop restoring the daemon and the charging switch.
+  local f=$TMPDIR/.parse_switches.$$.tmp
   local i=
   local n=
 
@@ -241,7 +249,9 @@ parse_switches() {
 
   done
 
-  rm $f
+  # -f so a run that never got as far as creating the file cannot abort the
+  # scan here under set -e
+  rm -f $f
 }
 
 
