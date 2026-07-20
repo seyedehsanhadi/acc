@@ -494,8 +494,17 @@ enable_charging() {
 
 
 # condensed "case...esac"
+# The PATTERN has to be eval'd: it is a glob alternation like --test*|-t*|-x and
+# a case arm cannot come from a quoted expansion. The VALUE never needed to be.
+# It used to be interpolated into the same string, so eval saw
+#     case "$(reboot)" in
+# and the shell ran the substitution. $1 here is the caller's first CLI argument
+# (acc.sh:322, 330, 663 all pass it), so `acc '$(cmd)'` executed cmd as root.
+# Staging the value in a variable and referencing it keeps the pattern eval'd
+# while the value goes through one ordinary expansion, which is never rescanned.
 eq() {
-  eval "case \"$1\" in
+  _eqv=$1
+  eval "case \"\$_eqv\" in
     $2) return 0;;
   esac"
   return 1

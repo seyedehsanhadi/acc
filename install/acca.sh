@@ -37,8 +37,11 @@ daemon_ctrl() {
 
 
 # condensed "case...esac"
+# Same fix as misc-functions.sh: the pattern must be eval'd, the value must not.
+# Interpolating $1 into the eval'd string meant `acca '$(cmd)'` ran cmd as root.
 eq() {
-  eval "case \"$1\" in
+  _eqv=$1
+  eval "case \"\$_eqv\" in
     $2) return 0;;
   esac"
   return 1

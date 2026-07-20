@@ -10,7 +10,10 @@ Changes since the fork baseline (v2025.5.18-stable.6.5):
 
 **v2025.5.18-6.5.1-rc21 (202505301)**
 
-Two user reports turned into eight fixes. Nothing here changes how charging is controlled.
+Two user reports turned into eight fixes, plus one found while stress-testing this release. Nothing here changes how charging is controlled.
+
+Security
+- **An argument could run commands as root.** `acc '$(some-command)'` executed it. The internal helper that matches an argument against a list of patterns built a shell `case` statement as text and evaluated it with your argument pasted in, so the shell performed the substitution. Your first argument passes through that helper three times on every single call, which means anything passing an unchecked string to `acc` or `acca` (a script, a macro, a front-end) could run it with full privileges. Found when a fuzz test rebooted the test phone twice. The pattern still has to be evaluated, but the value no longer is. Present in every earlier release, including rc20 and upstream.
 
 Fixed
 - **A menu key could silently erase your charging switch.** In the switch selector, any key the menu did not recognise (including `z`, which exits every other ACC menu) reset your hand-picked switch to Automatic, said nothing, and reported success. Anyone who had chosen a switch manually could lose it by pressing the key ACC itself teaches. `z` now exits every menu, and an unrecognised key re-prompts instead of writing anything.
