@@ -130,13 +130,23 @@ fi
 : ${rt:=40}
 : ${ct:=45}
 
-# resume_temp must sit below max_temp; an at/above value collapses to a minimal 1 C swing.
-# A resume set MORE than 10 C below max is capped to a 10 C hysteresis (a lower resume could
-# never be reached in a warm room -> charging stuck off), NOT crushed to mt-1 as the old
-# combined guard did -- that 1 C swing rapid-toggled AND cascaded into cooldown_temp, forcing
-# the band rebuild below to discard the user's cooldown_temp as well.
+# resume_temp must sit below max_temp; an at/above value collapses the hysteresis
+# to a minimal 1 C swing that rapid-toggles, so force it down. This is a real
+# invariant (resume-above-pause makes no physical sense) and stays.
 [ $rt -lt $mt ] 2>/dev/null || rt=$((mt - 1))
-[ $((mt - rt)) -le 10 ] 2>/dev/null || rt=$((mt - 10))
+# A resume MORE than 10 C below max used to be capped to exactly mt-10. That
+# discarded a legitimate choice: a wide hysteresis (pause at max, resume only
+# after the cell cools a lot) is a valid preference, not a fault, and the daemon
+# already honours a wide gap from a hand-edited config untouched -- so the setter
+# clamping it was pure normalisation dressed as safety, and it silently
+# overwrote what the user asked for (max_temp=55 resume_temp=40 became 45). Honour
+# any resume below max. The one real hazard the old cap guarded against is a
+# resume so LOW the battery can never cool to it in normal use, which would leave
+# charging stuck off after a single thermal pause; guard THAT directly with a
+# reachability floor, and only a sub-floor value is rebuilt to the default 10 C
+# gap. 15 C is a temperature a cell reaches in an ordinary cool room; below it,
+# reachability is doubtful.
+[ $rt -ge 15 ] 2>/dev/null || rt=$((mt - 10))
 
 # cooldown_temp must stay below max_temp -- if they are equal, the cooldown cycle enters and
 # immediately breaks at max_temp, so it never actually throttles. Keep a gap below max_temp,
