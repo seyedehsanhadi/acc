@@ -736,19 +736,54 @@ if ! $_INIT; then
             disable_charging || :
             sleep ${cooldownRatio[1]:-${loopDelay[0]}}
             enable_charging
-            # rc20 CRITICAL: un-freeze for the CHARGING half of every cooldown cycle. The
-            # `set ac 1` above is cosmetic (it stops the notification flickering while the
+            # The `set ac 1` above is cosmetic (it stops the notification flickering while the
             # switch is toggled) but it also stops Android's battery updates, and a long
-            # cooldown on a hot phone never leaves this loop -- so the level stayed frozen for
-            # the whole cooling period: the reading users saw stuck, and "charging" still shown
-            # after unplugging. Releasing it here keeps the anti-flicker benefit during the
-            # pause half while the level still advances every cycle.
+            # cooldown on a hot phone never leaves this loop -- so before rc20 the level stayed
+            # frozen for the whole cooling period: the reading users saw stuck, and "charging"
+            # still shown after unplugging.
+            #
+            # rc20 fixed that by RESETTING the override here, every cycle. That worked, but it
+            # meant one freeze and one un-freeze per cycle: BatteryService flipped in and out of
+            # override mode continuously. Measured on a Mi A3 at cooldownRatio 5/5: 19 override
+            # transitions in 120s.
+            #
+            # The freeze does two jobs at once -- hold the plug state (wanted, so the notification
+            # does not flicker while the switch toggles) and, as a side effect, hold the level
+            # (not wanted). Dropping the override to let the level move is what caused the churn,
+            # and there is no way to both release it every cycle AND avoid the transition. So keep
+            # the override and refresh what it DISPLAYS instead. batt_cap is honest here: under
+            # .dsys-override it reads the kernel node directly (batt-interface.sh:364), so this
+            # can never re-assert its own stale value in a loop, and the limit still reads the
+            # kernel regardless of what the status bar shows -- a lingering override has no safety
+            # impact, only a cosmetic one. The numeric guard matters because batt_cap coerces an
+            # unreadable result to 100 as a fail-safe, and publishing 100 would be a lie.
+            #
+            # Refresh TWICE across the charge half -- once now, once at its midpoint -- so the
+            # displayed level is never more than half a charge-half stale. The kernel read is a
+            # builtin (no fork) under an override, so the extra call is nearly free.
+            #
             # Only when the Capacity Mask is OFF: with the mask on, that override belongs to
-            # mask_capacity (it is the whole feature), and releasing it here would wipe the
-            # mask a moment after it was applied -- device-caught: the mask never survived a
-            # loop. With the mask on, the mask's own re-assert keeps the plug state correct.
-            ${capacity[4]:-false} || dsys_batt reset >/dev/null 2>&1 || :
-            sleep ${cooldownRatio[0]:-${loopDelay[0]}}
+            # mask_capacity (it is the whole feature), and touching it here would wipe the mask a
+            # moment after it was applied -- device-caught: the mask never survived a loop.
+            _cd_refresh() {
+              ${capacity[4]:-false} && return 0
+              _cdLvl=$(batt_cap)
+              case ${_cdLvl:-x} in
+                ''|*[!0-9]*) ;;
+                *) dsys_batt set level $_cdLvl >/dev/null 2>&1 || :;;
+              esac
+              return 0
+            }
+            _cd_refresh
+            _cdHalf=${cooldownRatio[0]:-${loopDelay[0]}}
+            case $_cdHalf in
+              ''|*[!0-9]*) sleep ${loopDelay[0]};;
+              *) if [ $_cdHalf -ge 4 ]; then
+                   sleep $(( _cdHalf / 2 )); _cd_refresh; sleep $(( _cdHalf - _cdHalf / 2 ))
+                 else
+                   sleep $_cdHalf
+                 fi;;
+            esac
           else
             (set_ch_curr ${cooldownCurrent:--} || :)
             sleep ${cooldownRatio[1]:-${loopDelay[0]}}
@@ -761,13 +796,19 @@ if ! $_INIT; then
           fi
         done
 
-        # rc20 CRITICAL: the cooldown cycle above calls `dsys_batt set ac 1` to keep Android
-        # showing "charging" while it toggles the switch, which stops Android's battery updates.
-        # The loop-top cleanup cannot run while we are inside that while-loop, so un-freeze here,
-        # the moment cooling ends. Without this the level stayed frozen after every cooldown --
-        # the reading users saw stuck, "charging" after unplug, and (before the batt_cap override
-        # rule) a limit that could never fire. No-op when nothing is frozen, and skipped when
-        # the Capacity Mask owns the override (see the in-cycle release above).
+        # CRITICAL, and now the ONLY un-freeze: the cooldown cycle calls `dsys_batt set ac 1`
+        # to keep Android showing "charging" while it toggles the switch, which stops Android's
+        # battery updates. The cycle above no longer resets the override (it refreshes the
+        # displayed level inside it instead), so this line alone is what hands Android's battery
+        # state back when cooling ends. The loop-top cleanup cannot run while we are inside that
+        # while-loop, so it has to happen here.
+        #
+        # Do not remove or make conditional. Upstream has no reset here at all, which is why an
+        # upstream cooldown leaves the state frozen until the daemon exits: level stuck,
+        # "charging" after unplug, and (before the batt_cap override rule) a limit that could
+        # never fire. That is the rc19 report.
+        #
+        # No-op when nothing is frozen, and skipped when the Capacity Mask owns the override.
         ${capacity[4]:-false} || [ ! -f $TMPDIR/.dsys-override ] || dsys_batt reset >/dev/null 2>&1 || :
 
         cooldown=false
