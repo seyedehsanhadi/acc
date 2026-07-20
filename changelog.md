@@ -10,7 +10,7 @@ Changes since the fork baseline (v2025.5.18-stable.6.5):
 
 **v2025.5.18-6.5.1-rc21 (202505301)**
 
-Two user reports turned into eight fixes, plus one found while stress-testing this release. Nothing here changes how charging is controlled.
+User reports and a deep stress-test pass. The pause and shutdown logic that decides when to stop charging is unchanged; the fixes below sit around it.
 
 Security
 - **An argument could run commands as root.** `acc '$(some-command)'` executed it. The internal helper that matches an argument against a list of patterns built a shell `case` statement as text and evaluated it with your argument pasted in, so the shell performed the substitution. Your first argument passes through that helper three times on every single call, which means anything passing an unchecked string to `acc` or `acca` (a script, a macro, a front-end) could run it with full privileges. Found when a fuzz test rebooted the test phone twice. The pattern still has to be evaluated, but the value no longer is. Present in every earlier release, including rc20 and upstream.
@@ -22,6 +22,9 @@ Fixed
 - **`acc 12abc` silently became `acc 75`.** Any argument starting with a digit was accepted as a capacity; the non-numeric part was discarded and the default substituted, with a success tick. Malformed capacities are now rejected.
 - **`acc 0` wrote a negative resume level.** The resume value derived from a very low pause was never re-checked against the valid range. It is now floored at 0.
 - **Log auto-export had been dead since rc15.** A pattern edit turned the character class `[127]` into the literal `127`, so the automatic diagnostic bundle almost never fired. It now fires on the codes that mean charge control actually failed (7 and 10), and the documentation in all five languages matches the code again.
+- **A resume temperature set well below the max was quietly overwritten.** If you set `max_temp=55` and `resume_temp=40`, ACC stored 45 instead. A wide gap (pause when hot, resume only after the cell cools a lot) is a valid choice, and the daemon already ran a wide gap from a hand-edited config, so the editor was second-guessing you for no reason. It now keeps your value, holding only the two things that actually matter: resume stays below max, and a value so low the battery could never cool to it (under 15C) is still rebuilt so charging can't stick off.
+- **ACC could rewrite a value the phone kept refusing, forever.** On phones where the charger's own negotiation owns the input-current nodes, a cap above the negotiated current is reverted the instant ACC writes it, and ACC rewrote it every few seconds without end (measured: 137 writes in two minutes). It now backs off a node that rejects the same value five times, retries only occasionally in case the charger frees up, and tells you once that the charger's limit is the one in force. The battery-side cap, which the hardware does accept, is applied exactly as before.
+- **Cooldown made the battery percentage flicker.** While the cooldown cycle held the phone as "charging" to stop the notification blinking, it dropped and re-took that override every cycle, which flipped Android's battery service in and out of override mode (measured 19 times in two minutes at an aggressive setting). It now keeps the override and refreshes the reading inside it, so the percentage stays live with no flicker, and hands the state back the moment cooling ends.
 
 Removed
 - **The Xiaomi charge-pump warning, and the opt-in current veto behind it.** Both rested on a single premise: that a max charging current between 3000 and 5499 mA blocks a phone's charge pump. That premise had one source, a "the original ACC is faster" report, and that report turned out to have nothing to do with the setting. The logs showed first a 5V/1.6A charger, and later ACC writing 500 mA to the phone from a wrongly recorded default. The phone in question has no charge pump at all, so the value it was being warned about was close to its ceiling. Nobody has ever observed the behaviour this guarded against, and it told at least one person their correct setting was wrong. The fast-charge cooldown guard is untouched and stays.
@@ -31,7 +34,7 @@ Added
 - Backup and restore are documented in `acc --help`, including that restore merges over your current settings rather than replacing them.
 
 Unchanged
-- Charge control, the daemon, AMPS and AccA compatibility. Every command AccA issues returns exactly what it returned in rc20.
+- The pause/resume/shutdown decision logic, the charging switch, AMPS and AccA compatibility. The charge-current backoff and the cooldown display fix sit alongside that logic without changing when charging stops, and every command AccA issues returns exactly what it returned in rc20.
 
 Note for scripts
 - Unknown commands now exit 2 instead of 0. Anything relying on ACC returning success for an unrecognised flag needs updating. `acc -L` was never a real command and is affected.
