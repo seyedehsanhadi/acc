@@ -39,6 +39,7 @@ apply_on_plug() {
   local value=
   local default=
   local arg=${1:-value}
+  local _rk= _rv= _rc=
 
   for entry in ${applyOnPlug[@]-} ${maxChargingVoltage[@]-} \
     ${maxChargingCurrent[@]:-$([ .$arg != .default ] || cat $TMPDIR/ch-curr-ctrl-files 2>/dev/null || :)}
@@ -48,12 +49,62 @@ apply_on_plug() {
     file=${1-}
     value=${2-}
     default=${3:-${2-}}
+
+    # rc21 bug 2: back off a node the firmware will not let hold its value. Some
+    # control files are owned by charger/USB negotiation (usb/current_max and the
+    # other input-current nodes): a write above the negotiated source current is
+    # reverted instantly, and the daemon otherwise rewrote it EVERY tick forever
+    # - measured on a Mi A3 as ~105 futile writes in 90s, and the root of the
+    # Xiaomi "ACC keeps writing a value the phone won't take" report. Once a node
+    # has rejected the SAME target 5 times, skip it, retrying only every 8th tick
+    # so a charger that later frees up is still picked up. Guards:
+    #  - APPLY only (arg=value). A skipped RESTORE would strand a node capped
+    #    ("the cap won't clear" field reports), so a clear is never backed off.
+    #  - never during a switch test/scan (exitCode_ set) - that path must write.
+    #  - the charging SWITCH is enforced elsewhere and is untouched here, so this
+    #    can never weaken the pause/overcharge guard; the worst case is a current
+    #    cap that leaks high on one node it could not have held anyway.
+    if [ "$arg" = value ] && [ -z "${exitCode_-}" ]; then
+      _rk=$TMPDIR/.mccrej-${file//\//_}
+      read -r _rv _rc < "$_rk" 2>/dev/null || { _rv=; _rc=0; }
+      case ${_rc:-0} in ''|*[!0-9]*) _rc=0;; esac
+      [ "$_rv" = "$value" ] && [ $_rc -ge 5 ] && [ $((_rc % 8)) -ne 0 ] && continue
+    fi
+
     set +e
     write \$$arg $file 0 &
     set -e
   done
 
   wait
+
+  # rc21 bug 2: a restore clears all reject state so the next cap starts fresh.
+  [ "$arg" = value ] || { rm -f $TMPDIR/.mccrej-* 2>/dev/null || :; return 0; }
+
+  # rc21 bug 2 bookkeeping: after the writes settle, learn which mcc nodes held.
+  # A node that reverted grows its per-target reject count (feeding the skip
+  # above); one that holds, or whose target changed, resets to zero. Cheap (one
+  # cat per node) and only while a cap is applied. exitCode_ set = switch test,
+  # skip. warn once (daemon only) so the user learns their cap is hardware-bound.
+  [ -z "${exitCode_-}" ] || return 0
+  for entry in ${maxChargingCurrent[@]-}; do
+    set -- ${entry//::/ }
+    [ -f ${1-//} ] || continue
+    file=${1-}
+    value=${2-}
+    _rk=$TMPDIR/.mccrej-${file//\//_}
+    if [ "$(cat "$file" 2>/dev/null)" = "$value" ]; then
+      rm -f "$_rk" 2>/dev/null || :
+    else
+      read -r _rv _rc < "$_rk" 2>/dev/null || { _rv=; _rc=0; }
+      case ${_rc:-0} in ''|*[!0-9]*) _rc=0;; esac
+      [ "$_rv" = "$value" ] || _rc=0
+      _rc=$((_rc + 1))
+      echo "$value $_rc" > "$_rk" 2>/dev/null || :
+      [ $_rc -eq 5 ] && ${isAccd:-false} && command -v warn_once_per >/dev/null 2>&1 \
+        && warn_once_per mccreject-${file##*/} 21600 "ACC: this phone's firmware will not let ${file##*/} hold ${value}; the charger's own negotiated limit wins, so charging current stays at the hardware maximum." || :
+    fi
+  done
 }
 
 
