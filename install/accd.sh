@@ -367,36 +367,20 @@ if ! $_INIT; then
     case "${capacity[2]-}" in ''|*[!0-9]*) capacity[2]=70;; esac
     case "${capacity[3]-}" in ''|*[!0-9]*) capacity[3]=80;; esac
 
-    # rc20-alpha4: pump-phone mcc VETO. On phones whose fast charge runs through a charge
-    # pump (Xiaomi HyperCharge tiers via quick_charge_type), a max-charging-current below the
-    # pump's draw (~6A) cannot do what it promises: the firmware refuses pump mode outright
-    # and the phone sits on the ~2A buck path - the user asked for 4450mA and received ~2000.
-    # The install-time migration clears a saved cap once, but AccA (a profile, a schedule, an
-    # old habit) can re-inject it any time - so the daemon now refuses to APPLY such a cap at
-    # all: the config keeps the user's value untouched, the shell array is emptied for this
-    # loop (both apply sites - set_ch_curr and apply_on_plug - see an empty list, and the
-    # not-charging branch restores charger defaults), and a once-daily notice names it.
-    # Field case: Redmi Note 9S, "the original ACC is faster" - the only difference was this
-    # cap. VETO ZONE is 3000-5499 ONLY: a low cap (say 500-2500mA, deliberate gentle or
-    # overnight charging) is honestly enforceable through the buck path and stays fully
-    # respected, and at or above 5500 the pump itself can satisfy the limit. Only the dead
-    # zone - above what the buck delivers, below what the pump needs - turns the setting into
-    # a lie (ask 4450, receive ~2000). Override for people who accept the buck path anyway:
-    # create $TMPDIR/.pumpcap-enforce. (.pumpwarn-force is the bench hook for phones without
-    # the node.)
-    case "${maxChargingCurrent[0]-}" in
-      ''|*[!0-9]*) :;;
-      *) if [ "${maxChargingCurrent[0]}" -ge 3000 ] 2>/dev/null && [ "${maxChargingCurrent[0]}" -lt 5500 ] 2>/dev/null \
-          && { [[ " ${_fcNodes:-} " = *quick_charge_type* ]] || [ -f $TMPDIR/.pumpwarn-force ]; }; then
-          # TELL the user either way: this is information, it changes nothing.
-          warn_once_per pumpcap 86400 "ACC: your max charging current (${maxChargingCurrent[0]} mA) is below what this phone's fast-charge pump needs, so the phone falls back to slow charging instead of honouring it. Clear it with: acc -s max_charging_current="
-          # ACTING on it (refusing to apply the cap) overrides what the user asked for, so it is
-          # OPT-IN only: create $TMPDIR/.pumpcap-veto to enable. Default behaviour is unchanged
-          # from rc19, which keeps this release attributable - if something regresses on rc20 it
-          # is the freeze fix, not a new policy nobody asked for.
-          [ ! -f $TMPDIR/.pumpcap-veto ] || maxChargingCurrent=()
-        fi;;
-    esac
+    # rc21: the rc20-alpha4 pump-cap warning and its opt-in veto were REMOVED.
+    # They rested on one premise - that a max_charging_current of 3000-5499 mA
+    # blocks a phone's charge pump and drops it to the buck path - and that
+    # premise had exactly one source: a "the original ACC is faster" report from
+    # a Redmi Note 9S. That report is now fully explained and the cap was never
+    # the cause. Its logs show first a 5V/1.6A USB_DCP brick (8W into an 18W
+    # phone, so no build could fast charge), and later ACC writing
+    # constant_charge_current <- 500000 from a wrongly captured "default". The
+    # Note 9S has no charge pump at all, so 4350 mA is near its ceiling, not
+    # below a pump's draw. Nobody has ever observed the phenomenon this guarded
+    # against, and the check told that same user his correct setting was wrong.
+    # An unverified heuristic that misinforms people about their own hardware is
+    # worse than no heuristic. The fast-charge cooldown guard (fast_session) is
+    # unaffected and stays: it has two independent field confirmations.
 
     # shutdown if battery temp >= shutdown_temp
     # Coerce a garbage/empty shutdown-temp so a hand-edited / partially-migrated config cannot
@@ -436,8 +420,6 @@ if ! $_INIT; then
           && { [ -z "${maxChargingCurrent[1]-}" ] || [[ "${maxChargingCurrent[1]-}" = -* ]]; } \
           && grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null
         then
-          # (alpha4: the pump-cap case is handled by the loop-top VETO - a sub-pump mcc on a
-          # pump phone never reaches this apply; see the rc20-alpha4 block near the loop head.)
           set_ch_curr ${maxChargingCurrent[0]} || :
           . $execDir/write-config.sh
         fi

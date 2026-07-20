@@ -20,6 +20,9 @@ Fixed
 - **`acc 0` wrote a negative resume level.** The resume value derived from a very low pause was never re-checked against the valid range. It is now floored at 0.
 - **Log auto-export had been dead since rc15.** A pattern edit turned the character class `[127]` into the literal `127`, so the automatic diagnostic bundle almost never fired. It now fires on the codes that mean charge control actually failed (7 and 10), and the documentation in all five languages matches the code again.
 
+Removed
+- **The Xiaomi charge-pump warning, and the opt-in current veto behind it.** Both rested on a single premise: that a max charging current between 3000 and 5499 mA blocks a phone's charge pump. That premise had one source, a "the original ACC is faster" report, and that report turned out to have nothing to do with the setting. The logs showed first a 5V/1.6A charger, and later ACC writing 500 mA to the phone from a wrongly recorded default. The phone in question has no charge pump at all, so the value it was being warned about was close to its ceiling. Nobody has ever observed the behaviour this guarded against, and it told at least one person their correct setting was wrong. The fast-charge cooldown guard is untouched and stays.
+
 Added
 - `acc --export <file>` writes your current config, and re-running it refreshes the file. Previously the only way to export was a side effect that silently refused to overwrite, so repeat backups went stale without warning.
 - Backup and restore are documented in `acc --help`, including that restore merges over your current settings rather than replacing them.
