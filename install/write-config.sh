@@ -245,6 +245,17 @@ esac
 rcp=$(printf %s "$rcp" | sed "s/'/'\\\\''/g")
 bso=$(printf %s "$bso" | sed "s/'/'\\\\''/g")
 
+# rc22: publish through a PER-PROCESS temp, not a shared $config.tmp. Under
+# concurrent writers (many `acca -s` at once) the shared name raced: writer A's
+# `> $config.tmp` truncated while writer B was mid-write, then B appended over
+# A's remnant and mv'd the mix - a malformed config (Pixel 9a: 1 of 5 rounds of
+# 10 concurrent writers). The `acca -s` flock is only best-effort (flock -w 5,
+# and skipped entirely when flock is absent), so it cannot be relied on to
+# serialise. A per-process name cannot collide, so each writer builds its own
+# file and the mv is a clean last-writer-wins - correct concurrent semantics and
+# never a corrupt config, lock or no lock. Same pattern edit() already uses.
+_ct=$config.$$.tmp
+
 echo "configVerCode=$(cat $TMPDIR/.config-ver)
 
 allowIdleAbovePcap=${aiapc:-true}
@@ -278,14 +289,16 @@ maxChargingCurrent=($mcc)
 
 maxChargingVoltage=($mcv)
 
-runCmdOnPause='$rcp'" > $config.tmp
+runCmdOnPause='$rcp'" > $_ct
 
 
-cat $TMPDIR/.scripts $TMPDIR/.config-help >> $config.tmp
+cat $TMPDIR/.scripts $TMPDIR/.config-help >> $_ct
 # rc16+: write to a temp then ATOMICALLY rename, so the daemon (which re-reads config.txt
 # every loop) never sees a half-written file, and a failed/partial write (disk full,
 # permission loss) leaves the previous config intact instead of truncating it.
-mv -f $config.tmp $config 2>/dev/null || rm -f $config.tmp 2>/dev/null
+# rc22: the temp is per-process ($config.$$.tmp), so concurrent writers cannot
+# corrupt each other's file - see the _ct note above.
+mv -f $_ct $config 2>/dev/null || rm -f $_ct 2>/dev/null
 rm $TMPDIR/.scripts
 # rc19 (standby): nudge the daemon's wake fifo so a settings change applies within ~1s even
 # mid-nap. The nap's mtime watch has 1-second granularity and misses an edit landing in the
