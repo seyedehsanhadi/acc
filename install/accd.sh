@@ -1256,9 +1256,41 @@ if ! $_INIT; then
   }
 
 
+  # rc21: defensive config load. AccA and `acc -s` publish config.txt atomically,
+  # but a TERMINAL user or ANOTHER APP can write it non-atomically - `echo > `,
+  # `sed -i`, or a write killed half-way - and leave it TRUNCATED at the instant
+  # the daemon sources it. A truncated file is a shell syntax error: a plain
+  # `. $config` then either aborts the daemon (device-proven: sustained external
+  # writes killed it) or skips a loop's enforcement. Never trust the raw file
+  # blindly: source with errors suppressed so a broken file can never abort us,
+  # then require a usable capacity array (>=4 fields). If it is missing - a
+  # partial/truncated read - fall back to the last KNOWN-GOOD config so
+  # enforcement always runs on a complete, consistent config and the limit is
+  # never dropped. The good copy is refreshed only when capacity actually changes,
+  # so a steady-state loop does no extra work (no per-loop fork; matters for
+  # standby). Values that are merely out of range are still coerced by the inline
+  # guards elsewhere; this guards the STRUCTURE of the file, not the values.
+  _srccfg() {
+    . $config 2>/dev/null || :
+    # a usable capacity array has >=4 space-joined fields (shutdown cooldown
+    # resume pause [mask]); a truncated read leaves it short or unset. Tested with
+    # a case-glob, not `set --`, so the caller's positional params are untouched.
+    case "${capacity[*]-}" in
+      *' '*' '*' '*)
+        if [ "${capacity[*]}" != "${_cfggood-}" ]; then
+          cat $config > $dataDir/.config-good 2>/dev/null || :
+          _cfggood="${capacity[*]}"
+        fi
+      ;;
+      *)
+        [ -f $dataDir/.config-good ] && { . $dataDir/.config-good 2>/dev/null || :; }
+      ;;
+    esac
+  }
+
   set_dp() {
     local curr= i= pos=0 neg=0 _force_relatch=0 _c0= _c1=
-    . $config
+    _srccfg
     # skip if the status workaround is off or there is no usable current sensor
     { $battStatusWorkaround && [ $currFile != $TMPDIR/.dummy-mcc ]; } || return 0
     # rc6 (L1): latch the discharge polarity ONLY from a CONFIRMED "Charging" status -- that
@@ -1482,7 +1514,7 @@ if ! $_INIT; then
 
   misc_stuff "${1-}"
   . $execDir/oem-custom.sh
-  . $config
+  . $config 2>/dev/null || :   # rc21: never abort init on a broken external write (values coerced below)
   currentWorkaround0=$currentWorkaround
 
   # rc20: NATIVE Pixel/Tensor firmware charge limit. When google,charger exposes the
