@@ -69,25 +69,19 @@ magisk_busybox="$(ls /data/adb/*/bin/busybox /data/adb/magisk/busybox 2>/dev/nul
   for f in $bin_dir/busybox $magisk_busybox /system/*bin/busybox*; do
     [ -x $f ] && eval $f --install -s $busybox_dir/ && break || :
   done
-
-  # Self-healing fallbacks: many install failures (e.g. issues #215 #216 #222 #223
-  # #228 #247) are just "busybox not found" on roots/ROMs that stash it elsewhere
-  # (KernelSU, APatch, MIUI, old Android) or whose `--install -s` symlinks are not
-  # honoured under /dev. Only if the quick path above produced no usable applet do
-  # we cast a much wider net before giving up. Everything here is additive: it never
-  # runs when the original loop already succeeded.
+  # Self-healing fallbacks (kept in sync with install.sh): on roots/ROMs that stash
+  # busybox elsewhere (KernelSU, APatch, MIUI, old Android) or where `--install -s`
+  # symlinks into /dev are not honoured, cast a wider net before giving up. Additive:
+  # only runs when the quick path above produced no usable applet.
   [ -x $busybox_dir/ls ] || {
-
-    # try `--install -s` (symlinks), then `--install` (hardlinks/copies, for setups
-    # where symlinks into /dev fail), then -- last resort -- manually symlink the
-    # applets the binary reports, for multicall binaries lacking a working --install.
+    # `--install -s` (symlinks) -> `--install` (hardlinks/copies) -> manual applet
+    # symlinks from `--list` (covers busybox AND toybox multicall binaries).
     _bb_try() {
       [ -x "$1" ] || return 1
       eval "$1" --install -s $busybox_dir/ 2>/dev/null || :
       [ -x $busybox_dir/ls ] && return 0
       eval "$1" --install $busybox_dir/ 2>/dev/null || :
       [ -x $busybox_dir/ls ] && return 0
-      # manual applet linking (works for busybox AND toybox multicall binaries)
       for _ap in $("$1" --list 2>/dev/null); do
         ln -sf "$1" "$busybox_dir/$_ap" 2>/dev/null || :
       done
@@ -95,9 +89,6 @@ magisk_busybox="$(ls /data/adb/*/bin/busybox /data/adb/magisk/busybox 2>/dev/nul
       [ -x $busybox_dir/ls ] && return 0
       return 1
     }
-
-    # Widest candidate set, most-trusted first. Globs that match nothing simply
-    # expand to a non-existent path and are skipped by the -x test in _bb_try.
     for f in \
       $bin_dir/busybox \
       /data/adb/magisk/busybox \
@@ -117,16 +108,21 @@ magisk_busybox="$(ls /data/adb/*/bin/busybox /data/adb/magisk/busybox 2>/dev/nul
     ; do
       _bb_try "$f" && break || :
     done
-    unset _bb_try
+    # -f: _bb_try is a FUNCTION. Plain `unset` clears a VARIABLE of that name, which never
+    # existed, so the helper stayed defined for everything that ran afterwards. This block is
+    # the canonical copy: build.sh syncs it into install.sh, customize.sh, uninstall.sh and
+    # both online installers, so it has to be fixed here, not in the generated copies.
+    unset -f _bb_try 2>/dev/null || unset _bb_try 2>/dev/null || :
   }
-
   [ -x $busybox_dir/ls ] || {
     echo "ERROR: a usable busybox/toybox could not be found or installed."
     echo "Tried $bin_dir/, Magisk/KernelSU/APatch, and /system. Install busybox"
-    echo "(or place a static busybox binary at $bin_dir/busybox) and retry."
-    echo "Details: $data_dir/logs/install.log"
+    echo "(or place a static busybox binary at $bin_dir/busybox)."
     echo
-    exit 3
+    # BB_OPTIONAL: callers that only need /system builtins (the uninstaller: rm/echo/cat exist
+    # everywhere, even in a bare recovery with no busybox) set BB_OPTIONAL=true and continue instead
+    # of aborting. The daemon/installer leave it unset, so busybox stays mandatory for them.
+    ${BB_OPTIONAL:-false} && echo "-> BB_OPTIONAL set: continuing with /system tools (some steps limited)" || exit 3
   }
 }
 case $PATH in
@@ -253,7 +249,28 @@ $KSU || { [ -d /data/adb/ksu ] || [ -d /data/adb/ap ] || [ -f /data/adb/ksu/bin/
 # that merely lacks the `acc` PATH shortcut still boots; a phone with a poisoned /system/bin does
 # not. This also makes a recovery flash safe, where no root manager exports its env at all.
 overlayMount=true
-if ! $KSU \
+# rc21: POSITIVE OverlayFS detection -- the physical cause of #197, immune to root-manager env AND to
+# Magisk residue. The heuristic below can be defeated: /data/adb/magisk survives switching to KSU/
+# APatch, and MAGISK_VER_CODE is exported (fixed values) by KSU and APatch too, so "just switched root
+# manager, ran the installer by hand before the ksu/ap dir exists" could wrongly enable the overlay and
+# brick. So first ask the kernel directly: is /system (or /system/bin) an `overlay` mount? On any
+# OverlayFS root (KSU/KSU-Next/SukiSU/APatch/magisk_overlayfs) it is; Magisk magic-mount shows tmpfs
+# (fstype `magisk`) there, never `overlay` (calibrated on a live Magisk device), so real Magisk is never
+# mis-flagged. If /proc/mounts is unreadable this simply falls through to the heuristic -- strictly
+# additive, never less safe. A false-positive only costs the `acc` PATH shortcut (phone still boots).
+# A system-as-root device (and some APatch setups) mounts the overlay at "/" rather than at
+# /system, so anchoring only on /system misses it and the detection silently degrades to the
+# rc20 heuristic. Match "/" as well. Read with the shell rather than awk: this runs before the
+# busybox PATH prepend is guaranteed, and a missing awk here would turn the probe into a silent
+# "not an overlay" on exactly the phones it was added to protect.
+systemIsOverlay=false
+while read -r _mdev _mpt _mfs _mrest; do
+  [ "$_mfs" = overlay ] || continue
+  case "$_mpt" in /system|/system/*|/) systemIsOverlay=true; break;; esac
+done < /proc/mounts 2>/dev/null
+if $systemIsOverlay; then
+  overlayMount=true
+elif ! $KSU \
   && [ -z "${APATCH:-}" ] \
   && [ ! -d /data/adb/ap ] \
   && [ ! -d /data/adb/ksu ] \
@@ -395,7 +412,36 @@ fi
 
 [ $installDir = /data/adb/$domain/$id ] || {
   mkdir -p /data/adb/$domain
-  ln -sf $installDir /data/adb/$domain/
+  # rc21: /data/adb/$domain/$id is the canonical path everything else resolves through --
+  # the root manager's bin symlinks, service.d, AccA and the user's own `acc` command. When
+  # /data/adb/modules did NOT exist at first install (common on KernelSU, where the dir only
+  # appears once a module is present) ACC installed straight into /data/adb/$domain/$id as a
+  # REAL directory. Every later upgrade then installs into /data/adb/modules/$id and tries to
+  # redirect -- but `ln -sf` cannot replace a real directory with a symlink. It prints
+  # "Is a directory", exits 0, and the phone silently keeps running the FIRST version ever
+  # installed. Device-proven: two rc21 installs on a KernelSU Pixel 6a, `acc -v` still rc20.
+  # Move the stale directory aside, link, verify the link actually resolves to this install,
+  # and on failure roll back and say so instead of exiting 0 on a broken upgrade.
+  if [ -e /data/adb/$domain/$id ] && [ ! -L /data/adb/$domain/$id ]; then
+    rm -rf /data/adb/$domain/$id.stale 2>/dev/null || :
+    mv -f /data/adb/$domain/$id /data/adb/$domain/$id.stale 2>/dev/null || :
+  fi
+  rm -f /data/adb/$domain/$id 2>/dev/null || :
+  ln -sf $installDir /data/adb/$domain/$id 2>/dev/null || :
+  # `-d $link/` follows the symlink, so a DANGLING link fails it. readlink -f alone does not:
+  # it happily resolves a link whose target does not exist, so on its own it would report
+  # success, delete the rollback copy and leave the phone with a broken path and no install.
+  if [ -L /data/adb/$domain/$id ] && [ -d /data/adb/$domain/$id/ ] \
+    && [ "$(readlink -f /data/adb/$domain/$id 2>/dev/null)" = "$(readlink -f $installDir 2>/dev/null)" ]; then
+    rm -rf /data/adb/$domain/$id.stale 2>/dev/null || :
+  else
+    [ ! -d /data/adb/$domain/$id.stale ] || {
+      rm -rf /data/adb/$domain/$id 2>/dev/null || :
+      mv -f /data/adb/$domain/$id.stale /data/adb/$domain/$id 2>/dev/null || :
+    }
+    echo "! Could not point /data/adb/$domain/$id at this install ($installDir)."
+    echo "! The previous version is still in place. Uninstall ACC, reboot, then install again."
+  fi
 }
 
 
@@ -461,8 +507,16 @@ $overlayMount || {
 ! $KSU || {
   upModDir=${magiskModDir}_update
   rm -rf $upModDir/$id 2>/dev/null || :
-  cp -a $installDir $upModDir/
-  touch $installDir/update
+  # $installDir/update tells the root manager "a staged copy is ready in modules_update". It was
+  # written unconditionally, so when the copy failed -- no modules_update dir, no space, read-only
+  # -- the marker still claimed a staged update existed and the next boot went looking for one
+  # that was never written. Mark only what actually landed. Deliberately no mkdir of $upModDir:
+  # if the root manager did not create it, there is nothing to stage into.
+  # $upModDir must already exist. toybox `cp -a src missing/` does NOT fail: it silently creates
+  # `missing` AS the copy, so on a device with no modules_update this built a bogus tree whose
+  # contents sat directly in modules_update/ instead of modules_update/$id, exited 0, and got
+  # marked as a staged update the root manager would then fail to find.
+  [ -d $upModDir ] && cp -a $installDir $upModDir/ 2>/dev/null && touch $installDir/update || :
 }
 
 

@@ -14,7 +14,11 @@ if ! flock -n 0; then
   [ -z "$pid" ] || kill $pid >/dev/null
   timeout 10 flock 0
   [ -z "$pid" ] || kill -KILL $pid >/dev/null
-  flock 0
+  # Bounded, like the acquire above. This was a bare `flock 0`: when the PID sanitiser on line 13
+  # blanks a corrupt/racing lock file, there is no pid to SIGKILL, so nothing ever releases the
+  # holder and this blocked forever -- taking `acc -D stop|restart` and every AccA call with it.
+  # 10s then give up: a lock we cannot take is better reported than waited on indefinitely.
+  timeout 10 flock 0 || :
 fi) <>$TMPDIR/${id}.lock || :
 
 # rc15: the flock gate above is FOOLED under AccA. libsu keeps ONE persistent root shell, and

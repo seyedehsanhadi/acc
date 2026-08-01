@@ -122,6 +122,25 @@ Options
 
   -b|--rollback [nv]   Restore previous installation; with "n" flag, the config is not restored; with "v" flag, nothing is done other than printing the version that would have been restored
 
+  -sk|--rekick [on|off]   Charger re-kick: ACC re-runs charger input detection when charging looks stalled. Turn it off if it disturbs fast charging on your phone
+    e.g.,
+      acc -sk (print the current setting)
+      acc -sk off
+      acc -sk on
+
+  --early-cap [on|off]
+     Boot-gap overcharge cap: the one write ACC makes before Android starts.
+     It self-disables if a boot does not complete, and this turns it back on.
+     e.g., acc --early-cap          (prints on or off)
+           acc --early-cap on
+           acc --early-cap off
+
+  -sb|--blacklist [rm <node> | add <node> | clear]   Nodes that crashed this phone during a switch scan, and are never written again
+    e.g.,
+      acc -sb (list them)
+      acc -sb rm /sys/class/power_supply/battery/some_node (allow it to be tested again)
+      acc -sb clear (allow all of them again)
+
   -c|--config [[editor] [editor_opts] | g for GUI]   Edit config (default editor: nano/vim/vi)
     e.g.,
       acc -c (edit w/ nano/vim/vi)
@@ -193,6 +212,18 @@ Options
     e.g., acc -l -e
 
   -le   Same as -l -e
+
+  --diag|--diagnostics [--full|--core] [--sample]   Collect ONE diagnostic bundle to send us, scoped to
+    charging / reboot / root: identity, config, live charge state (acc -i, PMIC votables, battery nodes),
+    ACC's own logs, PLUS Android's logcat / pstore / crash / ANR / reboot records + a manifest. Passive,
+    on-demand, nothing runs in the background. CORE (default) is small (~75KB) and filters out log noise
+    (also the privacy boundary); the heavy raw logs auto-attach ONLY when a fresh crash or abnormal reboot
+    is detected. --full forces everything; --core forces minimal; --sample adds a 20s live read.
+    Serial/MAC/email are redacted. Same collector AccA's diagnostics button uses. e.g., acc --diag
+
+  --diag-verbose on [HOURS] | off   Opt-in richer capture for a rare intermittent bug. Off by default and
+    zero-background: it does NOT change the daemon, it only makes the next --diag include a live sample.
+    Auto-expires (default 24h). e.g., acc --diag-verbose on 6
 
   -n|--notif [["STRING" (default: ":)")] [USER ID (default: 2000 (shell))]]   Post Android notification; may not work on all systems
     e.g., acc -n "Hello, World!"
@@ -275,6 +306,12 @@ Options
 
   -ss::   Same as above
 
+  -ss f   Run Find my switch (AMPS) and pick the switch it verifies
+    e.g., acc -ss f
+
+  -ss <n>   Set the switch by its number in the "acc -ss::" list
+    e.g., acc -ss 2
+
   -s|--set v|--voltage [millivolts|-] [--exit]   Set/print/restore_default max charging voltage (range: 3700-4300$(print_mV))
     e.g.,
       acc -s v (print)
@@ -319,8 +356,10 @@ Options
       acc -u -c -n (if update is available, prints version code (integer) and changelog)
       acc -u -c (same as above, but with install prompt)
 
-  -U|--uninstall   Completely remove acc and AccA
-    e.g., acc -U
+  -U|--uninstall [a]   Completely remove acc and AccA; with "a" flag, do not ask for confirmation
+    e.g.,
+      acc -U
+      acc -U a (no prompt, for a script or a phone with no console)
 
   -v|--version   Print acc version and version code
     e.g., acc -v

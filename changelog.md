@@ -10,153 +10,185 @@ Changes since the fork baseline (v2025.5.18-stable.6.5):
 
 **v2025.5.18-6.5.1-rc21 (202505301)**
 
-User reports and a deep stress-test pass. The pause and shutdown logic that decides when to stop charging is unchanged; the fixes below sit around it.
+Everything since rc20, in one release.
 
 Security
-- **An argument could run commands as root.** `acc '$(some-command)'` executed it. The internal helper that matches an argument against a list of patterns built a shell `case` statement as text and evaluated it with your argument pasted in, so the shell performed the substitution. Your first argument passes through that helper three times on every single call, which means anything passing an unchecked string to `acc` or `acca` (a script, a macro, a front-end) could run it with full privileges. Found when a fuzz test rebooted the test phone twice. The pattern still has to be evaluated, but the value no longer is. Present in every earlier release, including rc20 and upstream.
+- **An argument to `acc -f` could run commands as root, and one to `acc -n` as the shell user.** rc21 closed this in the pattern-matching helper, but two other paths still handed a caller's text to a shell. Charge-once passed its trailing options through `eval`, which it never needed (they are already separate words), so `acc -f '$(some-command)'` executed it with full privileges. The notification helper embedded its message inside a double-quoted `su -c` string, so the same trick ran as the shell user, and the daemon feeds switch names and limit values through that helper too. Charge-once now calls the helper directly and notifications embed the message single-quoted with any quote escaped, the same way stored config strings have always been handled. Anything that passes an unchecked string to `acc` (a script, a macro, a front-end) was affected. Found by fuzzing every argument-taking option.
 
 Fixed
-- **A menu key could silently erase your charging switch.** In the switch selector, any key the menu did not recognise (including `z`, which exits every other ACC menu) reset your hand-picked switch to Automatic, said nothing, and reported success. Anyone who had chosen a switch manually could lose it by pressing the key ACC itself teaches. `z` now exits every menu, and an unrecognised key re-prompts instead of writing anything.
-- **A mistyped command reported success.** `acc --bogus` printed the help text and exited 0, so AccA, a macro, or a script could not tell a typo from a working command. Unknown commands now exit 2 and say what was not understood.
-- **A mistyped restore path looked like it worked.** `acc -s /wrong/path` printed your whole config and exited 0. It now reports "No such config file" and exits non-zero.
-- **`acc 12abc` silently became `acc 75`.** Any argument starting with a digit was accepted as a capacity; the non-numeric part was discarded and the default substituted, with a success tick. Malformed capacities are now rejected.
-- **`acc 0` wrote a negative resume level.** The resume value derived from a very low pause was never re-checked against the valid range. It is now floored at 0.
-- **Log auto-export had been dead since rc15.** A pattern edit turned the character class `[127]` into the literal `127`, so the automatic diagnostic bundle almost never fired. It now fires on the codes that mean charge control actually failed (7 and 10), and the documentation in all five languages matches the code again.
-- **A resume temperature set well below the max was quietly overwritten.** If you set `max_temp=55` and `resume_temp=40`, ACC stored 45 instead. A wide gap (pause when hot, resume only after the cell cools a lot) is a valid choice, and the daemon already ran a wide gap from a hand-edited config, so the editor was second-guessing you for no reason. It now keeps your value, holding only the two things that actually matter: resume stays below max, and a value so low the battery could never cool to it (under 15C) is still rebuilt so charging can't stick off.
-- **ACC could rewrite a value the phone kept refusing, forever.** On phones where the charger's own negotiation owns the input-current nodes, a cap above the negotiated current is reverted the instant ACC writes it, and ACC rewrote it every few seconds without end (measured: 137 writes in two minutes). It now backs off a node that rejects the same value five times, retries only occasionally in case the charger frees up, and tells you once that the charger's limit is the one in force. The battery-side cap, which the hardware does accept, is applied exactly as before.
-- **Cooldown made the battery percentage flicker.** While the cooldown cycle held the phone as "charging" to stop the notification blinking, it dropped and re-took that override every cycle, which flipped Android's battery service in and out of override mode (measured 19 times in two minutes at an aggressive setting). It now keeps the override and refreshes the reading inside it, so the percentage stays live with no flicker, and hands the state back the moment cooling ends.
-- **Many settings changed at the exact same instant could corrupt the config.** If two writes landed on the config file at once, one could overwrite the other mid-write and leave a scrambled line. It took genuinely simultaneous writes, which the app never does on its own, the result always fell back safely (charging never ran away, and the next write repaired it), and it has been possible since long before this fork; even so, each write now builds its own private copy and swaps it in atomically, so two writes can never step on each other.
-- **The daemon could be knocked over by another program writing the config file.** AccA and `acc` always write the config safely, but a terminal command (`echo >`, `sed -i`) or a third-party app can write it the crude way and, if that write is caught half-finished at the moment the daemon reads it, the daemon used to trip on the broken file, skip a check, or under a flood of such writes stop running. It now reads the config defensively: a half-written or garbled file can never abort it, and if it reads one, it keeps using the last complete config it saw, so the charge limit is never dropped and the daemon never falls over, no matter what else is scribbling on the file.
-
-Removed
-- **The Xiaomi charge-pump warning, and the opt-in current veto behind it.** Both rested on a single premise: that a max charging current between 3000 and 5499 mA blocks a phone's charge pump. That premise had one source, a "the original ACC is faster" report, and that report turned out to have nothing to do with the setting. The logs showed first a 5V/1.6A charger, and later ACC writing 500 mA to the phone from a wrongly recorded default. The phone in question has no charge pump at all, so the value it was being warned about was close to its ceiling. Nobody has ever observed the behaviour this guarded against, and it told at least one person their correct setting was wrong. The fast-charge cooldown guard is untouched and stays.
+- **Upgrading could silently not happen.** `/data/adb/vr25/acc` is the path everything resolves through: the root manager's `acc` command, service scripts and the app. Where `/data/adb/modules` did not exist at the first install (normal on KernelSU, where that directory only appears once a module is present) ACC installed there as a real directory. Every later upgrade then installed into `/data/adb/modules/acc` and tried to repoint the old path with `ln -sf`, which cannot replace a real directory: it printed "Is a directory", exited 0, and the phone kept running the first version ever installed. Device-proven: two upgrades on a KernelSU Pixel 6a with `acc -v` still reporting the old version afterwards. The install now moves the stale directory aside, verifies the link resolves to this install, and rolls back with a message instead of exiting 0 on a broken upgrade.
+- **A charging config that was a directory killed the front-end.** `config.txt` can exist and not be a regular file, left by a bad backup restore or a botched script. The check read that correctly as "no config" but the remedy wrote the defaults to that same path, which failed with "Is a directory" and took the caller down: `acc -i`, `acc -s` and every `acc -D` died, so the daemon could not be started to repair the very thing that was broken, and nothing said why. A garbage config FILE started the daemon fine; a directory killed it before it could open its log. The obstruction is now moved aside, your own limits are restored from the daemon's last known-good copy rather than silently reset to the defaults, and the write can no longer abort the caller.
+- **An idle phone paid for the app's status feed.** The state export AccA reads was rebuilt in full on every daemon pass, forever. Measured on a Mi A3 with the screen off, ACC was starting 2333 processes a minute, about half of one CPU core, doing nothing a user asked for; the export accounted for 1673 of them. Three parts: the device description (model, chip, Android build, ACC's own version) was rebuilt from scratch each pass although it cannot change while ACC is running, the JSON string escaper ran three commands per value on every value, and the whole snapshot was republished whether or not anything had changed. It is now built once, escapes without spawning anything for ordinary values, and publishes when the battery level or charging state actually moves, otherwise at most every 30 seconds. Idle cost fell by about 85%, to at or below upstream ACC measured under the same conditions, with no change to what the app sees.
+- **Removing a blocked setting did nothing.** When the blocked list started recording what a setting was writing when the phone went down, each line gained two extra fields, but removal still compared the whole line against a bare path, so it never matched: `acc -sb rm` reported success and changed nothing, and the app's unblock button had no effect either. Removal now matches on the path alone, and entries saved before the change still work.
+- **A corrupt saved config could take the daemon down with it.** The daemon keeps a copy of the last config it read successfully, and falls back to that copy when the live one is unreadable. It loaded that copy without checking it first, so a copy that was itself truncated (a full data partition, or a crash mid-copy) caused the exact parse failure the fallback exists to survive, at the worst possible moment. The fallback is now checked before it is trusted, and a copy that fails the check is discarded rather than retried forever.
+- **An out-of-range charge limit was accepted with a success tick.** rc21 stopped `acc 12abc` being read as a capacity, but a numeric value outside the valid range still passed: `acc 999` printed the success mark and quietly stored 80% instead. It failed safe (a limit was always applied, never removed) but you were never told the number you typed was not the number in force. Values outside 0-100 percent or 3001-5000 mV are now refused.
+- **Exporting your logs produced nothing and reported failure.** `acc -le` (and the Export logs menu item) built the bundle by calling an internal battery helper without an argument. That helper read its first argument unguarded, so the strict-mode shell aborted the export at that point: no tarball was written and the command exited with an error, every time, on every phone. The helper now tolerates the bare call, which was always meant to return a plain battery dump and touches no battery state. Exporting now writes the archive to the ACC data folder and copies it to Download as documented.
+- **A node that crashed your phone could still be re-tested and re-suggested.** `acc -t` writes every candidate switch to find one that holds, and `acc -p` suggests candidates found in the power-supply logs. Neither consulted the crash blacklist, so on the one phone where that list is not empty, the node that took it down was written again by the test and offered back by the suggestion. Both now skip blacklisted nodes and say so; `acc -sb rm <node>` allows one back.
+- **Charging held far below what the charger can deliver, where upstream ACC charged fine.** Live meter nodes (`*_now`, an instantaneous reading, not a setting) were accepted as charging-switch candidates, so the recorded "on" value was whatever current happened to flow during the scan. A Redmi Note 9S got an entry pinning input at 602 mA, rewritten on every sweep. Meters are no longer candidates. A switch you picked yourself is kept.
+- **Switch re-armed on every pass once the battery sat above the limit.** The counter bounding this to two attempts could only be reached below the pause level, while the attempt only runs above it, so it never advanced. About 40 switch writes in 21 minutes on a Redmi Note 10 Pro, held correctly the whole time but needless wear, and enough momentary on-states to trip the "switch not holding" warning about a switch that was holding.
+- **Report called a working charging switch broken.** It checked `input_suspend` regardless of which switch you use, so on `charging_enabled` phones that unused node read 0 and the report cried fault. It now reads your configured switch, both path forms, and takes the off value from your config. Same fix covers the overcharge line, which could fire on a phone holding the cell through idle mode.
+- **Every diagnostic showed an empty ACC handler version.** The identity line read the handler with `head -1`, but `acc --version` prints a blank line before the version, so that field came out empty in every bundle anyone ever sent us. It now takes the first non-empty line, and where the handler prints nothing at all it tries the other sources and says the version is unreadable rather than leaving a blank that reads as "no handler".
 
 Added
-- `acc --export <file>` writes your current config, and re-running it refreshes the file. Previously the only way to export was a side effect that silently refused to overwrite, so repeat backups went stale without warning.
-- Backup and restore are documented in `acc --help`, including that restore merges over your current settings rather than replacing them.
+- **A charge setting that restarts your phone AFTER it is written is now caught too.** The crash journal only ever caught a phone that died *during* a write; a write that returned and killed the kernel a few seconds later left no trace, because the record was deleted the moment the write succeeded. The last completed write is now kept until a scan exits cleanly, so a record that outlives its scan means the scan wrote that setting and never finished. Blaming it needs three things to agree: the record must be from an earlier boot, the phone must report an actual panic or watchdog restart, and the recorded path must be a real one. Anything less is discarded, because blocking a healthy setting is its own way of breaking someone's charging. A scan that is merely cancelled, or killed, blocks nothing.
+- **`acc -ss f` runs Find my switch**, the same engine the app calls, without going through the app.
+- **`acc -ss <n>` picks a switch by its number** in the `acc -ss::` list, so the list you read is the list you can select from. Setting a switch could previously only be done through the interactive picker, which a script cannot drive.
+- **`acc -U a` uninstalls without asking.** The confirmation reads from the terminal, so over `su -c` or from a front-end with no console attached it saw end-of-input, took that as "no", and exited reporting success while removing nothing.
+- **`acc -sb` reaches the crash blacklist.** Nodes that took your phone down during a switch scan are restored and permanently blocked, but the list was only reachable by calling the engine at its full path. `acc -sb` lists them, `acc -sb rm <node>` allows one to be tested again, `acc -sb clear` allows all. Also in AccA under Blocked settings.
+- **Report now says when your ROM is throttling charge rate.** Many ROMs limit charging for heat through a thermal level ACC never touches, and owners read the result as ACC throttling them. When that level is present and non-zero the report states it with Android's thermal status, and says plainly it is the ROM, not ACC.
+
+Fixed
+- **A 9V charger could drop to 5V.** The stall re-kick that re-runs charger input detection had no rate limit, so where the stall check misfires it fired every pass (10 times in 10 minutes on a Redmi Note 9S, whose kernel reports current unsigned). Repeated re-kicks collapse a QuickCharge handshake to 5V near 1.8A. First re-kick still fires immediately; only repeats inside five minutes are dropped.
+- **The backup cut against a leaking switch could silently do nothing.** It picked the first writable node and reported success without checking charging actually stopped. On a OnePlus 8 where `input_suspend` is the only candidate and the driver re-enables it, the safety net became a no-op and the cell ran past the limit. The cut is now verified, reverted if it did not hold, and the failed node is not rewritten every loop.
+
+User reports and a deep stress-test pass. The pause and shutdown logic is unchanged; these sit around it.
+
+Security
+- **An argument could run commands as root.** `acc '$(some-command)'` executed it: the pattern-matching helper built a `case` as text and evaluated it with your argument pasted in. Your first argument passes through it three times per call, so anything feeding `acc`/`acca` an unchecked string could run it privileged. The pattern is still evaluated, the value no longer is. Present in every earlier release and upstream.
+
+Fixed
+- **The daemon could not restart if its working folder was missing.** ACC's `/dev` folder is wiped each reboot and rebuilt by the start script; where that had not run, every manual start died opening a lock file inside the absent folder. Start button, `accd --init` and menu restart all dead-ended with "No such file" and a -1% reading. The daemon now creates the folder before taking the lock.
+- **The uninstaller now recovers any phone, not just Magisk ones.** It needed full busybox to start, so it could refuse to run on KernelSU, APatch or bare recovery, and restored only a fixed switch list. It now runs on stock tools, replays the value ACC recorded for whatever switch you used, and reports plainly when it cannot reach an encrypted data partition instead of faking success.
+- **Earliest-boot write is safer, and the #197 guard reads the real mount.** The pre-Android charge write is skipped unless it can first record what it is doing, so a full or read-only data partition never keeps an unundoable write. The PATH check reads the actual `/system` filesystem type instead of trusting leftovers, closing a Magisk-to-KernelSU case that could re-trigger the #197 boot loop.
+- **A menu key could silently erase your charging switch.** Any unrecognised key in the switch selector (including `z`, which exits every other menu) reset it to Automatic and reported success. `z` now exits, unknown keys re-prompt.
+- **A mistyped command reported success.** `acc --bogus` printed help and exited 0. Unknown commands now exit 2.
+- **A mistyped restore path looked like it worked.** `acc -s /wrong/path` printed the config and exited 0. Now reports "No such config file" and exits non-zero.
+- **`acc 12abc` silently became `acc 75`.** Anything starting with a digit was taken as a capacity, the rest discarded, the default substituted, with a success tick. Now rejected.
+- **`acc 0` wrote a negative resume level.** Now floored at 0.
+- **Log auto-export had been dead since rc15.** An edit turned the character class `[127]` into literal `127`. It now fires on codes 7 and 10, and the docs in all five languages match again.
+- **A resume temperature well below max was overwritten.** `max_temp=55` with `resume_temp=40` stored 45. A wide gap is valid and the daemon already ran one. Your value is kept, holding only that resume stays below max and that anything under 15C is rebuilt so charging cannot stick off.
+- **ACC could rewrite a value the phone kept refusing, forever.** Where the charger's negotiation owns the input-current nodes, a cap above the negotiated current is reverted instantly and ACC rewrote it endlessly (137 writes in two minutes). It now backs off after five rejections, retries occasionally, and says once that the charger's limit is in force. The battery-side cap is unchanged.
+- **Cooldown made the battery percentage flicker.** Holding the phone as "charging" dropped and re-took Android's override every cycle (19 times in two minutes). It now keeps the override and refreshes inside it, handing state back when cooling ends.
+- **Simultaneous config writes could corrupt it.** Genuinely concurrent writes could scramble a line. It always fell back safely and predates the fork; even so, each write now builds a private copy and swaps it atomically.
+- **Another program writing the config could knock the daemon over.** A crude `echo >` or `sed -i` caught half-finished could trip the daemon, skip a check, or under a flood stop it. It now reads defensively and falls back to the last complete config, so the limit is never dropped.
+
+Removed
+- **The Xiaomi charge-pump warning and its opt-in current veto.** Both rested on the premise that 3000 to 5499 mA blocks a charge pump. The one report behind it turned out to be a 5V/1.6A charger, and later ACC writing 500 mA from a wrongly recorded default. That phone has no charge pump. Nobody ever observed the guarded behaviour and it told at least one person their correct setting was wrong. The fast-charge cooldown guard stays.
+
+Added
+- `acc --export <file>` writes your config and refreshes on re-run. The old export silently refused to overwrite, so repeat backups went stale.
+- Backup and restore documented in `acc --help`, including that restore merges rather than replaces.
 
 Unchanged
-- The pause/resume/shutdown decision logic, the charging switch, AMPS and AccA compatibility. The charge-current backoff and the cooldown display fix sit alongside that logic without changing when charging stops, and every command AccA issues returns exactly what it returned in rc20.
+- Pause/resume/shutdown logic, the charging switch, AMPS and AccA compatibility. Every command AccA issues returns what it returned in rc20.
 
 Note for scripts
-- Unknown commands now exit 2 instead of 0. Anything relying on ACC returning success for an unrecognised flag needs updating. `acc -L` was never a real command and is affected.
+- Unknown commands now exit 2 instead of 0. `acc -L` was never real and is affected.
 
----
 
 **v2025.5.18-6.5.1-rc20 (202505300)**
 
 rc19 could let a battery charge to 100% with the limit on. If you are on rc19, update.
 
 Fixed
-- **Overcharge.** rc19 froze Android's battery state and never released it, so the phone kept showing "charging" after unplugging, the percentage stopped moving, and the limit could never fire. Charging decisions now read the kernel, never a value ACC wrote itself. Four independent guards, so no single mistake brings it back.
-- **AccA showing a different percentage from Android.** The state export was built in one scratch file shared by every writer, so the daemon and the app truncated each other and published broken JSON. Measured before: 13 of 40 reads malformed. After: 40 of 40 clean.
-- **Importing a config wiped every setting.** `acc -s <file>` handed the staging file to the rule editor, which used the same path as its own scratch and emptied it. A 389-line config came back as its rule lines, with a tick printed. Config edits now publish by atomic rename, and an empty import is refused instead of applied.
-- **Capacity Mask did nothing on Pixel and Tensor.** Those phones hand the limit to firmware and take a branch that skips the code applying the mask. Long-standing, not new.
-- **Daemon log grew without bound on the same phones.** It lives in RAM: 10.7 MB after 24 minutes on a Pixel 9a, never freed until reboot. Same build on a Mi A3 sat at 128 KB.
-- **Fast charge died at the cooldown level** on VOOC / SuperDart / HyperCharge phones. Toggling the switch ends the handshake and the charger drops to 500 mA until you replug. ACC now skips the cooldown cycle during a live fast-charge session, and says so once a day. Confirmed fixed by the reporter. Temperature limits are unaffected. Opt out: `/dev/.vr25/acc/.fcguard-off`.
-- **Two hazards inherited from before the fork.** A numeric but absurd `shutdown_temp` (like `9`) was accepted and powered the phone off at room temperature. The charging-current limit was released for a few seconds on every resume.
+- **Overcharge.** rc19 froze Android's battery state and never released it, so the phone showed "charging" after unplugging, the percentage stopped, and the limit could never fire. Decisions now read the kernel, never a value ACC wrote. Four independent guards.
+- **AccA showing a different percentage from Android.** The state export shared one scratch file between writers, so daemon and app truncated each other. 13 of 40 reads malformed before, 40 of 40 clean after.
+- **Importing a config wiped every setting.** `acc -s <file>` handed the staging file to the rule editor, which used the same path as its scratch. A 389-line config came back as its rule lines, with a tick. Edits now publish by atomic rename and an empty import is refused.
+- **Capacity Mask did nothing on Pixel and Tensor.** Those hand the limit to firmware and skip the branch applying the mask. Long-standing.
+- **Daemon log grew without bound on the same phones.** 10.7 MB after 24 minutes on a Pixel 9a, in RAM, never freed. Same build on a Mi A3 sat at 128 KB.
+- **Fast charge died at the cooldown level** on VOOC / SuperDart / HyperCharge. Toggling the switch ends the handshake and drops to 500 mA until replug. Cooldown is now skipped during a live fast-charge session, announced once a day. Confirmed by the reporter. Opt out: `/dev/.vr25/acc/.fcguard-off`.
+- **Two hazards inherited from before the fork.** A numeric but absurd `shutdown_temp` (like `9`) powered the phone off at room temperature; the current limit was released for seconds on every resume.
 - Removing ACC now hands Android's battery state back instead of leaving a fake percentage until reboot.
 
 Added
-- Warning when something else keeps changing your charge limit. On Pixel, ACC, Adaptive Charging and Battery Defender all write the same node; two owners fighting collapses fast charging and wedges wireless. Turn off Adaptive Charging and let one thing own it.
+- Warning when something else keeps changing your limit. On Pixel, ACC, Adaptive Charging and Battery Defender write the same node; two owners fighting collapses fast charging and wedges wireless.
 - Notice for Xiaomi owners whose current cap sits below what the fast-charge pump needs, with the command to clear it.
-- A timestamped ledger of every node write, so the next report of this kind is answered from evidence.
+- A timestamped ledger of every node write.
 
-Verified on a Pixel 9a (firmware-limit path) and a Mi A3 (switch path): 44/44 and 31/33 checks, plus 12/12 endurance - the pause held 10 minutes with no overshoot, 6 of 6 pause/resume cycles, 3 of 3 temperature stops and releases. Every verdict read from the kernel.
+Verified on a Pixel 9a (firmware-limit path) and a Mi A3 (switch path): 44/44 and 31/33, plus 12/12 endurance (10 minutes held with no overshoot, 6/6 pause-resume cycles, 3/3 temperature stops and releases).
 
 **v2025.5.18-6.5.1-rc19 (202505299)**
 
-Standby battery drain, deep-fixed. A field report of 7% overnight drain (about twice normal) checked out: the daemon was quietly burning about a quarter of a CPU core around the clock while doing nothing. Measured on a Mi A3 before the fix, sitting idle: about 30 dumpsys calls into Android per minute and 20+ process spawns per second, all night, with every feature at rest. Four sources, all fixed:
+Standby drain, deep-fixed. A 7% overnight drain report checked out: the daemon burned about a quarter of a CPU core around the clock doing nothing. Measured idle on a Mi A3: ~30 dumpsys calls per minute and 20+ process spawns per second. Four sources:
 
-- Every battery-percent check spawned a full dumpsys (a binder call into system_server), and the cap checks run several times per loop. The Android level is now cached and re-read only when the kernel percent actually moves. Blind devices with no kernel percent node keep the old per-call behavior.
-- With the Capacity Mask off, the mask code still called `dumpsys battery reset` every loop, forever, clearing overrides that were never set. It now resets once when you turn the mask off, then stays silent. With the mask on, the three dumpsys writes fire only when something changed (plug state, percent, or 0.3°C of temperature), plus a periodic full re-assert so an external reset can never silently kill the mask - which also means a daemon reload can no longer strand a frozen status bar.
-- Every 1-second wait tick spawned a sleep and a stat: roughly 200,000 forks a night spent waiting. The waits now tick on a timed builtin read of a wake fifo (zero forks), and the config watch is a builtin file test. Settings edits still apply within a second, and writing anything to the fifo wakes the daemon instantly.
+- Every battery-percent check spawned a dumpsys, several times per loop. The Android level is now cached and re-read only when the kernel percent moves. Devices with no kernel percent node keep the old behaviour.
+- With Capacity Mask off, the mask code still called `dumpsys battery reset` every loop forever. It now resets once when you turn it off. With the mask on, the three writes fire only on a real change (plug, percent, 0.3C), plus a periodic re-assert so an external reset cannot silently kill the mask.
+- Every 1-second tick spawned a sleep and a stat, roughly 200,000 forks a night. Waits now tick on a timed builtin read of a wake fifo, and the config watch is a builtin test. Edits still apply within a second.
 - The charger-node list was recomputed with ls+grep every second inside the idle nap. Now computed once.
 
-New: plugged-and-paused - the overnight-on-charger state - holds in a 30-second fork-free nap instead of the 9-second cycle. Unplugging or editing settings still wakes it within about a second. Resume detection moves from 9s to 30s worst case, against a battery that self-drains about 1% an hour: no practical change, far fewer wakeups.
+New: plugged-and-paused holds in a 30-second fork-free nap instead of the 9-second cycle. Unplugging or editing wakes it within about a second. Resume detection moves from 9s to 30s worst case against ~1%/hour self-drain.
 
-Measured on the same phone in the real overnight state (screen off, plugged, holding at the limit): the old daemon used 31% of a CPU core and was 83% of all process activity on the sleeping phone; rc19 runs the same state at 8% of a core with the fork rate down 6x, and zero dumpsys calls at rest. AccA was audited too: its meter only ticks while the screen is on and stops when it goes off, and update checks run when you open the app - no change needed there.
+Measured in the real overnight state: the old daemon used 31% of a core and was 83% of all process activity on a sleeping phone; rc19 runs it at 8% with fork rate down 6x and zero dumpsys at rest. AccA audited too, no change needed.
 
 **v2025.5.18-6.5.1-rc18 (202505298)**
 
-Fixes a status bar stuck on "charging" after you unplug, on phones that use the Capacity Mask. The mask shows a remapped battery percentage by writing Android's own battery state, and it decided plugged-or-not from the charging reading. On phones that report charging as a negative current, or that hold the battery idle with a bypass switch, that reading is unreliable, so after the cable came out the status bar could stay frozen on charging until a reboot. It now reads the physical cable directly, so the status bar follows the real plug state. AccA's dashboard was always correct; only the system status bar was affected.
+Status bar stuck on "charging" after unplug, on Capacity Mask phones. The mask decided plugged-or-not from the charging reading, unreliable on phones reporting charging as negative current or holding the battery idle by bypass, so the bar could freeze until reboot. AccA's dashboard was always correct.
 
-- Capacity Mask: the plug state written to Android now follows the physical charger (present/online), not the charging-current reading. Reproduced and verified on a Mi A3.
+- Capacity Mask: plug state now follows the physical charger (present/online), not the current reading. Verified on a Mi A3.
 
-It also fixes the temperature pause. Setting a max temperature on its own did not stick: ACC reset it to 50°C internally, so charging never paused at your limit and the battery could run hotter than you asked. One user set max_temp=40 and watched it reach 43. Three faults in the config sanitizer, all cases of a valid setting being silently changed:
+Temperature pause also fixed. Setting max temperature alone did not stick: ACC reset it to 50C internally, so charging never paused at your limit. One user set 40 and watched it reach 43. Three sanitizer faults, all silently changing a valid setting:
 
-- max_temp reset. Lowering max_temp below the default cooldown temperature, with cooldown and resume left at their defaults, collapsed the temperature band. The guard that catches a collapsed band then reset all three values to the 45/50/40 default, so 40 became 50. It now rebuilds the band around your max_temp (cooldown 5° under, resume 10° under), so any value from 20 to 60°C holds.
-- Resume window. A resume temperature more than 10° below max was snapped to one degree under max, a 1° swing that toggled rapidly and discarded your cooldown value too. It is now capped at a 10° swing.
-- Shutdown below max. With a high max_temp (56 to 60°C) the shutdown cutoff could sit below it, so the phone shut down before it ever paused. Shutdown now always sits at or above max_temp.
+- max_temp reset. Lowering it below the default cooldown temperature collapsed the band, and the collapse guard reset all three to 45/50/40. It now rebuilds the band around your max_temp (cooldown 5 under, resume 10 under), so 20 to 60C holds.
+- Resume window. A resume more than 10 below max was snapped to one degree under max, a 1 degree swing that toggled rapidly and discarded your cooldown value. Now capped at a 10 degree swing.
+- Shutdown below max. With max 56 to 60C the shutdown cutoff could sit below it, so the phone shut down before it ever paused. Shutdown now sits at or above max_temp.
 
-Verified on a Mi A3: the acc -s / acc -i round-trip matches on eight temperature scenarios, and the daemon pauses at the set max and resumes after cooldown.
+Verified on a Mi A3 across eight temperature scenarios.
 
 **v2025.5.18-6.5.1-rc17 (202505297)**
 
-Critical fix for every OverlayFS root: KernelSU (including Next, SukiSU and ReSukiSU), APatch, and Magisk running magisk_overlayfs. On those, installing ACC could make every app crash after the next reboot - the root manager itself would not open, and recovery was the only way out. Magisk on its own was never affected.
+Critical fix for every OverlayFS root: KernelSU (including Next, SukiSU, ReSukiSU), APatch, and Magisk with magisk_overlayfs. Installing ACC could make every app crash after the next reboot, with the root manager itself refusing to open and recovery the only way out. Magisk alone was never affected.
 
-Already stuck? Just flash this build from recovery. It strips the bad overlay in place, so the next boot comes up clean. You do not have to uninstall ACC first.
+Already stuck? Flash this build from recovery. It strips the bad overlay in place. You do not have to uninstall ACC first.
 
-- The cause. ACC shipped a system/ overlay (the /system/bin/acc wrappers). Magisk magic-mounts those file by file and leaves the rest of /system/bin alone. OverlayFS roots mount the whole directory instead, which relabels the merged /system/bin: /system/bin/sh stops being executable, so every app and system process that shells out dies with "Exec '/system/bin/sh' failed: Permission denied" (GitHub #197).
-- The installer now detects HOW the root manager mounts modules, instead of assuming Magisk just because a modules directory exists. That old assumption treated KernelSU and APatch as Magisk, and is what wrote the overlay onto them in the first place. On an OverlayFS root the overlay is never created, an existing one is removed before the module is staged, and skip_mount is set so a stale one can never be mounted even if it reappears.
-- It fails safe. Anything not positively confirmed as Magisk magic mount is treated as OverlayFS, so an unknown root, a future fork, or a recovery flash with no root environment at all takes the safe path. A phone missing the acc PATH shortcut still boots; a phone with a poisoned /system/bin does not.
-- Nothing is lost. acc, acca and accd are symlinked onto /data/adb/ksu/bin and /data/adb/ap/bin, which are already on PATH, so the commands behave exactly as before. Magisk keeps its overlay and is unchanged.
+- The cause. ACC shipped a `system/` overlay. Magisk magic-mounts those file by file; OverlayFS roots mount the whole directory, relabelling the merged `/system/bin` so `/system/bin/sh` stops being executable and everything that shells out dies with "Exec '/system/bin/sh' failed: Permission denied" (GitHub #197).
+- The installer now detects how the root manager mounts modules instead of assuming Magisk because a modules directory exists. On OverlayFS the overlay is never created, an existing one is removed before staging, and skip_mount is set.
+- It fails safe. Anything not positively confirmed as Magisk magic mount takes the OverlayFS path, so an unknown root or a recovery flash with no root environment is safe.
+- Nothing is lost. `acc`, `acca` and `accd` are symlinked onto `/data/adb/ksu/bin` and `/data/adb/ap/bin`, already on PATH. Magisk keeps its overlay.
+- The flashable zip never shipped the AMPS engine. `install.sh` copied only `install/*`, but the engine lives at the package root, so flashing left the module on whatever engine it had (a test phone on rc17 was running v7.1.3) and a clean flash got none. Now copied on every install.
 
-- The flashable zip never actually shipped the AMPS engine. install.sh copied only install/*, but acc-compat.sh and amps.sh live at the package root, so flashing a new ACC left the module running whatever engine it already had - a test phone on rc17 was still executing the v7.1.3 engine, three versions stale - and a clean flash got none at all. Only the tarball ever carried it. The current engine is now copied on every install.
+AMPS (Find my switch) v7.1.6, four fixes to the charger/speed report, which was accusing healthy phones of charging slowly. Found from a Realme GT Neo 2 (65W SuperDart).
 
-AMPS (Find my switch) v7.1.6 - four fixes to the charger/speed report, which was accusing healthy phones of charging slowly. Found from a Realme GT Neo 2 (65W SuperDart) run.
-
-- Charger not found on the `ac` path. AMPS looked for the charger only on usb/main/dc/wireless/pc_port. On Qualcomm and OPLUS phones (Realme, OPPO, OnePlus) the mains path reports online on `ac` while usb sits at online=0 mid-charge, so nothing matched and the report said "not plugged / no input supply reports online" while the phone was actively charging, with the input current and voltage all reading zero. AMPS now scans every supply, takes whichever one the firmware marks online, and reads the limits from wherever they actually live.
-- A negative cap is an error code, not a value. -22 is -EINVAL, the kernel saying "property not supported". AMPS stripped the minus sign and reported "IC cap (CCC)=22mA", which also suppressed the fallback to the real ceiling and could fire a false "IC/THERMAL-CAPPED" verdict blaming your charge IC. Caps now reject negatives and fall through to the next source.
-- Virtual charger supplies must not win. Pixel and Tensor expose control supplies (gccd, main-charger, rt9471) that report online=1 like a real port but are not one, and they sort ahead of usb. Picking one made the report show the BATTERY voltage as the charger bus voltage (Vbus=3996mV on a 9V PD charger). The real port is now preferred, so a Pixel 9a reads Vbus=8225mV and Iin=2153mA -- exactly what its kernel logs.
-- Model spoofing. A ROM that fakes ro.product.* (this one reported itself as a Galaxy S23 Ultra) would file its switches into the device database under someone else's model, misleading every real owner of that phone. AMPS now cross-checks the vendor partition, the device tree and the charger-driver family, says plainly that the model is spoofed, and keys the database on the hardware identity instead.
+- Charger not found on the `ac` path. AMPS looked only at usb/main/dc/wireless/pc_port. On Qualcomm and OPLUS the mains path reports online on `ac` while usb sits at 0, so the report said "not plugged" mid-charge with current and voltage at zero. It now scans every supply and takes whichever the firmware marks online.
+- A negative cap is an error code. -22 is -EINVAL. AMPS stripped the sign and reported "IC cap (CCC)=22mA", suppressing the fallback and firing a false IC/THERMAL-CAPPED verdict. Caps now reject negatives.
+- Virtual charger supplies must not win. Pixel and Tensor expose control supplies (gccd, main-charger, rt9471) that report online=1 and sort ahead of usb, so the report showed battery voltage as bus voltage (3996mV on a 9V PD charger). The real port is now preferred: a Pixel 9a reads 8225mV and 2153mA.
+- Model spoofing. A ROM faking `ro.product.*` (this one claimed to be a Galaxy S23 Ultra) filed its switches under someone else's model. AMPS cross-checks the vendor partition, device tree and charger-driver family, and keys the database on hardware identity.
 
 **v2025.5.18-6.5.1-rc16 (202505296)**
 
-Update-delivery fix. Magisk's built-in module updater now sees new ACC releases - it was pointed at the wrong branch, and the flashable-zip filename did not match the update manifest, so even a version that did show could not download. No change to charging; AccA's in-app updater and notification were already unaffected (they read the GitHub releases API directly, which is also why they were the only surface that caught updates before).
+Update delivery. Magisk's module updater was pointed at the wrong branch and the zip filename did not match the manifest, so even a version that showed could not download. No charging change; AccA's updater reads the releases API directly and was unaffected.
 
-- updateJson tracks the active release branch, so the Magisk Modules tab shows a new ACC the day it ships instead of staying silent on the last stable.
-- Flashable-zip name is deterministic again and matches the manifest, so Magisk's one-tap update downloads and flashes instead of failing.
+- updateJson tracks the active release branch.
+- Flashable-zip name is deterministic and matches the manifest.
 - Update popup shows the current changelog.
 
 **v2025.5.18-6.5.1-rc15 (202505295)**
 
-Brick-safety hardening. A bad charging switch can no longer loop a device into a panic/reboot cycle - the class that ends in a Qualcomm CrashDump / EDL on some phones. Two boot-path guards, both additive and fail-open; healthy boots and normal charging are unchanged. Built, flashed and reboot-verified on a Mi A3 (mksh).
+Brick-safety hardening. A bad charging switch can no longer loop a device into a panic/reboot cycle, the class that ends in a Qualcomm CrashDump / EDL on some phones. Both guards are additive and fail-open. Reboot-verified on a Mi A3 (mksh).
 
-- Early-cap brick-safe (GitHub #305). The one write ACC makes before the daemon starts now honors the daemon's panic-blacklist and write-ahead-journals itself - a switch that kernel-panics mid-write gets blacklisted and early-cap self-disables after ONE crash, instead of re-firing it every boot. +5 selftest cases.
-- rebootResume loop-guard. The opt-in "reboot to resume charging" reboots at most twice, then warns instead of rebooting again - so a resume that never works can't loop forever. The counter resets on a healthy charge, so a genuine one-off is never penalized.
+- Early-cap brick-safe (GitHub #305). The pre-daemon write honours the panic blacklist and write-ahead-journals itself, so a switch that panics mid-write is blacklisted and early-cap self-disables after one crash instead of re-firing every boot. +5 selftest cases.
+- rebootResume loop-guard. Reboots at most twice, then warns. The counter resets on a healthy charge.
 
 **v2025.5.18-6.5.1-rc14 (202505294)**
 
-- Fast charge: charge-control writes are now idempotent (read-before-write), so ACC no longer re-triggers the charger's input negotiation (AICL/APSD) and drops fast charge to slow on charge-pump / PPS / PD / VOOC / wireless phones. Steady charging touches nothing; a stray drift still re-arms instantly.
-- Reliable stop: the front-end Stop button always kills the daemon; `acc -D restart` stops the old daemon before starting the new one; stopping at or above your limit no longer overshoots the cap.
-- Robustness batch (line-by-line audit, device-verified on mksh): fixed the `acc -s mcc=` "can't create ... Permission denied" spam; the temperature-throttle path is idempotent too; an empty or garbage sensor read and a malformed/truncated config can no longer abort the daemon; and assorted CLI hardening (`acc -H` at 0%, `at` command rewrite, config comma parsing).
-- AMPS (Find my switch) v7.1.4: reports your phone's fast-charge resume mechanism - a software re-kick on Qualcomm (`apsd_rerun`/`rerun_aicl`/`dp_dm`) or MediaTek (`en_power_path`), or "physical replug/reboot only" on newer PD-glink/UCSI chargers that self-negotiate. Probes the write-only trigger nodes by name (they are invisible to the read-value node scan). Pairs with AccA's new "Re-kick fast charge on plug" toggle.
+- Fast charge: charge-control writes are idempotent (read before write), so ACC no longer re-triggers AICL/APSD and drops fast charge on charge-pump / PPS / PD / VOOC / wireless phones. A stray drift still re-arms instantly.
+- Reliable stop: the Stop button always kills the daemon; `acc -D restart` stops the old one first; stopping at or above the limit no longer overshoots.
+- Robustness batch (device-verified on mksh): fixed `acc -s mcc=` permission-denied spam; the temperature-throttle path is idempotent; empty or garbage sensor reads and malformed configs can no longer abort the daemon; CLI hardening (`acc -H` at 0%, `at` rewrite, config comma parsing).
+- AMPS v7.1.4: reports your fast-charge resume mechanism, a software re-kick on Qualcomm (`apsd_rerun`/`rerun_aicl`/`dp_dm`) or MediaTek (`en_power_path`), or replug-only on newer PD-glink/UCSI chargers. Probes write-only trigger nodes by name.
 
 **v2025.5.18-6.5.1-rc13 (202505293)**
 
-- Plugged-but-draining recovery on dual-path PMICs (charge vs discharge is decided by the fuel-gauge coulomb-counter slope, immune to a flipping current sign); uninstall reliably restores stock charge nodes; uninstall is mksh-safe.
+- Plugged-but-draining recovery on dual-path PMICs (charge vs discharge decided by the coulomb-counter slope, immune to a flipping current sign); uninstall reliably restores stock charge nodes and is mksh-safe.
 
 **v2025.5.18-6.5.1-rc11 ... rc12 (202505291 - 202505292)**
 
-- `acca --state` adds charger-input telemetry (mV/mA) and a physics-based charge-speed class (input watts to slow / standard / fast / super / hyper), universal across vendors with no protocol node.
+- `acca --state` adds charger-input telemetry (mV/mA) and a physics-based charge-speed class, universal across vendors with no protocol node.
 
 **v2025.5.18-6.5.1-rc10 (202505290)**
 
-- Stopped the constant USB re-negotiation (every few seconds) when no limit was set - Mi A3 measured 16 re-kicks/30s before, 0 after; config-apostrophe fix; the in-app updater now points at this fork.
+- Stopped constant USB re-negotiation when no limit was set (Mi A3: 16 re-kicks/30s before, 0 after); config-apostrophe fix; in-app updater points at this fork.
 
 **v2025.5.18-6.5.1-rc6 ... rc9 (202505286 - 202505289)**
 
-- AMPS switch-finder hardening: a class-aware stress test that never demotes a working firmware %-limit (Pixel `charge_stop_level`) to a battery-draining cut; thermal-level node detection; clearing a current/voltage limit restores the nodes and re-kicks USB in every charge state.
+- AMPS hardening: class-aware stress test that never demotes a working firmware %-limit (Pixel `charge_stop_level`) to a battery-draining cut; thermal-level node detection; clearing a limit restores the nodes and re-kicks USB in every charge state.
 
 **v2025.5.18-6.5.1-rc1 ... rc5 (202505281 - 202505285)**
 
-- Charge limit anchored to the fuel gauge (coulomb %) instead of the lying status/current node; self-healing current polarity; `soc:google,charger` (Pixel 4a/5-class) native stop/start managed directly; the "current limit won't stick" save-hang fixed.
+- Charge limit anchored to the fuel gauge instead of the lying status/current node; self-healing current polarity; `soc:google,charger` (Pixel 4a/5-class) native stop/start managed directly; the "current limit won't stick" save-hang fixed.
 
 **v2025.5.18-stable.6.5 (202505280) - first fork release**
 
-- AMPS (Adaptive Multi-device Probe & Selector): a universal charge-switch finder. It probes the whole power-supply tree, live-tests every switch type (bypass, cut, drain, native %-limit), leak-verifies that a switch truly holds, and recommends the safest - writing only ACC's own reversible switches and restoring every change on exit. Built into AccA as "Find my switch".
-- Folds in the full 6.4 / 6.4.1 reliability line: boot-window overcharge cap, sustained-hold switch locking, faster resume, corrupt-config survival, and corrected current / self-healing polarity on Pixel and Tensor.
-- Device-verified on Xiaomi Mi A3 and Pixel 9a. Systemless; works on any root (Magisk / KernelSU / APatch). Existing configs are unchanged.
+- AMPS (Adaptive Multi-device Probe & Selector): a universal charge-switch finder. Probes the whole power-supply tree, live-tests every switch type (bypass, cut, drain, native %-limit), leak-verifies that a switch truly holds, and recommends the safest, writing only reversible switches and restoring on exit. Built into AccA as "Find my switch".
+- Folds in the full 6.4 / 6.4.1 reliability line: boot-window overcharge cap, sustained-hold switch locking, faster resume, corrupt-config survival, corrected current and self-healing polarity on Pixel and Tensor.
+- Device-verified on Xiaomi Mi A3 and Pixel 9a. Systemless; works on any root (Magisk / KernelSU / APatch). Existing configs unchanged.
 
 Full pre-fork history (VR-25 ACC 6.4.1 and earlier): https://github.com/VR-25/acc

@@ -37,5 +37,12 @@ mkdir -p $TMPDIR $dataDir
 export dataDir domain execDir id TMPDIR
 . $execDir/setup-busybox.sh
 . $execDir/release-lock.sh
+# rc21: archive the PREVIOUS boot's reboot evidence (pstore/bootreason) to a persistent rolling log, so
+# a reboot stays debuggable whenever the user later collects diagnostics -- pstore/last_kmsg are single-
+# slot and wiped each boot, logcat too. Backgrounded + timeboxed so it can never delay the daemon start.
+# rc22: -k, or the box is not a box. The payload is a shell sitting in a child, and mksh DEFERS
+# SIGTERM until that child returns -- on toybox 0.8.0 (Mi A3) the 8s limit measured 30s and the
+# archiver outlived the boot. An undeferrable SIGKILL 3s later closes it on every device.
+[ -f $execDir/reboot-archive.sh ] && ( timeout -k 3 8 sh $execDir/reboot-archive.sh >/dev/null 2>&1 & ) 2>/dev/null || :
 [ ".$1" = .-x ] && touch $dataDir/disable
 exec start-stop-daemon -bx $execDir/${id}d.sh -S -- "$@" || exit 12

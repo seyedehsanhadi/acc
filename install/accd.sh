@@ -7,6 +7,21 @@
 . $execDir/acquire-lock.sh
 
 
+# rc21: the daemon runs under `set -u`, so touching an unset variable is fatal -- and these come
+# from $TMPDIR/.batt-interface.sh, a tmpfs cache that is absent on every boot and can also go
+# missing on its own. When it is, the daemon aborted at init with
+# `accd.sh: currFile: parameter not set` and exited through exxit. That is the worst possible
+# moment to die: any charge switch left cut STAYS cut, the charger reads offline, and a dead
+# daemon cannot release it -- the phone then discharges on a live cable and survives reboots.
+# Reproduced on a Mi A3 while chasing the "drains rather than charges" field report.
+# acc-switch-scan.sh already predeclares these for the same reason; the daemon did not.
+# Empty is the correct default: every consumer already treats an empty currFile/battStatus as
+# "unknown" and falls back to a direct read.
+: ${currFile:=}
+: ${battStatus:=}
+: ${ampFactor_:=}
+
+
 _INIT=false
 
 case "$*" in
@@ -395,7 +410,28 @@ if ! $_INIT; then
     # Battery temperatures are always Celsius here (no millivolt domain), so a fixed sane
     # band is safe; anything outside it is garbage, not a user preference.
     { [ "$_st" -ge 40 ] && [ "$_st" -le 70 ]; } 2>/dev/null || _st=55
-    [ $(temp_now) -lt $(( _st * 10 )) ] || shutdown
+    # rc21 CRITICAL: only ever power the phone off on a reading we actually TRUST.
+    #
+    # This line used to be `[ $(temp_now) -lt $(( _st * 10 )) ] || shutdown`, with the
+    # substitution UNQUOTED. When the temperature read came back empty the word disappeared, so
+    # the shell saw `[ -lt 550 ]`, which is not a valid test -- mksh returns 2 ("unexpected
+    # operator/operand"), that counts as false, and the `||` powered the phone off. The check
+    # failed OPEN, in the worst possible direction: an unreadable sensor was treated as an
+    # overheating battery.
+    #
+    # temp_now coerces a bad read to 250, so this looked impossible; it is not. The relative
+    # sysfs paths (temp=battery/temp, battStatus=battery/status) all resolve against the daemon's
+    # CWD, and when that goes the reads fail together and the function's own output is lost with
+    # them. Device-proven on a Mi A3: `accd shutdown` logged with level=, temp= AND status= all
+    # empty, config perfectly sane (shutdown_temp 55) and the battery at 31C, immediately
+    # followed by ShutdownActivity in logcat. It powered the phone off four times.
+    #
+    # Now: read once, demand a plain number, and only compare a value we have. No reading means
+    # no shutdown -- max_temp still pauses charging, so nothing is left unprotected. A thermal
+    # cutoff that cannot read the thermometer must do nothing, never fire.
+    _tn=$(temp_now 2>/dev/null) || _tn=
+    case "${_tn:-x}" in ''|*[!0-9-]*) _tn=;; esac
+    [ -z "$_tn" ] || [ "$_tn" -lt $(( _st * 10 )) ] || shutdown
 
     [ -z "${cooldownCurrent-}" ] || {
       # N1: coerce cooldown(=[0])/resume(=[2]) temps so a corrupt/hand-edited value can't abort
@@ -543,7 +579,41 @@ if ! $_INIT; then
       amp_recheck || :
 
       # publish the state export (subsystem A) -- best-effort, never blocks the loop
-      write_state || :
+      #
+      # rc21: this ran unconditionally every loop. The export is AccA's UI feed, not a safety
+      # function, and rebuilding the whole snapshot forever cost 1673 of ACC's 2428 forks/min
+      # at idle on a Mi A3 (69% of them; ~52% of one core, screen off, nothing happening).
+      # Publish straight away whenever anything the app actually shows has moved -- battery
+      # level or charging status -- and otherwise at most every 30s, so the file can never sit
+      # stale for long. Both probes are `read` builtins with a redirect: no fork is spent
+      # deciding not to fork, which is the whole point. $SECONDS is a shell builtin too.
+      _wsLvl=; _wsSt=
+      read -r _wsLvl < /sys/class/power_supply/battery/capacity 2>/dev/null || :
+      read -r _wsSt  < /sys/class/power_supply/battery/status   2>/dev/null || :
+      # A change-triggered publish alone is not enough: `status` flaps between Charging/Idle/
+      # Discharging as the current fluctuates, so the key changed on nearly every loop and the
+      # throttle barely bit (profiled: the export still ran 7-9x per 20s, not once per 30s).
+      # Keep the immediate publish for responsiveness, but never more often than _wsMin seconds
+      # apart, so a flapping value cannot cost more than that. The 30s ceiling still bounds
+      # staleness when nothing changes at all.
+      # The ceiling is now uiRefresh (default 30, unchanged behaviour). It bounds ONLY the idle
+      # heartbeat: the second branch below still publishes a level/status change within 5s at any
+      # setting, so nothing a user waits on gets slower. state.json is display-only -- no charging
+      # decision reads it and acc -i / acc -j build fresh -- so this cannot affect control.
+      #
+      # Worth raising because the publish is by far the daemon's most expensive act: profiled at
+      # 1216ms of CPU per call on an A3 and 444ms on a Pixel 6a, against a ~2000ms/min floor for
+      # everything else combined. Measured idle, screen off: 30s = 3937ms/min, 60s = 2946 (-25%),
+      # 120s = 2394 (-39%). uiRefresh=0 drops the heartbeat entirely (~2000ms/min, -49%) and
+      # leaves only change-driven publishes, which suits a plugged phone nobody is watching.
+      _uiR=${uiRefresh:-60}
+      case $_uiR in ""|*[!0-9]*) _uiR=60;; esac
+      if { [ "$_uiR" != 0 ] && [ $(( SECONDS - ${_wsAt:-0} )) -ge "$_uiR" ]; } \
+      || { [ "$_wsLvl|$_wsSt" != "${_wsLast-}" ] && [ $(( SECONDS - ${_wsAt:-0} )) -ge 5 ]; }; then
+        _wsLast="$_wsLvl|$_wsSt"
+        _wsAt=$SECONDS
+        write_state || :
+      fi
       flight_rec || :
 
       # Trim the daemon log. This used to live at the end of is_charging(), which
@@ -567,8 +637,26 @@ if ! $_INIT; then
       # the firmware/OS in this mode; opt out with $dataDir/.no-native-limit for the
       # generic switch logic below.)
       if $nativeLimit; then
-        . $config 2>/dev/null || :
-        sync_native_limit
+        # rc21: the native (Tensor charge_stop_level) path continues before
+        # is_charging() is ever reached, so it never ran the defensive _srccfg the
+        # switch path uses. A terminal/third-party non-atomic write that left the
+        # config truncated then killed the daemon HERE on a Pixel 9a (the Mi A3,
+        # switch path, survived via _srccfg). Load defensively here too, and guard
+        # sync_native_limit / mask_capacity so a broken read can never abort the
+        # loop. The firmware limit keeps holding regardless, but the daemon must
+        # not fall over.
+        _srccfg
+        # rc21: say so when the switch shown in settings is NOT what holds the limit. This branch
+        # `continue`s before the generic switch logic, so on a phone with a firmware limit the
+        # configured chargingSwitch is never written -- yet AccA still displays it. A Pixel 4a 5G
+        # owner chasing an occasional charger blip spent the report hunting a switch that had
+        # never been in use, because nothing anywhere said which mechanism was actually holding.
+        # Warning only: the firmware limit is the right thing to be using, so behaviour is
+        # unchanged and a user's chosen switch is still never silently overwritten.
+        if [ -n "${chargingSwitch[0]-}" ] && [ "${chargingSwitch[0]}" != "$gcsl" ]; then
+          warn_once_per nativeshadow 86400 "ACC: this phone has a firmware charge limit and that is what holds your limit. The charging switch listed in settings (${chargingSwitch[0]##*/}) is not being used, so changing it will not change anything." || :
+        fi
+        sync_native_limit || :
         native_unlatch || :
         native_verify_backstop || :
         # The Capacity Mask has to run here too. It is a DISPLAY feature and has
@@ -580,9 +668,40 @@ if ! $_INIT; then
         # capacity_mask=true, acc -sp agreed, and the daemon never created
         # .mask-n or .mask-on and never froze Android's level, while the same
         # build masked correctly on a Mi A3 whose switch is not native.
-        mask_capacity
-        _nap ${loopDelay[1]:-9}
-        continue
+        mask_capacity || :
+        # rc21: honour allow_idle_above_pcap on firmware-limit phones.
+        #
+        # This branch `continue`s before is_charging(), and the ONLY place that reads
+        # allowIdleAbovePcap is inside it -- so on every phone with a native limit (any Pixel
+        # with google,charger) "never sit above the limit, cycle down to resume" was accepted,
+        # written to config, echoed back by acc -sp, and then silently ignored. A Pixel 3a owner
+        # reported it as the battery indicator being stuck above the pause limit "after being in
+        # bypass mode", which is precisely the state the setting exists to prevent.
+        #
+        # Fall through to the generic idle-avoidance instead of duplicating it here: that code is
+        # field-hardened (xIdleCount budget, the sweet/M2101K6G churn fix) and was measured doing
+        # the right thing on a Mi A3 -- input cut, battery discharging toward resume. The firmware
+        # limit has already been synced above, so it keeps holding either way.
+        #
+        # Narrow on purpose: only when the user explicitly set the non-default false AND the
+        # battery is at or above the pause level. Default (true) phones keep the pure native path
+        # exactly as before, so the common case is untouched.
+        # Cleared on EVERY pass before it can be set, so it can never leak into a later loop
+        # where the user has raised the limit, turned the setting back on, or dropped below it.
+        _nativeIdleAvoid=false
+        if $allowIdleAbovePcap || ! _ge_pause_cap 2>/dev/null; then
+          _nap ${loopDelay[1]:-9}
+          continue
+        fi
+        # Falling through is not enough on its own. The generic idle-avoidance is gated behind
+        # cap_idle_threshold, which wants pause > 60 AND level > pause+1 -- sensible where idling
+        # is an incidental side effect, but wrong here. The Pixel 3a sat at exactly pause+1 (81 vs
+        # 80) and the Pixel 4a at pause itself (40 vs 40), so both stayed inert even after the
+        # branch handed over. On a firmware-limit phone idling above the cap is what the hardware
+        # DOES, which is the very thing allow_idle_above_pcap=false forbids, so the threshold must
+        # not get a veto. This flag is set ONLY on this path (native limit + user chose false +
+        # at/above the limit), so the generic behaviour for everyone else is untouched.
+        _nativeIdleAvoid=true
       fi
 
       leak_backstop && { _nap ${loopDelay[1]:-9}; continue; }
@@ -603,7 +722,8 @@ if ! $_INIT; then
 
         # disable charging under <conditions>
         if mt_reached || _ge_pause_cap; then
-          if ! $allowIdleAbovePcap && [ $xIdleCount -lt 2 ] && cap_idle_threshold; then
+          if ! $allowIdleAbovePcap && [ $xIdleCount -lt 2 ] \
+            && { cap_idle_threshold || ${_nativeIdleAvoid:-false}; }; then
             # if possible, avoid idle mode when capacity > pause_capacity
             (cat $config > $TMPDIR/.cfg
             config=$TMPDIR/.cfg
@@ -617,6 +737,16 @@ if ! $_INIT; then
             echo "chargingSwitch=(${chargingSwitch[@]-})" > $TMPDIR/.sw
             force_off)
             chDisabledByAcc=true
+            # rc21: spend the budget HERE, where the attempt is made. The only other
+            # increment is gated on _le_pause_cap (cap <= pause), but this branch only runs
+            # when cap_idle_threshold is true (cap >= pause+2), and both sit in the same
+            # is_charging iteration -- so that increment is unreachable from here and
+            # xIdleCount never left 0. The "-lt 2" bound above therefore never expired and
+            # cycle_switches_off re-ran every loop for as long as the level stayed above the
+            # limit: endless charging-switch churn, and enough momentary on-states to trip
+            # the lockhold warning about a switch that was in fact holding (field report,
+            # sweet/M2101K6G: ~40 toggles in 21 min while pinned at 91%).
+            xIdleCount=$((xIdleCount + 1))
             [ $_status != Discharging ] || xIdle=true
           else
             # rc(6.4-rc2): "|| :" -- disable_charging returns 7 on TOTAL switch failure
@@ -911,12 +1041,30 @@ if ! $_INIT; then
           # revive is preserved; only redundant same-value pokes are skipped, so a healthy fast charge
           # is never disturbed. (Supersedes the rc14-test counter-gate: reading is more correct -- it
           # also re-arms a drifted node WHILE charging, which the gate skipped, and needs no state file.)
+          # rc21: only sweep while a charger is actually attached.
+          #
+          # These two loops write "allow charging" to every node of their class. With no cable in
+          # that achieves NOTHING electrically -- there is no input to allow -- but it is not
+          # harmless: on some devices battery/charging_enabled=1 makes the KERNEL report
+          # status=Charging with nothing plugged in. Android reads that node, so the system and
+          # every third-party app announce charging while the battery icon (which reads the
+          # separate */online nodes) correctly shows none. Field report on a fleur: dumpsys showed
+          # "status: 2 (CHARGING)" next to "AC powered: false, USB powered: false", and removing
+          # ACC fixed it. His resume_capacity was 80 with the battery at 56%, so this branch ran on
+          # every single loop, holding the phantom status permanently.
+          #
+          # enable_charging already gates the same class of write on `present` for exactly this
+          # reason (its unplug-blip note); this sweep simply never got the gate. Gating costs
+          # nothing real: the stray-cut revive this exists for only matters when a charger is
+          # there to be blocked, and the moment one is plugged in the sweep runs as before.
+          if present; then
           for _di in */input_suspend */charge_disable */batt_slate_mode */op_disable_charge */disable_charging; do
             [ -w "$_di" ] || continue; [ "$(cat "$_di" 2>/dev/null)" = 0 ] || { _wlog "sweep $_di <- 0 (cut-release)"; echo 0 > "$_di" 2>/dev/null; } || :
           done
           for _en in */charging_enabled */battery_charging_enabled */charge_enabled */charging_enable */enable_charging */enable_charger; do
             [ -w "$_en" ] || continue; [ "$(cat "$_en" 2>/dev/null)" = 1 ] || { _wlog "sweep $_en <- 1 (enable-revive)"; echo 1 > "$_en" 2>/dev/null; } || :
           done
+          fi
           # rc5 (#7): RESUME-side watchdog, symmetric to the rc19 breach monitor. enable_charging
           # wrote the switch ON value (+ the D8 rerun for current-cap), but on some current-cap
           # switches charging may STILL not restart -- an otherwise SILENT stall. If present and
@@ -939,7 +1087,7 @@ if ! $_INIT; then
             for _en in */charging_enabled */battery_charging_enabled */charge_enabled */charging_enable */enable_charging */enable_charger; do
               [ -w "$_en" ] || continue; [ "$(cat "$_en" 2>/dev/null)" = 1 ] || { _wlog "stall $_en <- 1"; echo 1 > "$_en" 2>/dev/null; } || :
             done
-            for _rn in */apsd_rerun */rerun_aicl; do [ -w "$_rn" ] && { _wlog "rekick $_rn <- 1"; echo 1 > "$_rn" 2>/dev/null; } || :; done
+            rekick_charger || :
             rf=$(cat $TMPDIR/.resumefail 2>/dev/null || echo 0); rf=$((rf + 1)); echo $rf > $TMPDIR/.resumefail
             if [ $rf -ge 4 ] && [[ "${chargingSwitch[*]-}" = *\ -- ]]; then
               # rc(6.4.1): tell "switch won't resume" apart from "charger died". If the cable is still
@@ -963,7 +1111,9 @@ if ! $_INIT; then
             fi
             fi
           else
-            rm $TMPDIR/.resumefail $TMPDIR/.resumewarned 2>/dev/null || :
+            # charging is healthy again -> drop the re-kick stamp too, so the NEXT genuine stall
+            # gets its first kick immediately instead of waiting out a stale window.
+            rm $TMPDIR/.resumefail $TMPDIR/.resumewarned $TMPDIR/.rekick-at 2>/dev/null || :
           fi
         fi
 
@@ -984,9 +1134,39 @@ if ! $_INIT; then
               shutdownWarnings=false
             }
             # action
+            # rc21: AT MOST ONE low-battery shutdown per discharge episode.
+            #
+            # Powering the phone off at shutdown_capacity and then doing it again every 15 minutes
+            # (_uptime 900 is the only thing that was holding it back) makes the device unusable
+            # exactly when someone needs it most: flat battery, powered back on for an emergency
+            # call. The threshold has already done its job once; after that the user has clearly
+            # chosen to keep using the phone, and that choice is theirs, not the module's.
+            #
+            # The latch lives in dataDir, NOT tmpfs, and is deliberate: tmpfs is wiped every boot,
+            # so a tmpfs latch would clear on exactly the power-on it exists to protect and the
+            # phone would shut down again 15 minutes later - the bug this fixes.
+            #
+            # It re-arms on its own. The else branch below clears it as soon as the level is back
+            # ABOVE the threshold, which only happens after a real charge, so the next flat
+            # battery is treated as a new episode and gets its shutdown. Nothing is permanently
+            # disabled and no config key changes, so AccA and every existing config are untouched.
+            #
+            # Scoped to the CAPACITY branch on purpose. shutdown_temp keeps firing every time:
+            # repeated overheating is a genuinely repeating hazard, a flat battery is not.
             if _le_shutdown_cap; then
-              sleep ${loopDelay[1]}
-              ! not_charging Discharging || shutdown
+              if [ -f $dataDir/.sd-latched ]; then
+                ${isAccd:-false} && command -v _wlog >/dev/null 2>&1 \
+                  && _wlog "low-battery shutdown already fired this episode: leaving the phone on" || :
+              else
+                sleep ${loopDelay[1]}
+                ! not_charging Discharging || {
+                  : > $dataDir/.sd-latched 2>/dev/null || :
+                  sync 2>/dev/null || :
+                  shutdown
+                }
+              fi
+            else
+              rm -f $dataDir/.sd-latched 2>/dev/null || :
             fi
           fi
         fi
@@ -1070,6 +1250,20 @@ if ! $_INIT; then
 
 
   sync_native_limit() {
+    # rc21: the blacklist has to reach HERE too. This path writes charge_stop_level /
+    # charge_start_level with a raw echo, deliberately (see the idempotency note below), so it
+    # never passes through write() and therefore never consulted the crash blacklist. On a Tensor
+    # phone that meant blocking the node which had taken the phone down changed nothing: the
+    # daemon kept writing it every loop. Device-proven on a Pixel 9a. Refusing to write is the
+    # same trade-off the generic path makes, and it is safe in a way a cut switch is not: leaving
+    # the firmware levels alone cannot strand the phone not charging, it only means the limit is
+    # not held, which the warning says plainly.
+    if command -v sw_blacklisted >/dev/null 2>&1 \
+      && { sw_blacklisted "$gcsl" || sw_blacklisted "$gcst"; }
+    then
+      warn_once_per nativeblocked 21600 "ACC: this phone's firmware charge-limit control is on the blocked list, so ACC is not writing it. The limit is NOT being held. Remove it from Blocked settings to use it again."
+      return 0
+    fi
     # rc20: keep the firmware limit nodes in step with the user's pause/resume capacity.
     # The firmware charges to charge_stop_level, holds idle, and resumes at
     # charge_start_level. Temperature safety: at/above max_temp, force a pause by lowering
@@ -1127,7 +1321,7 @@ if ! $_INIT; then
     # limit+2, keep holding until the cell drains to the limit or is unplugged.
     # Returns 1 (proceed normally) when the switch holds, below the limit,
     # unplugged, or in millivolt mode (capacity[3] > 100).
-    local pause=${capacity[3]:-100} cap n sw0
+    local pause=${capacity[3]:-100} cap n sw0 _lbflip _lbrc
     [ "$pause" -le 100 ] 2>/dev/null || return 1
     cap=$(batt_cap) 2>/dev/null || return 1
     sw0="${chargingSwitch[0]-}"; sw0="${sw0##*/}"
@@ -1139,18 +1333,72 @@ if ! $_INIT; then
         done
         rm -f $TMPDIR/.leakcut 2>/dev/null || :
       }
+      rm -f $TMPDIR/.leakbad.* 2>/dev/null || :
       return 1
     fi
     [ "$cap" -ge $(( pause + 2 )) ] || [ -f $TMPDIR/.leakcut ] || return 1
+    # rc21: VERIFY the cut before claiming it holds. Writable != working: on an oplus
+    # OnePlus 8 the only present candidate is input_suspend, which the firmware re-enables
+    # (AMPS grades it "dropped current briefly then firmware RE-ENABLED -> would OVERCHARGE").
+    # The old loop wrote it, returned 0 and reported "holding" while the cell kept climbing
+    # past the limit, so the backstop silently became a no-op. Now: write, confirm charging
+    # actually stopped, and if it did not, revert the node and move on to the next candidate.
+    # A node that failed is marked for this boot (tmpfs) so the daemon does not re-write and
+    # revert it on every loop; the marks clear with the cut when the cell is back at the limit.
     for n in input_suspend charge_disable batt_slate_mode op_disable_charge; do
       [ "$n" = "$sw0" ] && continue
       [ -w "battery/$n" ] || continue
+      [ -f "$TMPDIR/.leakbad.$n" ] && continue
+      # rc21: this is a RAW write, so it never passed through write()'s blacklist check and the
+      # backup cut could seize a node that had already taken the phone down. Device-proven on a
+      # Mi A3: seconds after the daemon released and dropped a blocked input_suspend, this loop
+      # wrote 1 to it again and left charging cut by a node ACC may no longer touch. Same bypass
+      # class as sync_native_limit on Tensor. The release loop above stays unconditional --
+      # letting go of a node is always safe, taking one is not.
+      if command -v sw_blacklisted >/dev/null 2>&1 && sw_blacklisted "battery/$n"; then continue; fi
       echo 1 > "battery/$n" 2>/dev/null
-      touch $TMPDIR/.leakcut
-      warn_once_per leakcut 21600 "⚠️ ACC: your charging switch leaked past the ${capacity[3]:-?}% limit; holding a reversible input cut until the battery is back at the limit."
-      return 0
+      # not_charging() consumes the global `flip` (flip_sw sets it, the next not_charging
+      # eats it). This verification is an ad-hoc probe, NOT part of that handoff, so save
+      # and restore it -- otherwise a pending flip context could be swallowed here.
+      _lbflip="${flip-}"; not_charging; _lbrc=$?; flip="$_lbflip"
+      if [ $_lbrc -eq 0 ]; then
+        touch $TMPDIR/.leakcut
+        warn_once_per leakcut 21600 "⚠️ ACC: your charging switch leaked past the ${capacity[3]:-?}% limit; holding a reversible input cut until the battery is back at the limit."
+        return 0
+      fi
+      echo 0 > "battery/$n" 2>/dev/null || :
+      : > "$TMPDIR/.leakbad.$n" 2>/dev/null || :
+      warn_once_per "leakbad$n" 21600 "⚠️ ACC: the backup cut '$n' did not stop charging on this phone (firmware re-enabled it); trying the next one."
     done
     return 1
+  }
+
+
+  rekick_charger() {
+    # rc21: RATE-LIMIT the stall re-kick. apsd_rerun/rerun_aicl force the charger to re-run input
+    # detection. Firing it on every pass (measured 10x in 10 minutes on an oplus curtana) can
+    # collapse a QC/HVDCP handshake back to 5V and leave the input settled around 1.8A, which the
+    # owner sees as "my 9V charger only does 5V/2A". The FIRST kick still fires with no delay, so a
+    # genuine stall recovers exactly as fast as before; only the repeats inside the window are
+    # dropped. The .resumefail escalation counter is deliberately NOT touched, so the
+    # warn/blacklist/reselect timing is unchanged. Stamp lives in tmpfs -> clears every boot.
+    # Off switch, persistent (dataDir, not tmpfs) so it survives a reboot. The re-kick is what
+    # recovers a stalled charger, but on a phone whose stall check misfires it is also what
+    # collapses a fast-charge handshake, and the owner needs to be able to stop it without
+    # editing scripts. `acc -sk off` writes this; `acc -sk on` removes it.
+    [ ! -f $dataDir/.rekick-off ] || return 1
+    local _now= _last= _gap=${REKICK_MIN_GAP:-300} _rn=
+    _now=$(date +%s 2>/dev/null); case "${_now:-}" in ''|*[!0-9]*) _now=0;; esac
+    _last=$(cat $TMPDIR/.rekick-at 2>/dev/null); case "${_last:-}" in ''|*[!0-9]*) _last=0;; esac
+    if [ "$_now" -ne 0 ] && [ "$_last" -ne 0 ] && [ $(( _now - _last )) -lt "$_gap" ]; then
+      _wlog "rekick suppressed ($(( _now - _last ))s since last, min ${_gap}s)"
+      return 1
+    fi
+    for _rn in */apsd_rerun */rerun_aicl; do
+      [ -w "$_rn" ] && { _wlog "rekick $_rn <- 1"; echo 1 > "$_rn" 2>/dev/null; } || :
+    done
+    [ "$_now" = 0 ] || echo "$_now" > $TMPDIR/.rekick-at 2>/dev/null || :
+    return 0
   }
 
 
@@ -1212,6 +1460,32 @@ if ! $_INIT; then
     # that sync_native_limit still enforces -- it can never overcharge or disable the cap.
     # rc24: $freshPlug is computed once per loop by the shared plug-transition tracker.
     online || return 0
+    # rc21: skip entirely when the firmware nodes are on the crash blacklist. These two writes are
+    # raw echoes, so like sync_native_limit they never pass through write() and never saw the list.
+    # A release is normally exempt (a cut is what strands a phone, not a release), but this is not a
+    # one-off release: it re-pulses on every fresh plug, so a node that has already taken the phone
+    # down would be written again and again. sync_native_limit refuses to re-apply the limit while
+    # blacklisted anyway, so the un-latch has nothing left to restore -- pulsing is pure risk with
+    # no benefit. Caught on a Pixel 9a, where charge_stop_level moved 75 -> 100 while blocked.
+    if command -v sw_blacklisted >/dev/null 2>&1 \
+      && { sw_blacklisted "$gcsl" || sw_blacklisted "$gcst"; }
+    then
+      return 0
+    fi
+    # KNOWN GAP (unfixed, 2026-07-31): raising pause while the firmware is latched does NOT
+    # resume charging. Reproduced on a Pixel with a 3 A charger: pause 72 at 72% latches, raising
+    # to 80 writes charge_stop_level=80 and the phone stays at 0 mA until it drains to
+    # resume_capacity. Neither trigger below covers it - not a fresh plug, and above resume.
+    #
+    # Do NOT "fix" this by pulsing charge_stop_level/charge_start_level without testing on
+    # hardware first. Measured, with the DAEMON STOPPED so nothing could revert the writes:
+    #   stop=100 alone            -> still latched
+    #   stop=100 + start=74 (>SOC)-> still latched (charge_counter frozen for 70 s)
+    #   bd_clear=1                -> still latched
+    # so the "only a write of 100 re-arms the FET" note above is not sufficient on its own, and
+    # an attempted fix along those lines was reverted rather than shipped unverified. A physical
+    # unplug/replug does clear it, which is why the freshPlug path works. The actual trigger is
+    # still unidentified; charging_status=31 and the bd_* Battery Defender block are unexplored.
     if { $freshPlug && _lt_pause_cap; } || _le_resume_cap; then
       [ "$(read_status)" = Charging ] && return 0 || :
       # rc(6.4-rc2): stop=100 ALONE re-arms the Tensor FET only SLOWLY (1-3 min via the
@@ -1270,27 +1544,66 @@ if ! $_INIT; then
   # so a steady-state loop does no extra work (no per-loop fork; matters for
   # standby). Values that are merely out of range are still coerced by the inline
   # guards elsewhere; this guards the STRUCTURE of the file, not the values.
+  # rc21: the FALLBACK needs the same parse test as the config itself. _srccfg used to source
+  # .config-good blind, which reopens the exact hole it exists to close: that file is written
+  # with `cat $config > .config-good`, so a truncated read, a full /data, or a crash mid-copy
+  # leaves a half-written fallback -- and sourcing THAT is a parse error, fatal in mksh, killing
+  # the daemon at the moment it is trying to recover. Test it in a throwaway subshell first
+  # (exit trap cleared so its abort has no side effects); if even the fallback is unusable, keep
+  # whatever config is already in memory rather than abort. Enforcement continues either way.
+  _srcgood() {
+    [ -f $dataDir/.config-good ] || return 0
+    if ( trap - EXIT; . $dataDir/.config-good ) 2>/dev/null; then
+      . $dataDir/.config-good 2>/dev/null || :
+    else
+      rm -f $dataDir/.config-good 2>/dev/null || :   # poisoned: never trust it again
+    fi
+  }
+
   _srccfg() {
-    . $config 2>/dev/null || :
-    # a usable capacity array has >=4 space-joined fields (shutdown cooldown
-    # resume pause [mask]); a truncated read leaves it short or unset. Tested with
-    # a case-glob, not `set --`, so the caller's positional params are untouched.
-    case "${capacity[*]-}" in
-      *' '*' '*' '*)
-        if [ "${capacity[*]}" != "${_cfggood-}" ]; then
-          cat $config > $dataDir/.config-good 2>/dev/null || :
-          _cfggood="${capacity[*]}"
-        fi
-      ;;
-      *)
-        [ -f $dataDir/.config-good ] && { . $dataDir/.config-good 2>/dev/null || :; }
-      ;;
-    esac
+    # Sourcing a config with a SYNTAX error (a truncated / half-written file from a
+    # non-atomic external writer -- e.g. an unclosed `capacity=(` left by `echo >`,
+    # `sed -i`, or a third-party app killed mid-write) is FATAL in mksh: the parse
+    # error aborts the shell and fires the exit trap (exxit) BEFORE `2>/dev/null ||
+    # :` can act. A redirect and an `|| :` guard only catch RUNTIME failures; a
+    # PARSE-time error is not catchable that way. Confirmed on a Pixel 9a (Tensor,
+    # native-limit path): the daemon died right at `. $config` on a config LEFT
+    # truncated, xtrace showing 1282:. $config -> exxit. So do not source a file
+    # blind. Test that it PARSES in a throwaway subshell first (exit trap cleared so
+    # the subshell's own abort has no side effects and never runs exxit); only source
+    # it for real in the live shell once it is known well-formed. A broken file thus
+    # never reaches the live shell, and we keep enforcing from the last complete
+    # config we saw. A usable capacity array has >=4 space-joined fields (shutdown
+    # cooldown resume pause [mask]); tested with a case-glob, not `set --`, so the
+    # caller's positional params are untouched.
+    if ( trap - EXIT; . $config ) 2>/dev/null; then
+      . $config 2>/dev/null || :
+      case "${capacity[*]-}" in
+        *' '*' '*' '*)
+          if [ "${capacity[*]}" != "${_cfggood-}" ]; then
+            cat $config > $dataDir/.config-good 2>/dev/null || :
+            _cfggood="${capacity[*]}"
+          fi
+        ;;
+        *)
+          _srcgood
+        ;;
+      esac
+    else
+      # config does not even parse -- never source it into the live shell. Fall back
+      # to the last complete config; if we have none yet, leave the in-memory config
+      # as-is rather than abort.
+      _srcgood
+    fi
   }
 
   set_dp() {
     local curr= i= pos=0 neg=0 _force_relatch=0 _c0= _c1=
     _srccfg
+    # _srccfg just re-sourced the config, so a chargingSwitch blocked since the last pass (AMPS
+    # writes the list mid-run) is back in scope here. Re-check, or the daemon keeps a node the
+    # write choke point refuses and holds nothing while reporting nothing.
+    command -v _drop_blocked_sw >/dev/null 2>&1 && _drop_blocked_sw || :
     # skip if the status workaround is off or there is no usable current sensor
     { $battStatusWorkaround && [ $currFile != $TMPDIR/.dummy-mcc ]; } || return 0
     # rc6 (L1): latch the discharge polarity ONLY from a CONFIRMED "Charging" status -- that
@@ -1363,6 +1676,36 @@ if ! $_INIT; then
 
 
   shutdown() {
+    # rc21: NEVER power the device off during offline charging. The phone is already off with the
+    # cable in, running Android's `charger` binary and showing the battery icon. That path is a
+    # last-resort safety net owned by the framework and the kernel: whatever ACC's limits say, a
+    # user must always be able to shut the phone down and charge it. Someone who sets resume to
+    # 10% and lets the battery run flat depends on exactly this to get the phone back.
+    #
+    # ACC's shutdown exists to protect a RUNNING system from deep discharge or heat. In charger
+    # mode there is no runtime to protect, and the real cutoffs (PMIC low-voltage, kernel thermal)
+    # are still in force underneath. So the only thing acting here could do is kill a charge the
+    # user deliberately started. Same reasoning and same chokepoint placement as the cut guard in
+    # disable_charging: one check inside the function every caller routes through, so no future
+    # caller can miss it.
+    if command -v in_charger_mode >/dev/null 2>&1 && in_charger_mode; then
+      echo "=== $(date '+%Y-%m-%d %H:%M:%S') accd shutdown REFUSED: offline charging mode" \
+        >> $dataDir/logs/shutdown-trace.log 2>/dev/null || :
+      return 0
+    fi
+    # rc21: record WHY before acting. Powering the phone off is the most drastic thing this
+    # module does, and until now it left no trace at all -- a user whose phone shut down had
+    # nothing to look at, and neither did we. Three Mi A3 power-offs were chased through pstore,
+    # tombstones and dmesg precisely because this line was silent. The record is written and
+    # sync'd BEFORE the power-off so it survives it, and every read is guarded so a failure here
+    # can never be the reason the safety shutdown does not happen.
+    {
+      echo "=== $(date '+%Y-%m-%d %H:%M:%S') accd shutdown"
+      echo "    level=$(batt_cap 2>/dev/null) temp=$(temp_now 2>/dev/null) status=$(cat $battStatus 2>/dev/null)"
+      echo "    capacity=(${capacity[*]-}) temperature=(${temperature[*]-})"
+      echo "    switch=(${chargingSwitch[*]-})"
+    } >> $dataDir/logs/shutdown-trace.log 2>/dev/null || :
+    sync 2>/dev/null || :
     /system/bin/am start -n android/com.android.internal.app.ShutdownActivity < /dev/null > /dev/null 2>&1 \
       || /system/bin/reboot -p \
       || reboot -p || :
@@ -1443,6 +1786,48 @@ if ! $_INIT; then
   # load generic functions
   . $execDir/misc-functions.sh
 
+  # rc21: a CONFIGURED switch bypasses the candidate list entirely, so blocking the node you
+  # are currently using had no effect: the daemon kept flipping it. Drop it back to automatic
+  # instead of refusing the writes -- refusing them would also block enable_charging from
+  # turning charging back ON, which is how a phone ends up stuck not charging. Cleared here,
+  # the auto-locker picks a candidate that is not blocked, and if none exists the breach
+  # monitor says the limit is not held rather than pretending it is.
+  # This ran here in the first cut, which was ~80 lines BEFORE `_srccfg` loads the config that
+  # defines chargingSwitch. ${chargingSwitch[0]-} was therefore always empty, the guard below
+  # short-circuited, and the whole feature was dead: device-proven on a Mi A3, where a blocked
+  # configured switch stayed in config.txt across two reboots with no warning ever logged.
+  # It is a function now, called after the config load and again every loop, because AMPS
+  # writes the blacklist WHILE the daemon is running -- that is exactly when a node gets
+  # blocked -- and a once-at-init check can never see it. Costs nothing when nothing is
+  # blocked: sw_blacklisted returns on the first [ -s ] with no fork.
+  _drop_blocked_sw() {
+    command -v sw_blacklisted >/dev/null 2>&1 || return 0
+    [ -n "${chargingSwitch[0]-}" ] || return 0
+    sw_blacklisted "${chargingSwitch[0]}" || return 0
+    warn_once_per swblocked 21600 "ACC: your selected charging switch (${chargingSwitch[0]##*/}) is on the blocked list, so it is not being used. ACC will pick another. Remove it from Blocked settings to use it again."
+    # Release it ONCE before letting go, so a switch blocked while it was holding a cut cannot
+    # leave the phone unable to charge. After this the node is never written again.
+    _BLRELEASE=1 flip_sw on >/dev/null 2>&1 || :
+    unset _BLRELEASE
+    # Persist, then CHECK. The write was fully error-suppressed before, so a failure left the
+    # blocked node in config.txt and every restart resurrected it while the daemon silently
+    # refused to use it -- a limit that is not enforced and never says so. Fall back to editing
+    # the line directly (per-process temp, atomic rename) and warn if even that does not land.
+    if [ -x $TMPDIR/acca ]; then
+      $TMPDIR/acca $config --set charging_switch= >/dev/null 2>&1 || :
+    else
+      $execDir/acc.sh $config --set charging_switch= >/dev/null 2>&1 || :
+    fi
+    if grep -q '^chargingSwitch=([^)]' $config 2>/dev/null; then
+      _dbt=$config.$$.blsw
+      sed 's/^chargingSwitch=(.*/chargingSwitch=()/' $config > $_dbt 2>/dev/null \
+        && [ -s $_dbt ] && mv -f $_dbt $config 2>/dev/null || rm -f $_dbt 2>/dev/null
+    fi
+    grep -q '^chargingSwitch=([^)]' $config 2>/dev/null \
+      && warn_once_per swblockedcfg 21600 "ACC: could not clear the blocked charging switch from the config. The limit is NOT being held. Remove it from Blocked settings, or run: acc -s charging_switch=" \
+      || :
+    chargingSwitch=()
+  }
 
   xIdle=false
   xIdleCount=0
@@ -1514,7 +1899,47 @@ if ! $_INIT; then
 
   misc_stuff "${1-}"
   . $execDir/oem-custom.sh
-  . $config 2>/dev/null || :   # rc21: never abort init on a broken external write (values coerced below)
+  _srccfg   # rc21: parse-safe load. A truncated/half-written external config can never abort init now -- _srccfg test-parses in a subshell and falls back to last-good (values coerced below)
+
+  # rc21: settings that are legal, get applied exactly as asked, and then quietly cost the user
+  # something they never connected to the setting. Both come from real reports where the person
+  # could not have worked it out: nothing in ACC or the app said a word. Warnings only -- no
+  # value is changed, no behaviour is altered, and warn_once_per keeps them to once a day.
+  config_sanity() {
+    # --- a charge-voltage cap far below the cell's own maximum wrecks the fuel gauge ---
+    # A gauge re-anchors its charge estimate when the cell reaches termination voltage. Capped
+    # well below that it never terminates, never re-anchors, and its reading drifts upward with
+    # nothing to correct it. Pixel 3a, capped 3900 against a recorded 4200: the gauge claimed 78%
+    # while the coulomb counter said 47% and the cell sat at 3.71 V -- reported as "the indicator
+    # is stuck above my limit", which is what an over-reading gauge looks like near a cap.
+    # The original is not guessed: set_ch_volt records it in the entry as node::capped::original.
+    _mv="${maxChargingVoltage[0]-}"
+    case ${_mv:-x} in ''|x|*[!0-9]*) _mv="";; esac
+    if [ -n "$_mv" ] && [ -n "${maxChargingVoltage[1]-}" ]; then
+      _orig="${maxChargingVoltage[1]##*::}"
+      case ${_orig:-x} in ''|x|*[!0-9]*) _orig="";; esac
+      if [ -n "$_orig" ]; then
+        [ "$_orig" -ge 100000 ] 2>/dev/null && _orig=$(( _orig / 1000 ))   # uV entries -> mV
+        if [ "$_orig" -gt 0 ] 2>/dev/null && [ "$_mv" -le $(( _orig - 200 )) ] 2>/dev/null; then
+          warn_once_per mcvgauge 86400 "ACC: your charging voltage limit (${_mv} mV) is well below this battery's ${_orig} mV. Charging works, but the battery percentage will slowly drift and stop matching reality, because the gauge only recalibrates at a full charge it can now never reach. Raise it toward ${_orig} if the percentage looks wrong." || :
+        fi
+      fi
+    fi
+
+    # --- a pause/resume window only a point or two wide re-arms the charger constantly ---
+    # Every resume is a charger re-negotiation, and on many phones that is an audible plug-in
+    # chime. Pixel 4a 5G at 40/38 reported it as an occasional blip while sitting at the limit
+    # in bypass. Nothing is wrong with the setting; it just costs a re-arm every couple of points.
+    _res="${capacity[2]-}"; _pau="${capacity[3]-}"
+    case ${_res:-x}${_pau:-x} in *[!0-9]*) _res=""; _pau="";; esac
+    if [ -n "$_res" ] && [ -n "$_pau" ] && [ "$_pau" -le 100 ] 2>/dev/null \
+      && [ $(( _pau - _res )) -le 3 ] 2>/dev/null && [ $(( _pau - _res )) -ge 0 ] 2>/dev/null
+    then
+      warn_once_per narrowwindow 86400 "ACC: your resume (${_res}%) and limit (${_pau}%) are only $(( _pau - _res )) apart. The charger re-starts every time the battery drops that far, which some phones announce with the plug-in sound. Lowering resume to about $(( _pau - 8 ))% makes it far less frequent." || :
+    fi
+  }
+  config_sanity || :
+  _drop_blocked_sw   # rc21: must run AFTER the config load; chargingSwitch does not exist before this
   currentWorkaround0=$currentWorkaround
 
   # rc20: NATIVE Pixel/Tensor firmware charge limit. When google,charger exposes the
@@ -1541,6 +1966,84 @@ if ! $_INIT; then
   command -v journal_check >/dev/null 2>&1 && { journal_check || :; } || :
 
   apply_on_boot
+
+  # rc21 (field report, Redmi Note 10 Pro / sweet -- "battery is draining rather than charging",
+  # reproduced on a Mi A3 on a wall charger): recover a charger input that a previous run left
+  # starved.
+  #
+  # The trap: a small value on the input-current nodes starves the charger, the charger then
+  # drops OFFLINE, and the only code that restores those nodes -- `[ -n "${maxChargingCurrent[0]-}" ]
+  # || set_ch_curr -` in the charging branch -- runs only while the phone is seen as plugged in.
+  # So the state that needs undoing is exactly the state that stops the undo from running. The
+  # phone sits on a cable at usb/current_max=0 and discharges until someone physically replugs,
+  # while ACC's own sweep re-enables a charger its leftover cap is starving. The reporter's
+  # ledger shows this precisely: `usb/current_max <- 50000 (was 1800000)` and then an hour of
+  # enable-revive sweeps.
+  #
+  # Init is the one place this can be undone safely: it runs on every daemon start and reboot,
+  # before any limit is applied, and it is not gated on the online state that the starvation
+  # itself destroys. Only ever RAISES a node back to the default ACC recorded for it, and only
+  # when the user has configured no current limit at all -- so it can never weaken a cap the
+  # user asked for, and it cannot overcharge (input current is not the charge switch).
+  if [ -z "${maxChargingCurrent[0]-}" ] && [ -f $TMPDIR/ch-curr-ctrl-files ]; then
+    while IFS= read -r _ccl || [ -n "${_ccl:-}" ]; do
+      case "$_ccl" in ''|'#'*) continue;; esac
+      _ccf=${_ccl%%::*}                 # node path
+      _ccd=${_ccl##*::}                 # the default ACC captured for it
+      case "${_ccd:-x}" in ''|*[!0-9]*) continue;; esac
+      case "$_ccf" in /*) : ;; *) _ccf=/sys/class/power_supply/$_ccf;; esac
+      [ -w "$_ccf" ] || continue
+      _ccn=$(cat "$_ccf" 2>/dev/null)
+      case "${_ccn:-x}" in ''|*[!0-9]*) continue;; esac
+      # only lift a node that is BELOW its recorded default; never lower one
+      [ "$_ccn" -lt "$_ccd" ] 2>/dev/null || continue
+      echo "$_ccd" > "$_ccf" 2>/dev/null || :
+      command -v _wlog >/dev/null 2>&1 \
+        && _wlog "init restore $_ccf <- $_ccd (was $_ccn; no current limit configured)" || :
+    done < $TMPDIR/ch-curr-ctrl-files
+    unset _ccl _ccf _ccd _ccn
+  fi
+
+  # rc21 (same field report, and reproduced on a Mi A3 on a wall charger): release a charge
+  # switch that a previous run left in its CUT position.
+  #
+  # This is the half that actually strands phones. A switch left cut -- `input_suspend=1` on the
+  # A3 -- suspends the charger input, so the charger reads OFFLINE and every input-current node
+  # reads 0. ACC's release paths all sit inside the charging branch, which only runs while it
+  # believes it is plugged in, so the one thing that would undo the cut is disabled by the cut.
+  # The phone then discharges on a live cable indefinitely and SURVIVES REBOOTS: verified here,
+  # where a full reboot came back with input_suspend still 1, online 0, and the charger correctly
+  # identified as USB_HVDCP_3 the whole time. Writing 0 to that single node restored 2.28 A
+  # instantly.
+  #
+  # Only runs when ACC does not currently want a cut, i.e. the level is genuinely BELOW the
+  # user's pause level, so it can never fight a legitimate pause and can never overcharge: at or
+  # above the limit this does nothing at all. Percent limits only -- a mV pause_capacity is left
+  # to the normal path. The writes are the same idempotent sweep used on the resume side: a node
+  # already permissive is not re-poked, which matters because re-writing these re-triggers AICL
+  # and collapses fast charge.
+  _icl=$(cat /sys/class/power_supply/battery/capacity 2>/dev/null)
+  _icp=${capacity[3]-}
+  case "${_icl:-x}" in ''|*[!0-9]*) _icl=;; esac
+  case "${_icp:-x}" in ''|*[!0-9]*) _icp=;; esac
+  if [ -n "$_icl" ] && [ -n "$_icp" ] && [ "$_icp" -le 100 ] 2>/dev/null \
+     && [ "$_icl" -lt "$_icp" ] 2>/dev/null; then
+    ( cd /sys/class/power_supply 2>/dev/null || exit 0
+      for _idi in */input_suspend */charge_disable */batt_slate_mode */op_disable_charge */disable_charging; do
+        [ -w "$_idi" ] || continue
+        [ "$(cat "$_idi" 2>/dev/null)" = 0 ] && continue
+        command -v _wlog >/dev/null 2>&1 && _wlog "init release $_idi <- 0 (left cut, level $_icl < pause $_icp)" || :
+        echo 0 > "$_idi" 2>/dev/null || :
+      done
+      for _ien in */charging_enabled */battery_charging_enabled */charge_enabled */charging_enable */enable_charging */enable_charger; do
+        [ -w "$_ien" ] || continue
+        [ "$(cat "$_ien" 2>/dev/null)" = 1 ] && continue
+        command -v _wlog >/dev/null 2>&1 && _wlog "init release $_ien <- 1 (left cut, level $_icl < pause $_icp)" || :
+        echo 1 > "$_ien" 2>/dev/null || :
+      done ) || :
+  fi
+  unset _icl _icp
+
   touch $TMPDIR/.minCapMax
   # rc16: clear TRANSIENT auto-lock markers on (re)start so a crash mid-scan can never
   # lock the scanner out forever (the audit bug). The attempt-count, give-up flag and
@@ -1562,12 +2065,25 @@ if ! $_INIT; then
     # but an empty switch reads as "nothing is holding" and users re-run Find-Switch in vain (and
     # the early-cap skips). Cosmetic + idempotent: fills an EMPTY switch only, never overrides a
     # user's choice; nativeLimit still owns the actual hold.
-    . $config 2>/dev/null || :
-    [ -z "${chargingSwitch[*]-}" ] && {
-      sed -i "s|^chargingSwitch=.*|chargingSwitch=($gcsl 100 pcap --)|" $config 2>/dev/null || :
-      touch $dataDir/.user-locked 2>/dev/null || :
-      . $config 2>/dev/null || :
-    }
+    _srccfg
+    # rc21: do not refill with a node that is on the blocked list. _drop_blocked_sw clears the
+    # switch precisely because it is blocked; this cosmetic refill then saw an empty switch and
+    # put the same blocked node straight back, so on Tensor the drop never stuck (Pixel 9a: the
+    # warning fired every restart while config.txt still named the blocked node).
+    if [ -z "${chargingSwitch[*]-}" ] \
+      && ! { command -v sw_blacklisted >/dev/null 2>&1 && sw_blacklisted "$gcsl"; }
+    then
+      # This refill is COSMETIC (see above): it exists so AccA shows the native limit instead of
+      # an empty "Automatic". It is the daemon filling in its own choice, so it must not claim the
+      # USER locked it. It used to write the " --" marker and touch .user-locked, which had two
+      # real consequences beyond the label: misc-functions' lock arm treats .user-locked as
+      # "RESPECT a manual lock, NEVER auto-replace", so a Tensor phone whose charge_stop_level
+      # stopped holding would only warn instead of self-healing onto another switch; and
+      # write-config's pbim arm skips its deliberate auto-mode switch reset for a marked switch.
+      # A non-empty value alone satisfies the cosmetic goal, so write it bare.
+      sed -i "s|^chargingSwitch=.*|chargingSwitch=($gcsl 100 pcap)|" $config 2>/dev/null || :
+      _srccfg
+    fi
     sync_native_limit 2>/dev/null || :   # set the firmware limit at once (no toggle/overshoot)
   else
     online 2>/dev/null && ( cycle_switches on ) >/dev/null 2>&1 || :
@@ -1600,10 +2116,46 @@ else
     # unambiguous throttles are listed. Device-dependent stops (siop_level on Samsung,
     # night_charging on Xiaomi) are NOT excluded -- the sustained current check validates
     # those per device, so we never remove a switch that genuinely holds somewhere.
-    case "$1" in
-      *step_charging*|*restricted_charging*|*cool_mode*|*cool_down*|*system_temp*level*|*temp_cool*|*hmt_ta_charge*) return 1;;
-    esac
+    #
+    # rc21: *_now joins them. Under the power_supply ABI *_now is always an instantaneous
+    # reading, not a setting, so the "on" value captured for one is just whatever current
+    # happened to be flowing during the scan (a Redmi Note 9S got `usb/input_current_now
+    # 602075 0`, and every sweep pinned that stale 0.6 A back over the live value). AMPS
+    # already refuses these (_now$ in its deny list); this brings the candidates in line.
+    #
+    # rc21: and the test now runs against every name the entry EXPANDS to, not only the
+    # entry itself. ctrl-files.sh ships globs (`*/*charging_enable* 1 0`), and a glob matches
+    # none of these literals, so the check passed and the expansion below then emitted
+    # battery/step_charging_enabled -- a node this list exists to keep out. The daemon
+    # auto-locked it on a Mi A3 after a clean install, giving a "switch" that cannot hold.
+    sw_excluded() {
+      case "$1" in
+        *step_charging*|*restricted_charging*|*cool_mode*|*cool_down*|*system_temp*level*|*temp_cool*|*hmt_ta_charge*) return 0;;
+        *_now) return 0;;
+      esac
+      return 1
+    }
+    if sw_excluded "$1"; then return 1; fi
     for f in $(echo $1); do
+      # An excluded expansion drops only itself, so a glob's good matches still register.
+      # In an over-3 group the nodes are written together as one switch, so a bad member
+      # voids the whole group, which is what the loop below already does on any failure.
+      if sw_excluded "$f"; then
+        if $over3; then return 1; fi
+        continue
+      fi
+      # rc21: honour the crash blacklist here too. AMPS refuses to write a blacklisted node,
+      # but the daemon kept its own separate list and never consulted AMPS's, so a node blocked
+      # in the app was still picked and written by ACC: on a Mi A3 with input_suspend blocked,
+      # AMPS logged 12 refusals while the daemon cut charging with that same node. Dropping it
+      # as a CANDIDATE (rather than refusing the write later) means the daemon never locks it,
+      # so there is no half-applied switch to unwind and enable_charging is never blocked from
+      # restoring one. A node with no candidates left is surfaced by the existing breach
+      # monitor, which is the honest outcome: the limit is not held, and it says so.
+      if command -v sw_blacklisted >/dev/null 2>&1 && sw_blacklisted "$f"; then
+        if $over3; then return 1; fi
+        continue
+      fi
       if [ -f "$f" ] && chmod a+r $f 2>/dev/null \
         && {
           ! cat $f > /dev/null 2>&1 \

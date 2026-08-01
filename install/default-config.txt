@@ -15,6 +15,7 @@ rebootResume=false
 resetBattStats=(false false false)
 temperature=(45 50 40 55)
 tempLevel=0
+uiRefresh=60
 voltFactor=
 
 applyOnBoot=()
@@ -169,6 +170,7 @@ runCmdOnPause=''
 # shutdown_capacity sc
 # shutdown_temp st
 # temp_level tl
+# ui_refresh ur
 # volt_factor vf
 
 
@@ -488,3 +490,30 @@ runCmdOnPause=''
 # The stock values are generally integers, ranging from 0 to 6, 7 or so. siop_level (Samsung) ranges from 0 to 100).
 # For greater flexibility, this variable stores a percentage value, which is internally mapped to the system's scales.
 # Tip: If mcc is ignored under high temperature, but you still want it forced, try setting tl=1.
+
+
+# ui_refresh (ur) #
+#
+# Type: Integer (seconds), or 0
+# Default: 60
+#
+# How often the daemon republishes state.json, the snapshot the app reads for its charge meter.
+# This file is display-only: no charging decision reads it, and `acc -i` / `acc -j` always build a
+# fresh answer, so this setting cannot affect what ACC does to your battery.
+#
+# It bounds only the IDLE heartbeat. A change in level or charging status is still published within
+# seconds at any value, so "stopped at 75%" never lags. What goes stale between publishes is the
+# live current (mA) in the meter, which is not part of that change check.
+#
+# Raising it costs the daemon less work. Measured at idle with the screen off, CPU per minute:
+#
+#   value   Mi A3 (Qualcomm)    Pixel 6a (Tensor)
+#   30      3900 ms             3201 ms
+#   60      2658 ms  (-32%)     2809 ms  (-12%)  <- default
+#   120     2163 ms  (-45%)     2559 ms  (-20%)
+#   0       1670 ms  (-57%)     2298 ms  (-28%)
+#
+# The Tensor gain is smaller because its state build is already cheaper (444ms vs 1216ms per call).
+# 0 disables the heartbeat entirely: state.json then updates only when level or status changes,
+# which suits a forever-plugged phone whose meter nobody watches.
+

@@ -283,6 +283,7 @@ rebootResume=false
 resetBattStats=(false false false)
 temperature=(45 50 40 55)
 tempLevel=0
+uiRefresh=60
 voltFactor=
 
 applyOnBoot=()
@@ -437,6 +438,7 @@ runCmdOnPause=''
 # shutdown_capacity sc
 # shutdown_temp st
 # temp_level tl
+# ui_refresh ur
 # volt_factor vf
 
 
@@ -691,7 +693,7 @@ runCmdOnPause=''
 # Type: Boolean | String (pbim=no)
 # Default: true
 #
-# Battery idle mode, also called "standby mode" or "charging bypass", is the ability of running off the charger, as if the battery were disconnected from the device.
+# Battery idle mode, also called "charging bypass", is the ability of running off the charger, as if the battery were disconnected from the device.
 # Not all devices support this, but there's also emulated idle mode (refer to the readme), which works on all devices.
 #
 # If enabled, charging switches that support battery idle mode take precedence.
@@ -757,6 +759,33 @@ runCmdOnPause=''
 # For greater flexibility, this variable stores a percentage value, which is internally mapped to the system's scales.
 # Tip: If mcc is ignored under high temperature, but you still want it forced, try setting tl=1.
 
+
+# ui_refresh (ur) #
+#
+# Type: Integer (seconds), or 0
+# Default: 60
+#
+# How often the daemon republishes state.json, the snapshot the app reads for its charge meter.
+# This file is display-only: no charging decision reads it, and `acc -i` / `acc -j` always build a
+# fresh answer, so this setting cannot affect what ACC does to your battery.
+#
+# It bounds only the IDLE heartbeat. A change in level or charging status is still published within
+# seconds at any value, so "stopped at 75%" never lags. What goes stale between publishes is the
+# live current (mA) in the meter, which is not part of that change check.
+#
+# Raising it costs the daemon less work. Measured at idle with the screen off, CPU per minute:
+#
+#   value   Mi A3 (Qualcomm)    Pixel 6a (Tensor)
+#   30      3900 ms             3201 ms
+#   60      2658 ms  (-32%)     2809 ms  (-12%)  <- default
+#   120     2163 ms  (-45%)     2559 ms  (-20%)
+#   0       1670 ms  (-57%)     2298 ms  (-28%)
+#
+# The Tensor gain is smaller because its state build is already cheaper (444ms vs 1216ms per call).
+# 0 disables the heartbeat entirely: state.json then updates only when level or status changes,
+# which suits a forever-plugged phone whose meter nobody watches.
+
+
 #/DC#
 ```
 
@@ -817,6 +846,25 @@ Usage
 Options
 
   -b|--rollback [nv]   Restore previous installation; with "n" flag, the config is not restored; with "v" flag, nothing is done other than printing the version that would have been restored
+
+  -sk|--rekick [on|off]   Charger re-kick: ACC re-runs charger input detection when charging looks stalled. Turn it off if it disturbs fast charging on your phone
+    e.g.,
+      acc -sk (print the current setting)
+      acc -sk off
+      acc -sk on
+
+  --early-cap [on|off]
+     Boot-gap overcharge cap: the one write ACC makes before Android starts.
+     It self-disables if a boot does not complete, and this turns it back on.
+     e.g., acc --early-cap          (prints on or off)
+           acc --early-cap on
+           acc --early-cap off
+
+  -sb|--blacklist [rm <node> | add <node> | clear]   Nodes that crashed this phone during a switch scan, and are never written again
+    e.g.,
+      acc -sb (list them)
+      acc -sb rm /sys/class/power_supply/battery/some_node (allow it to be tested again)
+      acc -sb clear (allow all of them again)
 
   -c|--config [[editor] [editor_opts] | g for GUI]   Edit config (default editor: nano/vim/vi)
     e.g.,
@@ -890,6 +938,18 @@ Options
 
   -le   Same as -l -e
 
+  --diag|--diagnostics [--full|--core] [--sample]   Collect ONE diagnostic bundle to send us, scoped to
+    charging / reboot / root: identity, config, live charge state (acc -i, PMIC votables, battery nodes),
+    ACC's own logs, PLUS Android's logcat / pstore / crash / ANR / reboot records + a manifest. Passive,
+    on-demand, nothing runs in the background. CORE (default) is small (~75KB) and filters out log noise
+    (also the privacy boundary); the heavy raw logs auto-attach ONLY when a fresh crash or abnormal reboot
+    is detected. --full forces everything; --core forces minimal; --sample adds a 20s live read.
+    Serial/MAC/email are redacted. Same collector AccA's diagnostics button uses. e.g., acc --diag
+
+  --diag-verbose on [HOURS] | off   Opt-in richer capture for a rare intermittent bug. Off by default and
+    zero-background: it does NOT change the daemon, it only makes the next --diag include a live sample.
+    Auto-expires (default 24h). e.g., acc --diag-verbose on 6
+
   -n|--notif [["STRING" (default: ":)")] [USER ID (default: 2000 (shell))]]   Post Android notification; may not work on all systems
     e.g., acc -n "Hello, World!"
 
@@ -909,6 +969,13 @@ Options
 
   -s|--set file   Get config from file (in "acc -s" format); the file's path must be absolute; partial config is supported
     e.g., acc -s /data/config
+    Note: this MERGES over the current config; settings absent from the file are kept.
+    For a clean restore, run "acc -s --reset" first.
+
+  -E|--export file   Write the current config to file (backup)
+    e.g.,
+      acc --export /sdcard/Download/acc-backup.txt   (back up)
+      acc -s /sdcard/Download/acc-backup.txt         (restore)
 
   -s|--set prop1=value "prop2=value1 value2"   Set [multiple] properties
     e.g.,
@@ -964,6 +1031,12 @@ Options
 
   -ss::   Same as above
 
+  -ss f   Run Find my switch (AMPS) and pick the switch it verifies
+    e.g., acc -ss f
+
+  -ss <n>   Set the switch by its number in the "acc -ss::" list
+    e.g., acc -ss 2
+
   -s|--set v|--voltage [millivolts|-] [--exit]   Set/print/restore_default max charging voltage (range: 3700-4300 mV)
     e.g.,
       acc -s v (print)
@@ -1008,8 +1081,10 @@ Options
       acc -u -c -n (if update is available, prints version code (integer) and changelog)
       acc -u -c (same as above, but with install prompt)
 
-  -U|--uninstall   Completely remove acc and AccA
-    e.g., acc -U
+  -U|--uninstall [a]   Completely remove acc and AccA; with "a" flag, do not ask for confirmation
+    e.g.,
+      acc -U
+      acc -U a (no prompt, for a script or a phone with no console)
 
   -v|--version   Print acc version and version code
     e.g., acc -v
@@ -1042,7 +1117,7 @@ Exit Codes
   15. Idle mode is supported (--test)
   16. Failed to enable charging (--test)
 
-  Logs are exported automatically ("--log --export") on exit codes 1, 2 and 7.
+  Logs are exported automatically ("--log --export") on exit codes 7 and 10.
 
 
 Tips

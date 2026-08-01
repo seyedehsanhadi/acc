@@ -36,8 +36,27 @@ if [ ! -f $TMPDIR/.mcc-read ]; then
 
   if [ -f ${currCtrl}_ ]; then
     # exclude troublesome ctrl files
+    #
+    # rc21 (field report, Redmi Note 10 Pro / sweet -- "battery is draining rather than
+    # charging"): *_now is dropped HERE, not only from the switch list below. Under the
+    # power_supply ABI a *_now node is an instantaneous meter reading, never a setting, so the
+    # "default" captured for one is just whatever current happened to be flowing when the list
+    # was built. Every later apply_on_plug pass writes that stale number back over the live
+    # input: the reporter's ledger shows `usb/input_current_now <- 41845 (was 1787735)` next to
+    # `usb/current_max <- 50000 (was 1800000)`, i.e. the charger input pinned near 50 mA while
+    # plugged in. The phone then draws more than it receives and the battery falls with the
+    # cable attached, which is exactly what was reported, and ACC's own sweep spent the next
+    # hour re-enabling a charger that its own leftover cap was starving.
+    #
+    # The earlier fix excluded these from the SWITCH list only and deliberately left the
+    # current-control list alone "so the charging-current limit behaves as before". That was
+    # the wrong half: a meter node cannot control current on any device, so keeping it here
+    # bought no capability and cost this phone its charge. Excluding it costs nothing real --
+    # the genuine settables (*current_max, *input_current_settled, *constant_charge_current)
+    # are untouched.
     sort -u ${currCtrl}_ \
-      | grep -Eiv 'parallel|::-|bq[0-9].*/current_max' > $TMPDIR/.ctrl
+      | grep -Eiv 'parallel|::-|bq[0-9].*/current_max' \
+      | grep -v '_now::' > $TMPDIR/.ctrl
 
     # exclude non-batt control files
     $currentWorkaround \
@@ -45,8 +64,19 @@ if [ ! -f $TMPDIR/.mcc-read ]; then
       || cat $TMPDIR/.ctrl > ${currCtrl}
 
     # add curr and volt ctrl files to charging switches list
-    sed -e 's/::.*::/ /' -e 's/$/ 0/' $TMPDIR/.ctrl >> $TMPDIR/ch-switches
-    sed -E 's/(.*)(::v.*::)(.*)/\1 \3 \2/; s/::v/10/; s/:://' $TMPDIR/.ctrl >> $TMPDIR/ch-switches
+    #
+    # rc21: a *_now node is a live meter under the power_supply ABI, never a setting, so it
+    # must not become a charging-switch candidate. The "on" value recorded for one is just
+    # whatever current happened to be flowing when the list was built, and every later sweep
+    # re-asserts that stale reading onto the charger input: a reported Redmi Note 9S carried
+    # `usb/input_current_now 602075 0` and had 0.6 A pinned back over its live value, which
+    # upstream never does because it has no such list. filter_sw refuses these, but this append
+    # writes to ch-switches directly and never passes through it.
+    # Deliberately scoped to the SWITCH list: ${currCtrl} above keeps exactly what it had, so
+    # the charging-current limit and its reject-backoff behave as before on every device.
+    grep -v '_now::' $TMPDIR/.ctrl > $TMPDIR/.ctrl-sw 2>/dev/null || :
+    sed -e 's/::.*::/ /' -e 's/$/ 0/' $TMPDIR/.ctrl-sw >> $TMPDIR/ch-switches
+    sed -E 's/(.*)(::v.*::)(.*)/\1 \3 \2/; s/::v/10/; s/:://' $TMPDIR/.ctrl-sw >> $TMPDIR/ch-switches
     sed -Ee 's/::.*::/ /' -e 's/([0-9])$/\1 3600mV/' $TMPDIR/ch-volt-ctrl-files >> $TMPDIR/ch-switches
 
     cat $TMPDIR/ch-switches > $TMPDIR/.ctrl

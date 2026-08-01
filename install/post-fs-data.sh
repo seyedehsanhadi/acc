@@ -12,8 +12,12 @@
 #
 # SAFETY MODEL (this script runs at the most bootloop-sensitive boot stage, so every line is defensive):
 #   * one-shot, no loops, no daemons spawned, no fallback switch-cycling (the daemon does all that later);
-#   * the actual work runs under a 6 s `timeout` re-invocation so it can NEVER block boot, even if a
-#     sysfs write wedges; on hang the watchdog kills it and boot proceeds;
+#   * the actual work runs under a 6 s `timeout` re-invocation so a slow or looping write cannot delay
+#     boot beyond that -- the watchdog kills it and boot proceeds. CAVEAT: a sysfs write that wedges the
+#     kernel in TASK_UNINTERRUPTIBLE (D-state) cannot be killed by any signal, `timeout` included; that
+#     is a driver-level hang no userland can pre-empt. The write-ahead journal still blacklists such a
+#     node on the NEXT boot (if the kernel hung-task detector reboots), and the flashable uninstaller
+#     recovers it either way -- so it is a bounded, recoverable hang, never a silent EDL loop;
 #   * bootloop self-heal: a counter incremented here and CLEARED by service.sh on a good boot; 3 strikes
 #     without a clear (= boots never reaching late_start_service) latches `.no-early-cap` and bows out;
 #   * fail-OPEN: if capacity/pause/switch can't be read with confidence, do NOTHING (let it charge -- the
@@ -67,6 +71,17 @@ _level() {
 # Echoes the nodes actually written.
 _cut() {
   _sw=$1; _pz=$2; _wrote=
+  # rc21: never cut in offline charging mode -- the phone is powered OFF with the cable in,
+  # running Android's `charger` binary, and a cut drives online=0 which that binary reads as an
+  # unplug and powers the device off. Captured on a Mi A3:
+  #   [charger] charger: device unplugged, shutting down / reboot: Power down
+  # A phone left charging overnight would be found dead instead of full.
+  # Only the boot-mode property can tell here: this runs before Android either way, so the
+  # zygote test the daemon uses would wrongly match a NORMAL early boot and disable the early
+  # cap for everyone. Absent/unknown prop = proceed, so no device loses the cap by accident.
+  case "$(getprop ro.bootmode 2>/dev/null)$(getprop ro.boot.mode 2>/dev/null)" in
+    *charger*) echo ""; return 0;;
+  esac
   # shellcheck disable=SC2086
   set -- $_sw
   while [ $# -ge 3 ] && [ -f "$1" ]; do
@@ -85,17 +100,64 @@ _cut() {
 # mid-write. Permanently blacklist that switch (so neither early-cap nor accd ever writes it again)
 # and latch early-cap off. Returns 0 when it fired (caller exits), 1 otherwise. Brick-safe: this is
 # what turns a #305-class panic into ONE crash instead of an EDL-bound boot loop.
+# rc21: node-level blacklist test with the same semantics as misc-functions.sh's sw_blacklisted,
+# but self-contained -- post-fs-data runs before anything else and must not source the daemon env.
+# Reads BOTH lists by LEADING FIELD. The first cut of this check used `grep -qxF` against
+# .probe-blacklist alone, which could never match anything: the config's switch spec is
+# "node on off --", the probe list stores three fields, and AMPS stores "path<TAB>value<TAB>when".
+# So a node AMPS had recorded as taking the phone down was still written at the single most
+# panic-sensitive stage of boot -- the boot loop this file exists to prevent.
+_bl_node() {
+  [ -n "${1:-}" ] || return 1
+  _bn=${1##*/power_supply/}; _bf=/sys/class/power_supply/$_bn
+  _bcr=$(printf '\r'); _btab=$(printf '\t')
+  for _blf in "$dataDir/.acc-compat-blacklist" "$dataDir/.probe-blacklist"; do
+    [ -s "$_blf" ] || continue
+    while IFS= read -r _bl || [ -n "${_bl:-}" ]; do
+      _bl=${_bl%"$_bcr"}
+      case "$_bl" in ''|'#'*) continue;; esac
+      _bl=${_bl%%"$_btab"*}; _bl=${_bl%% *}
+      [ "$_bl" = "$1" ] || [ "$_bl" = "$_bf" ] || [ "$_bl" = "$_bn" ] || continue
+      return 0
+    done < "$_blf"
+  done
+  return 1
+}
+
+# Is any node in a switch SPEC ("node on off --", possibly grouped) blocked?
+_bl_spec() {
+  for _bs in $1; do
+    case "$_bs" in --) break;; */*) _bl_node "$_bs" && return 0;; esac
+  done
+  return 1
+}
+
 _pending_check() {
   [ -f "$dataDir/.earlycap-pending" ] || return 1
   _ecp=$(cat "$dataDir/.earlycap-pending" 2>/dev/null)
   if [ -n "$_ecp" ]; then
-    if [ ! -f "$dataDir/.probe-blacklist" ] || ! grep -qxF "$_ecp" "$dataDir/.probe-blacklist" 2>/dev/null; then
-      printf '%s\n' "$_ecp" >> "$dataDir/.probe-blacklist" 2>/dev/null || :
-    fi
-    echo "$(_ts) early-cut write crash-rebooted last boot; blacklisted + latch ($_ecp)" >> "$log" 2>/dev/null
+    # Latch and blacklist are deliberately split. Latching early-cap off is cheap and reversible:
+    # the daemon still enforces the limit seconds later, so the user loses only the boot-gap
+    # protection. Blacklisting is PERMANENT and also stops the daemon writing that node, i.e. it
+    # can cost the user their only working switch. The journal alone cannot tell a kernel panic
+    # from this file's own `timeout 6` firing on a merely slow cut, so blacklist only with the
+    # same panic evidence AMPS demands, and always latch. A slow switch loses the early cut; a
+    # deadly one loses everything.
+    _br="$(getprop sys.boot.reason 2>/dev/null)$(getprop ro.boot.bootreason 2>/dev/null)"
+    case "$_br" in
+      *panic*|*watchdog*|*wdog*|*kernel_panic*)
+        _ecn=${_ecp%% *}
+        if ! _bl_node "$_ecn"; then
+          printf '%s\n' "$_ecp" >> "$dataDir/.probe-blacklist" 2>/dev/null || :
+        fi
+        echo "$(_ts) early-cut write panic-rebooted last boot; blacklisted + latch ($_ecp, reason=$_br)" >> "$log" 2>/dev/null;;
+      *)
+        echo "$(_ts) early-cut did not complete last boot but the reboot reason was not a panic ($_br); latching early-cap off only, switch NOT blacklisted ($_ecp)" >> "$log" 2>/dev/null;;
+    esac
   fi
   rm -f "$dataDir/.earlycap-pending" 2>/dev/null || :
   touch "$dataDir/.no-early-cap" 2>/dev/null || :
+  sync 2>/dev/null || :
   return 0
 }
 
@@ -108,8 +170,8 @@ _run() {
   # panicking on a prior boot. early-cap runs BEFORE accd, so without this it would re-fire a
   # known-deadly node at the most panic-sensitive boot stage (and accd's blacklist would never
   # get the chance to protect it).
-  if [ -f "$dataDir/.probe-blacklist" ] && grep -qxF "$sw" "$dataDir/.probe-blacklist" 2>/dev/null; then
-    echo "$(_ts) switch on panic-blacklist; skip early-cap ($sw)" >> "$log" 2>/dev/null; return 0
+  if _bl_spec "$sw"; then
+    echo "$(_ts) switch on the blocked list (accd probe or AMPS crash list); skip early-cap ($sw)" >> "$log" 2>/dev/null; return 0
   fi
   pause=$(_pause "$config")
   case ${pause:-x} in ''|*[!0-9]*) echo "$(_ts) bad/absent pause '$pause'; skip" >> "$log" 2>/dev/null; return 0;; esac
@@ -126,6 +188,16 @@ _run() {
   # .probe-pending so the two can never race.
   printf '%s\n' "$sw" > "$dataDir/.earlycap-pending" 2>/dev/null || :
   sync 2>/dev/null || :
+  # rc21: VERIFY the write-ahead journal actually landed before cutting. If $dataDir is unwritable at
+  # this moment (full or read-only /data after an fsck, SELinux glitch) the journal write silently
+  # no-ops -- and without this check we would still cut the node UNPROTECTED, so a mid-write kernel
+  # panic could not be blacklisted next boot (the .early-boot-count 3-strike counter, sharing the same
+  # unwritable dir, can't accumulate either) => the exact unbounded boot loop the journal exists to
+  # prevent. No durable journal, no cut: bow out and let the daemon enforce within seconds. Fail-safe.
+  if [ ! -s "$dataDir/.earlycap-pending" ]; then
+    echo "$(_ts) journal unwritable (dataDir RO/full?); skip early-cut (fail-safe, daemon will manage)" >> "$log" 2>/dev/null
+    return 0
+  fi
   wrote=$(_cut "$sw" "$pause")
   rm -f "$dataDir/.earlycap-pending" 2>/dev/null || :
   case "$wrote" in
@@ -208,13 +280,49 @@ _selftest() {
   _cfg "battery/input_suspend 0 1 --" "5 101 72 74 false"; _do
   _check "journal disarmed after clean write" "" "$(cat "$_T/data/.earlycap-pending" 2>/dev/null)"
 
-  # 12 (self-heal): a leftover pending (= last boot panicked mid-write) -> blacklist it + latch off
+  # 12 (self-heal): a leftover pending (= last boot did not finish the cut).
+  # rc21: latch and blacklist are split. Latching is cheap and reversible, so it is unconditional.
+  # Blacklisting is permanent and also stops the daemon using the node, so it needs the same panic
+  # evidence AMPS demands -- this file's own `timeout 6` firing on a merely slow cut leaves an
+  # identical journal, and that must not cost the user their only working switch.
   mkdir -p "$_T/data"; rm -f "$_T/data/.probe-blacklist" "$_T/data/.no-early-cap"
   printf 'battery/input_suspend 0 1 --\n' > "$_T/data/.earlycap-pending"
-  ( dataDir="$_T/data" log=/dev/null; _pending_check )
-  _check "pending -> blacklisted" "battery/input_suspend 0 1 --" "$(cat "$_T/data/.probe-blacklist" 2>/dev/null)"
-  _check "pending -> latched off" "yes" "$([ -f "$_T/data/.no-early-cap" ] && echo yes || echo no)"
-  _check "pending -> cleared" "" "$(cat "$_T/data/.earlycap-pending" 2>/dev/null)"
+  ( dataDir="$_T/data" log=/dev/null; getprop(){ echo kernel_panic; }; _pending_check )
+  _check "pending+panic -> blacklisted" "battery/input_suspend 0 1 --" "$(cat "$_T/data/.probe-blacklist" 2>/dev/null)"
+  _check "pending+panic -> latched off" "yes" "$([ -f "$_T/data/.no-early-cap" ] && echo yes || echo no)"
+  _check "pending+panic -> cleared" "" "$(cat "$_T/data/.earlycap-pending" 2>/dev/null)"
+
+  # 12b: same journal, ordinary reboot reason -> latch only, switch NOT blacklisted.
+  rm -f "$_T/data/.probe-blacklist" "$_T/data/.no-early-cap"
+  printf 'battery/input_suspend 0 1 --\n' > "$_T/data/.earlycap-pending"
+  ( dataDir="$_T/data" log=/dev/null; getprop(){ echo reboot,userrequested; }; _pending_check )
+  _check "pending+normal reboot -> NOT blacklisted" "" "$(cat "$_T/data/.probe-blacklist" 2>/dev/null)"
+  _check "pending+normal reboot -> latched off" "yes" "$([ -f "$_T/data/.no-early-cap" ] && echo yes || echo no)"
+
+  # 12c: the early cut must consult AMPS's crash list, not only accd's probe list. Without this
+  # the one write that happens before Android exists was the only path that ignored the list
+  # recording which node had already taken the phone down.
+  rm -f "$_T/data/.probe-blacklist" "$_T/data/.no-early-cap" "$_T/data/.acc-compat-blacklist"
+  _mkps; _node battery/capacity 80; _node battery/input_suspend 0
+  printf '/sys/class/power_supply/battery/input_suspend\t1\tx\n' > "$_T/data/.acc-compat-blacklist"
+  _cfg "battery/input_suspend 0 1 --" "5 101 72 74 false"; _do
+  _check "AMPS-listed node not written pre-Android" 0 "$(_read battery/input_suspend)"
+  rm -f "$_T/data/.acc-compat-blacklist"
+
+  # 12d: control for 12c -- with the list gone, the same setup DOES cut, so 12c proves something.
+  _mkps; _node battery/capacity 80; _node battery/input_suspend 0
+  _cfg "battery/input_suspend 0 1 --" "5 101 72 74 false"; _do
+  _check "control: unlisted node still cut" 1 "$(_read battery/input_suspend)"
+
+  # 13 (rc21): journal write fails (dataDir unwritable) -> MUST NOT cut, even over the limit.
+  # dataDir points under a regular FILE, so the .earlycap-pending write cannot land; the fail-safe
+  # must bow out rather than cut a node it can't protect. Root bypasses chmod, so use a bad path.
+  _mkps; _node battery/capacity 80; _node battery/input_suspend 0
+  : > "$_T/notdir"
+  _cfg "battery/input_suspend 0 1 --" "5 101 72 74 false"
+  ( EARLYCAP_CFG="$_T/config" EARLYCAP_PS="$_T/ps" config="$_T/config" PS="$_T/ps" dataDir="$_T/notdir/x" log=/dev/null; _run ) >/dev/null 2>&1
+  rm -f "$_T/notdir"
+  _check "journal unwritable -> no cut (fail-safe)" 0 "$(_read battery/input_suspend)"
 
   rm -rf "$_T" 2>/dev/null
   echo "early-cap selftest: $_pass passed, $_fail failed"
@@ -248,6 +356,11 @@ _pending_check && exit 0
 bc=$dataDir/.early-boot-count
 n=$(cat "$bc" 2>/dev/null); case ${n:-0} in ''|*[!0-9]*) n=0;; esac
 n=$((n+1)); echo "$n" > "$bc" 2>/dev/null || :
+# Flush it. The 1-strike journal syncs for exactly this reason and the 3-strike backstop needs it
+# more, not less: the boot it has to survive is one that panics before anything else reaches disk.
+# Left in page cache, the increment is lost on precisely those boots, the counter never reaches 3,
+# and the backstop never trips.
+sync 2>/dev/null || :
 if [ "$n" -ge 3 ]; then
   echo "$(_ts) boot-count $n>=3 without a good boot; self-disabling early-cap (.no-early-cap)" >> "$log" 2>/dev/null
   touch "$dataDir/.no-early-cap" 2>/dev/null || :

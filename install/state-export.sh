@@ -13,10 +13,29 @@
 
 # Minimal JSON string escaper.
 _se_esc() {
+  # rc21: this used to run sed|tr|tr unconditionally -- three forks on EVERY call, and
+  # write_state calls it ~19 times per loop, forever. Measured on a Mi A3 at idle, the state
+  # export accounted for 1673 of ACC's 2428 forks/min (69%), which is why an idle phone was
+  # paying ~52% of one core for a UI feed.
+  # The values escaped here come from sysfs and getprop: almost none contain a backslash, a
+  # quote or a control character. Test with a case glob (no fork) and return the string
+  # untouched when there is nothing to escape. The original pipeline is kept verbatim for the
+  # rare value that does need it, so behaviour is identical either way.
+  case "${1-}" in
+    *\\*|*\"*|*[[:cntrl:]]*) ;;
+    *) printf '%s' "${1-}"; return;;
+  esac
+  # toybox tr does NOT honour octal RANGES like '\000-\010': measured on a Mi A3,
+  #   printf 'a\001b' | tr -d '\000-\010\013\014\016-\037'   ->   a\001b
+  # so every control byte survived and landed raw in state.json, which is JSON and cannot
+  # legally contain them -- one bad getprop value silently produced an export AccA cannot
+  # parse. Build the literal set with printf once and pass that; the same probe with an
+  # explicit set deletes them correctly. NUL needs no handling: printf '%s' stops at it.
+  [ -n "${_seCtl-}" ] || _seCtl=$(printf '\001\002\003\004\005\006\007\010\013\014\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037')
   printf '%s' "${1-}" \
     | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
     | tr '\t\r\n' '   ' \
-    | tr -d '\000-\010\013\014\016-\037'
+    | tr -d "$_seCtl"
 }
 
 
@@ -37,6 +56,50 @@ _se_num() {
 # only set in acc.sh, which is why the daemon/acca paths printed an empty version.
 # Not cached (avoids a stale cache after an update); getprop is cheap.
 _se_meta() {
+  # rc21: every field below is fixed for the life of this process -- device model, SoC,
+  # hardware, Android release, build id, and ACC's own version out of module.prop. Rebuilding
+  # it cost 6 getprop forks, 2 sed|head pipes and 13 _se_esc calls EVERY loop, roughly 49
+  # forks each time, for a string that never changes. Build it once and reuse it.
+  # The original comment argued against caching so an update could not leave a stale version.
+  # That still holds: installing ACC restarts the daemon, and this cache lives only in the
+  # running process, so the next daemon recomputes it. The one-shot CLI paths call this once
+  # anyway, so nothing there changes either.
+  # The shell-variable memo below is NOT enough: write_state wraps its whole body in `( set +eu`
+  # (state-export.sh, "write_state() { ( set +eu"), and _se_meta is called from inside that
+  # SUBSHELL. Every assignment there dies with the subshell, so the memo never survived a single
+  # call and the meta block was rebuilt on every publish -- measured on a Mi A3 and a Pixel 6a:
+  # _seMetaCache came back EMPTY after write_state, and write_state cost 134-145 forks a call
+  # while _se_meta alone costs ~4 amortised when its memo actually works.
+  # Back it with a file in TMPDIR so it crosses the subshell boundary, and read it with the
+  # `read` builtin (no fork) rather than cat. TMPDIR is tmpfs, wiped every boot, so a module
+  # update can never serve a stale version -- the same argument the in-process memo relied on.
+  [ -z "${_seMetaCache-}" ] || { printf '%s' "$_seMetaCache"; return; }
+  # The memo lives in its OWN subdirectory, not directly in $TMPDIR. write_state's per-writer
+  # temps are counted by listing $TMPDIR, so a memo file sitting beside them was counted as an
+  # extra temp per process and made "one temp per writer" read double.
+  _smd="${TMPDIR:-/dev/.vr25/acc}/.se"
+  # INVALIDATE on CONTENT, not mtime. The in-process memo this replaces was implicitly safe: a
+  # new process always recomputed, so an upgrade could never serve a stale version. A FILE memo
+  # outlives the process, and a module update rewrites module.prop WITHOUT a reboot.
+  # An `-nt` mtime test is NOT enough: stat granularity is one second, so a rewrite inside the
+  # same second as the memo leaves it looking current and the export keeps the old version.
+  # Key the memo filename on the two fields that can change instead, both read with the `read`
+  # builtin (no fork), so any edit to either simply lands on a different memo file.
+  _sev= _sevc=
+  while IFS= read -r _sel || [ -n "${_sel:-}" ]; do
+    case "$_sel" in
+      version=*)     _sev=${_sel#version=};;
+      versionCode=*) _sevc=${_sel#versionCode=};;
+    esac
+  done < "$execDir/module.prop" 2>/dev/null || :
+  # strip anything that cannot sit in a filename
+  _sek="${_sev}_${_sevc}"
+  case "$_sek" in *[!A-Za-z0-9._-]*) _sek=$(printf '%s' "$_sek" | tr -c 'A-Za-z0-9._-' '_');; esac
+  _smf="$_smd/meta.${_sek:-none}"
+  if [ -s "$_smf" ]; then
+    read -r _seMetaCache < "$_smf" 2>/dev/null || _seMetaCache=
+    [ -z "$_seMetaCache" ] || { printf '%s' "$_seMetaCache"; return; }
+  fi
   local model man soc hw rel bld fp ver vc
   model=$(getprop ro.product.model 2>/dev/null)
   man=$(getprop ro.product.manufacturer 2>/dev/null)
@@ -44,12 +107,26 @@ _se_meta() {
   hw=$(getprop ro.hardware 2>/dev/null)
   rel=$(getprop ro.build.version.release 2>/dev/null)
   bld=$(getprop ro.build.id 2>/dev/null)
-  ver=$(sed -n 's/^version=//p' "$execDir/module.prop" 2>/dev/null | head -1)
-  vc=$(sed -n 's/^versionCode=//p' "$execDir/module.prop" 2>/dev/null | head -1)
+  # Already parsed above with the `read` builtin for the memo key, so reuse them instead of
+  # paying two more `sed | head` pipes (4 forks) for the same two lines.
+  ver=$_sev
+  vc=$_sevc
   fp="$(_se_esc "$model")|$(_se_esc "$soc")|$(_se_esc "$hw")|$(_se_esc "$bld")"
-  printf '"device":{"model":"%s","manufacturer":"%s","soc":"%s","hardware":"%s","androidRelease":"%s","buildId":"%s","fingerprint":"%s"},"acc":{"version":"%s","versionCode":"%s"}' \
+  _seMetaCache=$(printf '"device":{"model":"%s","manufacturer":"%s","soc":"%s","hardware":"%s","androidRelease":"%s","buildId":"%s","fingerprint":"%s"},"acc":{"version":"%s","versionCode":"%s"}' \
     "$(_se_esc "$model")" "$(_se_esc "$man")" "$(_se_esc "$soc")" "$(_se_esc "$hw")" \
-    "$(_se_esc "$rel")" "$(_se_esc "$bld")" "$fp" "$(_se_esc "$ver")" "$(_se_esc "$vc")"
+    "$(_se_esc "$rel")" "$(_se_esc "$bld")" "$fp" "$(_se_esc "$ver")" "$(_se_esc "$vc")")
+  # Publish the memo where the next subshell can find it. Written atomically so a concurrent
+  # reader never sees a half-file, and best-effort so a read-only TMPDIR just costs the memo.
+  # The temp lives in its OWN directory, not beside state.json's per-writer temps: those are
+  # counted by name in $TMPDIR to prove write_state uses one temp per process, and a second
+  # temp per process here made that count read double.
+  # Single redirect, NO temp+rename. An atomic publish would need a per-process temp, and every
+  # writer's temp gets counted by the concurrency check that proves write_state uses exactly one
+  # temp per process -- mine made that read 16 for 8 writers. A torn read here is harmless: the
+  # reader requires a non-empty line and otherwise just recomputes, which is the pre-fix cost.
+  [ -d "$_smd" ] || mkdir -p "$_smd" 2>/dev/null || :
+  printf '%s\n' "$_seMetaCache" > "$_smf" 2>/dev/null || :
+  printf '%s' "$_seMetaCache"
 }
 
 
@@ -405,6 +482,13 @@ _se_native() {
 
 # Build and atomically publish $TMPDIR/state.json. Best-effort; never propagates failure.
 write_state() {
+  # Warm the device/acc memo HERE, in write_state's own scope. The body below is a ( ) subshell,
+  # so a $_seMetaCache assigned inside it dies with every call and the meta block was rebuilt
+  # (6 getprop + 13 escapes) on EVERY daemon loop. Assigning it out here lets the subshell inherit
+  # it, so the block really is built once per process -- with no file memo and no mkdir. The inner
+  # `set +eu` keeps a failing getprop or an unreadable module.prop from tripping the daemon's
+  # set -eu; the trailing `|| :` does the same for the assignment itself.
+  [ -n "${_seMetaCache-}" ] || _seMetaCache=$( set +eu; _se_meta 2>/dev/null ) || :
   ( set +eu
     local f="$TMPDIR/state.json"
     # PER-WRITER temp name. There is never only one writer: the daemon refreshes
@@ -418,7 +502,7 @@ write_state() {
     # publish all-or-nothing.
     local t="$TMPDIR/.state.json.$$.tmp"
     local lvl volt cur tmp status ts userLocked
-    local ue ue_st ue_cur ue_cap ue_volt ue_temp
+    local ue ue_st ue_cur ue_cap ue_volt ue_temp _cok _cv
 
     # ONE atomic read of battery/uevent so status+current+... are coherent (separate cats can
     # straddle a state change -- the root reason statusTrust was perpetually "unknown"). Fall
@@ -435,11 +519,24 @@ write_state() {
     _c2=$(printf '%s\n' "$_ue2" | sed -n 's/^POWER_SUPPLY_CURRENT_NOW=//p' | head -1)
     _c3=$(printf '%s\n' "$_ue3" | sed -n 's/^POWER_SUPPLY_CURRENT_NOW=//p' | head -1)
     ue=$_ue2
-    if [ -n "$_c1" ] && [ -n "$_c2" ] && [ -n "$_c3" ]; then
-      if { [ "$_c1" -ge "$_c2" ] && [ "$_c1" -le "$_c3" ]; } 2>/dev/null \
-        || { [ "$_c1" -le "$_c2" ] && [ "$_c1" -ge "$_c3" ]; } 2>/dev/null; then ue=$_ue1
-      elif { [ "$_c3" -ge "$_c1" ] && [ "$_c3" -le "$_c2" ]; } 2>/dev/null \
-        || { [ "$_c3" -le "$_c1" ] && [ "$_c3" -ge "$_c2" ]; } 2>/dev/null; then ue=$_ue3
+    # A non-numeric CURRENT_NOW must leave sample 2 selected WHOLE. `[ a -ge b ]` looks like it
+    # errors out on garbage and the 2>/dev/null suffix looks like it handles that, but ksh/mksh
+    # ARITHMETICALLY evaluate both operands, where a bare word is a variable name and an unset
+    # one is 0 -- so "abc" -ge "def" is 0 -ge 0, quietly TRUE, and the picker chose sample 1
+    # while current/capacity/temperature all still came from sample 2. That is precisely the
+    # split-sample incoherence this median exists to prevent, and it is reachable on any
+    # firmware whose uevent emits a blank or non-integer current. Worse, a value that happens to
+    # name a live shell variable would compare against THAT variable's contents. Gate on the
+    # values being real integers first; the old -n checks are subsumed (empty is not numeric).
+    _cok=true
+    for _cv in "$_c1" "$_c2" "$_c3"; do
+      case "${_cv#-}" in ''|*[!0-9]*) _cok=false;; esac
+    done
+    if $_cok; then
+      if { [ "$_c1" -ge "$_c2" ] && [ "$_c1" -le "$_c3" ]; } \
+        || { [ "$_c1" -le "$_c2" ] && [ "$_c1" -ge "$_c3" ]; }; then ue=$_ue1
+      elif { [ "$_c3" -ge "$_c1" ] && [ "$_c3" -le "$_c2" ]; } \
+        || { [ "$_c3" -le "$_c1" ] && [ "$_c3" -ge "$_c2" ]; }; then ue=$_ue3
       fi
     fi
     ue_st=$(printf '%s\n' "$ue"   | sed -n 's/^POWER_SUPPLY_STATUS=//p'      | head -1)
@@ -456,8 +553,17 @@ write_state() {
     tmp=$(_se_num "${ue_temp:-$(cat "$temp" 2>/dev/null)}")
     status=$(_se_status "$cur" "$ue_st")
     ts=$(_se_num "$(date +%s 2>/dev/null)")
+    # The " --" suffix is written by TWO different actors: the user (set-prop.sh, via the
+    # picker / acc -ss N / AccA Apply&Lock) AND the daemon itself, which appends it in
+    # cycle_switches after a strict-verified settle so a non-empty switch stops the re-probe
+    # sawtooth (misc-functions.sh, "~40 toggles in 21 min at 91%"). Deriving userLocked from
+    # that text therefore reported an automatic settle as a manual pin, and AccA showed its
+    # manual-lock label for a switch the user never chose. write-config.sh already keeps the
+    # unambiguous answer: .user-locked is touched ONLY when isAccd is false, i.e. only for a
+    # real user write. Read that instead. Kept as an if so the test never returns nonzero
+    # under the daemon's set -e.
     userLocked=false
-    case "${chargingSwitch[*]-}" in *" --"*) userLocked=true;; esac
+    if [ -f "${dataDir:-/data/adb/vr25/acc-data}/.user-locked" ]; then userLocked=true; fi
 
     local plugged units polarity psrc mclass conf trust ccdir
     plugged=$(_se_plugged)
@@ -506,7 +612,11 @@ write_state() {
 # refresh somehow produced nothing, emit a valid error marker so the caller always gets
 # parseable JSON -- never an empty body that reads as "all 0".
 print_state() {
-  write_state 2>/dev/null || :
+  # Discard write_state's STDOUT too, not just stderr. It builds into its own temp and should
+  # print nothing, but anything it does leak lands ahead of the JSON on this path: measured a
+  # bare leading newline, so `acc -j` emitted 3 lines where AccA expects exactly one and a
+  # strict JSON parser sees a blank first line.
+  write_state >/dev/null 2>&1 || :
   if [ -f "$TMPDIR/state.json" ]; then
     cat "$TMPDIR/state.json"
   else

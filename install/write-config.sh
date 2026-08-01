@@ -17,7 +17,10 @@ ct=${cooldown_temp-${ct-${temperature[0]}}}
 cw=${current_workaround-${cw-$currentWorkaround}}
 fo="${force_off-${fo-$forceOff}}"
 ia="${idle_apps-${ia-${idleApps[@]}}}"
-l=${lang-${l-${language}}}
+# Parse into `lang`, which is the name the emit below actually reads (language=${lang:-en}).
+# This used to assign to `l`, and `l` is referenced nowhere else in the file, so an existing
+# language= was silently dropped and every config write reset a non-English user back to en.
+lang=${lang-${l-${language}}}
 mcc="${max_charging_current-${mcc-${maxChargingCurrent[@]}}}"
 mcv="${max_charging_voltage-${mcv-${maxChargingVoltage[@]}}}"
 mt=${max_temp-${mt-${temperature[1]}}}
@@ -35,14 +38,20 @@ s="${charging_switch-${s-${chargingSwitch[@]}}}"
 sc=${shutdown_capacity-${sc-${capacity[0]}}}
 st=${shutdown_temp-${st-${temperature[3]}}}
 tl="${temp_level-${tl-$tempLevel}}"
+ur=${ui_refresh-${ur-${uiRefresh:-60}}}
 vf=${volt_factor-${vf-$voltFactor}}
 
 
 # backup scripts
-touch $TMPDIR/.scripts
-grep '^:' $config > $TMPDIR/.scripts 2>/dev/null || :
-sed -i 's/^:/\n:/' $TMPDIR/.scripts
-printf "\n\n\n" >> $TMPDIR/.scripts
+# PER-WRITER name. rc21 made the publish temp per-process ($config.$$.tmp) but left this
+# staging file on a shared name, so two concurrent writers overwrote each other's ':' user
+# scripts between the grep here and the cat at publish time, and one writer's rm deleted the
+# other's file mid-flight. Same $$ discipline as the publish temp.
+_sf=$TMPDIR/.scripts.$$
+touch $_sf
+grep '^:' $config > $_sf 2>/dev/null || :
+sed -i 's/^:/\n:/' $_sf
+printf "\n\n\n" >> $_sf
 
 
 # enforce valid capacity and temp limits
@@ -147,6 +156,12 @@ fi
 # gap. 15 C is a temperature a cell reaches in an ordinary cool room; below it,
 # reachability is doubtful.
 [ $rt -ge 15 ] 2>/dev/null || rt=$((mt - 10))
+# ...and the rebuilt value must itself clear the floor. mt is clamped to 20..60 above, so for any
+# mt below 25 the mt-10 rebuild lands under 15 again (mt=20 -> rt=10) and the invariant this guard
+# states silently did not hold. Re-check, then restore the resume-below-max invariant, since
+# pinning rt to 15 could otherwise meet or exceed a low mt.
+[ $rt -ge 15 ] 2>/dev/null || rt=15
+[ $rt -lt $mt ] 2>/dev/null || rt=$((mt - 1))
 
 # cooldown_temp must stay below max_temp -- if they are equal, the cooldown cycle enters and
 # immediately breaks at max_temp, so it never actually throttles. Keep a gap below max_temp,
@@ -161,6 +176,21 @@ fi
 # 45/40 defaults) must survive -- the old reset silently reverted it to 50, so the thermal pause
 # never fired until 50 C and the battery ran hot past the user's setting.
 [ $((mt - ct)) -ge 3 ] || { ct=$((mt - 5)); rt=$((mt - 10)); }
+# Re-apply the floor AFTER the rebuild. The rebuild derives rt as mt-10 unconditionally, so a
+# low but valid max_temp (mt=20 is inside the validated [20..60] band) produced rt=10 -- below
+# any temperature a phone actually reaches, which means the thermal pause could never resume.
+# The incremental clamps earlier ran BEFORE this line, so nothing else catches it.
+# 15, not 20: 15 is the reachability floor this file documents and already enforces above. At 20
+# this guard also fired on the NORMAL path and silently raised a valid resume_temp of 15..19, and
+# the raised rt then dragged cooldown_temp and max_temp up with it - `acc -s max_temp=20` was
+# published as temperature=(21 22 20 55): max_temp ABOVE the requested 20, with a 1 C
+# cooldown->max gap that never throttles, the exact collapse the D3 rebuild above prevents.
+[ $rt -ge 15 ] || rt=15
+# -ge, matching the primary guard above ([ $ct -ge $rt ] || ct=$rt): cooldown_temp EQUAL to
+# resume_temp is a valid band (max_temp=20 -> ct=mt-5=15, rt=15), and -gt pushed ct off the
+# mt-5 band shape to enforce an invariant nothing else in the file or the daemon states.
+[ $ct -ge $rt ] || ct=$rt
+[ $mt -gt $ct ] || mt=$((ct + 1))
 
 # rc6 (A3): shutdown_temp is the HARD over-temperature cutoff -- it must sit at/above the
 # operating band, never below it. The non-numeric guard above let a low NUMERIC value (e.g.
@@ -189,6 +219,13 @@ case ${pbim-} in true|false|no) :;; *) pbim=true;; esac
 case $af in *[!0-9]*) af=;; esac                   # amp_factor: null or integer
 case $vf in *[!0-9]*) vf=;; esac                  # volt_factor: null or integer
 case ${tl-} in *[!0-9]*|'') tl=0;; esac           # temp_level: integer %, default 0
+# ui_refresh: seconds between idle state.json publishes, or 0 to publish on change only. Garbage
+# falls back to the 30s default rather than to 0, because 0 is a real setting here (heartbeat off)
+# and a typo must not silently switch the meter to change-only. Floor at 5: below that the publish
+# costs more than the interval on a slow phone, and the change-driven path already covers anything
+# faster. No ceiling -- a very large value is just "off" spelled differently, which is harmless.
+case ${ur-} in *[!0-9]*|'') ur=60;; esac
+[ "${ur:-60}" = 0 ] || [ "${ur:-60}" -ge 5 ] 2>/dev/null || ur=5
 # cooldown_current: null, plain mA, or a percentage (mA%). Validate the numeric part;
 # blank anything else so set_ch_curr / set_temp_level never choke on garbage.
 case ${cdc-} in
@@ -245,7 +282,7 @@ esac
 rcp=$(printf %s "$rcp" | sed "s/'/'\\\\''/g")
 bso=$(printf %s "$bso" | sed "s/'/'\\\\''/g")
 
-# rc22: publish through a PER-PROCESS temp, not a shared $config.tmp. Under
+# rc21: publish through a PER-PROCESS temp, not a shared $config.tmp. Under
 # concurrent writers (many `acca -s` at once) the shared name raced: writer A's
 # `> $config.tmp` truncated while writer B was mid-write, then B appended over
 # A's remnant and mv'd the mix - a malformed config (Pixel 9a: 1 of 5 rounds of
@@ -256,14 +293,50 @@ bso=$(printf %s "$bso" | sed "s/'/'\\\\''/g")
 # never a corrupt config, lock or no lock. Same pattern edit() already uses.
 _ct=$config.$$.tmp
 
-echo "configVerCode=$(cat $TMPDIR/.config-ver)
+# Per-process temps are only cleaned up by the mv (or the rm on its failure path), so a writer
+# killed between building the file and renaming it strands one forever. The shared name rc20
+# used was at least self-cleaning by reuse; this one accumulates, in the same directory the
+# daemon's config fallback lives in. Measured: 50 concurrent writers left 42 files behind.
+# Sweep by liveness, not by age: a temp whose owning pid is gone can never be renamed, and one
+# whose pid is alive may be mid-write by another writer right now and must not be touched.
+for _st in $config.*.tmp; do
+  [ -e "$_st" ] || continue
+  _sp=${_st%.tmp}; _sp=${_sp##*.}
+  case "$_sp" in ''|*[!0-9]*) continue;; esac
+  [ "$_sp" = "$$" ] && continue
+  kill -0 "$_sp" 2>/dev/null && continue
+  rm -f "$_st" 2>/dev/null || :
+done
+
+# printf '%s\n', not echo. mksh's echo builtin expands backslash escapes with no way to turn it
+# off (its -e is documented as a no-op "since this is the default"), so any config value holding
+# a backslash -- a runCmdOnPause with \n, a Windows-style path, an escaped quote -- came back
+# through this emit mangled or silently truncated. printf '%s\n' emits the body verbatim.
+# cooldownRatio: the fields are QUOTED rather than defaulted to 0. Empty is the documented
+# "ratio disabled" value - default-config.txt ships cooldownRatio=(), accd.sh gates the whole
+# cooldown cycle on `while [ -n "${cooldownRatio[0]-}" ]`, every sleep inside falls back with
+# ${cooldownRatio[N]:-${loopDelay[0]}}, and `acc -f` disables the ratio by setting an empty
+# cooldown_charge. ${cch:-0} wrote a literal 0, which is NON-empty, so it turned the cycle ON
+# with zero-second halves (disable_charging / sleep 0 / enable_charging / sleep 0 in a tight
+# loop, thrashing the charging switch) on every config written from a stock cooldownRatio=().
+# Quoting keeps an empty field a real empty ELEMENT, so cooldown_pause still cannot slide into
+# the charge slot. cch/cp are coerced to empty-or-digits above, so nothing quotable gets here.
+# $TMPDIR/.config-ver is a tmpfs cache the DAEMON writes at init. Reading it unguarded made every
+# config write depend on the daemon having run since the last boot: after a tmpfs loss (the exact
+# case rc21's bootstrap exists for) `acc 75 70` and `acc -s key=value` died with
+# "cat: can't open .../.config-ver" and exit 1, so the user could not change a setting until the
+# daemon had re-initialised. The value is a constant in default-config.txt, which is on persistent
+# storage and always present; fall back to reading it there, the same way accd.sh derives it.
+_wcVer=$(cat $TMPDIR/.config-ver 2>/dev/null) || _wcVer=
+[ -n "$_wcVer" ] || _wcVer=$(sed -n '/^configVerCode=/s/.*=//p' $execDir/default-config.txt 2>/dev/null)
+printf '%s\n' "configVerCode=$_wcVer
 
 allowIdleAbovePcap=${aiapc:-true}
 ampFactor=$af
 battStatusWorkaround=${bsw:-true}
 capacity=(${sc:-5} ${cc:-101} $rc $pc ${cm:-false})
 cooldownCurrent=$cdc
-cooldownRatio=($cch $cp)
+cooldownRatio=('$cch' '$cp')
 currentWorkaround=${cw:-false}
 forceOff=${fo:-false}
 language=${lang:-en}
@@ -273,6 +346,7 @@ rebootResume=${rr:-false}
 resetBattStats=(${rbsp:-false} ${rbsu:-false} ${rbspl:-false})
 temperature=($ct $mt $rt ${st:-55})
 tempLevel=${tl:-0}
+uiRefresh=${ur:-60}
 voltFactor=$vf
 
 applyOnBoot=($ab)
@@ -292,14 +366,25 @@ maxChargingVoltage=($mcv)
 runCmdOnPause='$rcp'" > $_ct
 
 
-cat $TMPDIR/.scripts $TMPDIR/.config-help >> $_ct
+# rc21: regenerate the help block if it is missing instead of failing the whole write.
+# $TMPDIR/.config-help lives on tmpfs and is written in exactly ONE place -- accd's init. So any
+# entry that reaches here without that init having run finds no file, and this `cat` fails under
+# set -e: `acc 75 70`, `acc -s ...`, every config write dies with
+# "cat: can't open '/dev/.vr25/acc/.config-help'". Device-proven: after a run that wipes tmpfs,
+# 12 acc-cli assertions failed this way, including the documented pause/resume shortcut.
+# The content is a pure derivation of default-config.txt, so rebuilding it costs one sed and
+# needs no daemon. Same self-bootstrap principle as the launcher symlinks in acc.sh.
+[ -s "$TMPDIR/.config-help" ] || sed -n '/^# /,$p' $execDir/default-config.txt > $TMPDIR/.config-help 2>/dev/null || :
+cat $_sf $TMPDIR/.config-help >> $_ct
 # rc16+: write to a temp then ATOMICALLY rename, so the daemon (which re-reads config.txt
 # every loop) never sees a half-written file, and a failed/partial write (disk full,
 # permission loss) leaves the previous config intact instead of truncating it.
-# rc22: the temp is per-process ($config.$$.tmp), so concurrent writers cannot
+# rc21: the temp is per-process ($config.$$.tmp), so concurrent writers cannot
 # corrupt each other's file - see the _ct note above.
 mv -f $_ct $config 2>/dev/null || rm -f $_ct 2>/dev/null
-rm $TMPDIR/.scripts
+# Guarded, unlike the bare `rm` this replaces: that one printed
+# "rm: .../.scripts: No such file or directory" to stderr on every writer that lost the race.
+rm -f $_sf 2>/dev/null || :
 # rc19 (standby): nudge the daemon's wake fifo so a settings change applies within ~1s even
 # mid-nap. The nap's mtime watch has 1-second granularity and misses an edit landing in the
 # same second a tick starts -- harmless at the old 9s naps, but the new 30s/120s holds made

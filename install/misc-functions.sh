@@ -144,6 +144,20 @@ cycle_switches() {
 
   touch $TMPDIR/.testingsw
 
+  # rc21 (field report: OnePlus SM8250 / KernelSU, probe-crash into EDL): a global stop.
+  # journal_check blacklists ONE node per crash-boot, so a device whose charge driver wedges
+  # on several nodes pays one hard reboot per node. That is bounded by the candidate list
+  # (139 lines) but not by anything a user survives -- a Qualcomm device falls into EDL long
+  # before the list runs out. Once probing has taken this phone down $probeStrikeMax times,
+  # stop probing ALTOGETHER and let the user pick a switch by hand. Charging is never blocked
+  # by this; only the automatic search for a switch stops. Cleared by `acc -sb clear`.
+  if [ -f "$dataDir/.no-probe" ]; then
+    ${isAccd:-false} && command -v _wlog >/dev/null 2>&1 \
+      && _wlog "probe latch set (.no-probe): not searching for a switch; pick one with acc -ss" || :
+    rm -f $TMPDIR/.testingsw
+    return 1
+  fi
+
   while read -A chargingSwitch; do
 
     # Brick-safe guard (GitHub #305/#308): a switch that panicked the kernel mid-write
@@ -167,6 +181,23 @@ cycle_switches() {
       else
         _cbase=$(cat "$currFile" 2>/dev/null)   # charging-direction baseline (signed) before pausing
         journal_arm "${chargingSwitch[*]}"
+        # rc21: the journal is the ONLY thing that makes this write recoverable, so verify it
+        # actually landed before taking the risk. If dataDir is read-only, full, or not yet
+        # decrypted, journal_arm silently no-ops (every path in it is best-effort) and the
+        # write below would go UNPROTECTED: a panic could never be attributed, so this node
+        # gets re-probed on every boot forever -- the unbounded loop the journal exists to
+        # prevent. post-fs-data.sh already refuses its early cut on exactly this condition;
+        # the probe path must not be weaker. Skip the candidate, do not abort the sweep.
+        # -f as well as -s: `-s` alone is TRUE for a directory (a dir has non-zero size), so a
+        # stale directory sitting at the journal path would satisfy the guard and let the risky
+        # write through unprotected -- the exact case this exists to stop. Caught by the rc21/rc21
+        # benchmark, where rc21 wrote a node that rc21 happened not to reach.
+        _pjf=${probePending:-$dataDir/.probe-pending}
+        if [ ! -f "$_pjf" ] || [ ! -s "$_pjf" ]; then
+          ${isAccd:-false} && command -v _wlog >/dev/null 2>&1 \
+            && _wlog "journal unwritable; skipped probing ${chargingSwitch[0]:-?} (fail-safe)" || :
+          continue
+        fi
         flip_sw $1 || :
         journal_disarm
       fi
@@ -235,12 +266,21 @@ cycle_switches() {
               continue
             fi
           fi
-          # set working charging switch(es). When strict-verified (current actually dropped),
-          # LOCK it with a trailing "--" so the daemon STOPS re-probing switches every _STI
-          # loops -- that periodic re-probe was toggling charging back on (the "stopped at the
-          # limit, then resumed/reset" sawtooth). A --locked switch that later stops working is
-          # still recovered (fix8), so locking is safe.
-          $strict && s="${chargingSwitch[*]} --" || s="${chargingSwitch[*]}"
+          # set working charging switch(es). PERSISTING the switch is what ends the re-probe
+          # sawtooth ("stopped at the limit, then resumed/reset", ~40 toggles in 21 min at 91%):
+          # the fan-out is gated on an EMPTY chargingSwitch[0], so a non-empty value alone stops
+          # it. The trailing " --" this used to append on the strict pass was never what
+          # suppressed the re-probe, and it is the SAME marker a user lock writes, so an
+          # automatic settle was indistinguishable from a manual pin in three places:
+          # state-export reported userLocked=true, AccA's isAutomaticSwitchEnabled reads the
+          # marker straight off the config line and showed its manual-lock label, and
+          # write-config's pbim arm skipped the deliberate "reset switch (in auto-mode)" that
+          # exists so a prioritizeBattIdleMode change re-picks an appropriate switch class.
+          # An automatic selection is not a user lock and no longer claims to be one. The real
+          # user-lock paths (set-prop's picker, acc -ss N, AccA Apply&Lock) append " --"
+          # themselves, and that is what makes write-config touch .user-locked, which it only
+          # ever does when isAccd is false.
+          s="${chargingSwitch[*]}"
           # rc13: breadcrumb. Cache the bare switch line (no trailing " --") so the next
           # cycle_switches_off on this or a future session can try it FIRST instead of
           # fanning out through the full candidate list (each failed candidate's
@@ -345,9 +385,40 @@ sw_holds() {
   return 1
 }
 
+# rc21: is this offline charging mode -- the phone powered OFF with the cable in, showing the
+# charge animation, running Android's `charger` binary instead of a full system?
+# It matters because a cut there does not merely stop charging: `healthd`/charger reads the
+# resulting online=0 as the cable having been pulled and POWERS THE PHONE OFF. Captured on a
+# Mi A3 in this exact state:
+#   [charger] charger: [33910] device unplugged, shutting down (@ 36910)
+#   [charger] reboot: Power down / Powering off the SoC
+# A user who plugs in overnight with the phone off would find it dead rather than charged.
+# Detection is belt and braces: the boot-mode props name it directly on most devices, and where
+# they do not, offline charging is the state where the `charger` process exists and zygote does
+# not. Fails CLOSED (returns false) if it cannot tell, so normal Android is never affected.
+in_charger_mode() {
+  case "$(getprop ro.bootmode 2>/dev/null)" in *charger*) return 0;; esac
+  case "$(getprop ro.boot.mode 2>/dev/null)" in *charger*) return 0;; esac
+  pgrep -f zygote >/dev/null 2>&1 && return 1
+  pgrep -x charger >/dev/null 2>&1 && return 0
+  return 1
+}
+
+
 disable_charging() {
 
   local autoMode=true
+
+  # rc21: never cut while the phone is in offline charging mode -- the cut reads as an unplug
+  # and powers the device off (see in_charger_mode above). Refusing here costs nothing: the
+  # phone is off, so there is no runtime to protect, and the limit is applied the moment Android
+  # comes up. Deliberately placed at the top of the one function every pause path goes through,
+  # rather than at each caller, so no future caller can miss it.
+  if in_charger_mode; then
+    ${isAccd:-false} && command -v _wlog >/dev/null 2>&1 \
+      && _wlog "refusing to cut: offline charging mode (a cut here powers the phone off)" || :
+    return 0
+  fi
 
     [[ "${chargingSwitch[*]-}" != *\ -- ]] || autoMode=false
 
@@ -401,7 +472,7 @@ disable_charging() {
         until [ $(batt_cap) -le ${1%\%} ]; do
           sleep ${loopDelay[1]}
         done
-        log_on
+        eval "${_logOn:-:}"
         enable_charging
       ;;
       *[hms])
@@ -421,7 +492,7 @@ disable_charging() {
         until [ $(volt_now) -le ${1%m*} ]; do
           sleep ${loopDelay[1]}
         done
-        log_on
+        eval "${_logOn:-:}"
         enable_charging
       ;;
       *)
@@ -431,6 +502,36 @@ disable_charging() {
   else
     $isAccd || print_charging_disabled
   fi
+}
+
+
+# rc21: rate-limit the APSD/AICL re-kick. Forcing a charger to re-run power-source detection and
+# input-current negotiation is a RECOVERY action, not a per-loop one -- it is a heavy I2C round
+# trip into the charger driver. Both gates that trigger it can stay true indefinitely: an
+# input-cut switch (input_suspend/bypass/vbus) masks */online to 0 for the WHOLE time the cut is
+# latched, and not_charging stays true on a current-cap switch whose current has not come back
+# yet. So on those devices the re-kick fired on every single loop, forever, with nothing bounding
+# it. Device-proven on a Mi A3 (battery/input_suspend): a burst of config writes kept the daemon
+# in that state, the charger driver wedged, ACC's loop stalled ~76s, every power_supply read came
+# back EMPTY while the cable was still attached, and the phone powered off at 71%.
+#
+# The re-kick is still fired -- just not faster than a charger can plausibly respond to one. The
+# stamp lives in TMPDIR so it resets each boot, and an unreadable/garbage stamp is treated as due
+# (fail toward the recovery action, never toward silence).
+_rekick_due() {
+  # The interval defaults INSIDE the function on purpose. A file-scope assignment would be a
+  # hidden dependency: anything that pulls this helper out on its own (the unit tests extract
+  # single functions from this file) would get an empty interval, the arithmetic test would
+  # error, and the gate would answer "not due" forever -- silently disabling the recovery
+  # re-kick rather than rate limiting it. Self-contained means it cannot fail that way.
+  local _now= _then= _min=${_rekickMinInterval:-30}
+  _now=$(date +%s 2>/dev/null) || return 0
+  case ${_now:-x} in ''|*[!0-9]*) return 0;; esac
+  _then=$(cat "$TMPDIR/.rekick" 2>/dev/null || echo 0)
+  case ${_then:-x} in ''|*[!0-9]*) _then=0;; esac
+  [ $(( _now - _then )) -ge "$_min" ] || return 1
+  echo "$_now" > "$TMPDIR/.rekick" 2>/dev/null || :
+  return 0
 }
 
 
@@ -479,13 +580,13 @@ enable_charging() {
         # current* (no _max) name, and the !online gate that a current-cap never satisfies.)
         case "${chargingSwitch[*]-}" in
           *current_max*|*input_current*|*constant_charge_current*)
-            if present && not_charging; then
+            if present && not_charging && _rekick_due; then
               for _rn in */apsd_rerun */rerun_aicl; do
                 [ -w "$_rn" ] && { _wlog "rekick $_rn <- 1" 2>/dev/null; echo 1 > "$_rn" 2>/dev/null; } || :
               done
             fi ;;
           *suspend*|*bypass*|*vbus*)
-            if present && ! online; then
+            if present && ! online && _rekick_due; then
               for _rn in */apsd_rerun */rerun_aicl; do
                 [ -w "$_rn" ] && { _wlog "rekick $_rn <- 1" 2>/dev/null; echo 1 > "$_rn" 2>/dev/null; } || :
               done
@@ -511,7 +612,7 @@ enable_charging() {
         until [ $(batt_cap) -ge ${1%\%} ]; do
           sleep ${loopDelay[0]}
         done
-        log_on
+        eval "${_logOn:-:}"
         disable_charging
       ;;
       *[hms])
@@ -531,7 +632,7 @@ enable_charging() {
         until [ $(volt_now) -ge ${1%m*} ]; do
           sleep ${loopDelay[0]}
         done
-        log_on
+        eval "${_logOn:-:}"
         disable_charging
       ;;
       *)
@@ -626,10 +727,36 @@ log_on() {
   }
 }
 
+# rc21: mksh SAVES AND RESTORES the shell options across every function call, so a `set -x`
+# performed INSIDE log_on() is undone the instant log_on returns -- the call is a no-op and
+# tracing never comes back. Every call site pairs a `set +x` (to keep a long polling loop out
+# of the log) with a log_on afterwards, so on mksh the log simply stopped at the first wait and
+# the rest of the operation was never traced. Device-proven: a function that runs `set -x`
+# leaves $- with no x in the caller, while the same `set -x` written in the caller's own scope
+# does not. Same text, evaluated in the caller's scope, where the option actually sticks.
+_logOn='[ ! -f ${log:-//} ] || { [[ $log = */accd-* ]] && set -x || set -x 2>>$log; }'
+
 
 misc_stuff() {
   set -eu
   mkdir -p $dataDir 2>/dev/null || :
+  # rc21: $config can EXIST and not be a regular file -- a directory left behind by a bad backup
+  # restore or a botched script. `[ -f ]` correctly reads that as "no config", but the remedy on
+  # the same line then runs `cat default > $config`, which fails with "Is a directory" and, under
+  # set -e, takes the front-end down with it: `acc -i`, `acc -s` and every `acc -D` start died, so
+  # the daemon could not be started to repair the very thing that was broken, and nothing said why.
+  # Device-proven on a Mi A3: a garbage config FILE starts the daemon fine, a directory kills it
+  # before it can even open its log. Clear the obstruction, prefer the daemon's last known-good
+  # copy over the shipped defaults so the user's own limits come back rather than silently
+  # resetting to 80/70, and never let this write abort the caller.
+  if [ -e $config ] && [ ! -f $config ]; then
+    mv -f $config $config.bad.$$ 2>/dev/null || rm -rf $config 2>/dev/null || :
+    if [ -f $dataDir/.config-good ]; then
+      cat $dataDir/.config-good > $config 2>/dev/null || :
+    else
+      cat $execDir/default-config.txt > $config 2>/dev/null || :
+    fi
+  fi
   [ -f $config ] || cat $execDir/default-config.txt > $config
 
   # custom config path
@@ -642,7 +769,15 @@ misc_stuff() {
 
 
 notif() {
-  su -lp 2000 -c "/system/bin/cmd notification post -S bigtext -t \"🔋ACC | $(date +%H:%M)\" "Tag$(date +%s)" \"${*:-:)}\"" < /dev/null > /dev/null 2>&1 || :
+  # rc21 SECURITY: the message used to be interpolated into this `su -c` string inside DOUBLE
+  # quotes, so the shell that su starts parsed it: `acc -n '$(cmd)'` ran cmd (as uid 2000). The
+  # daemon also feeds switch names and limits through here, so a hostile value in a config or a
+  # node name reached a shell too. Embed it SINGLE-quoted instead, escaping any single quote the
+  # message contains -- the same idiom write-config.sh already uses for stored strings. Nothing
+  # inside single quotes is expanded, so no message can become code.
+  _nmsg="${*:-:)}"
+  _nmsg=$(printf %s "$_nmsg" | sed "s/'/'\\\\''/g")
+  su -lp 2000 -c "/system/bin/cmd notification post -S bigtext -t \"🔋ACC | $(date +%H:%M)\" \"Tag$(date +%s)\" '$_nmsg'" < /dev/null > /dev/null 2>&1 || :
 }
 
 
@@ -719,7 +854,7 @@ wait_plug() {
     ! $isAccd || mask_capacity 2>/dev/null || :
     set +x
   done
-  log_on
+  eval "${_logOn:-:}"
   enable_charging "$@"
 }
 
@@ -738,6 +873,26 @@ _wlog() {
 
 
 write() {
+
+  # rc21: the blacklist is enforced HERE, at ACC's one write choke point, for the same reason
+  # AMPS enforces it in wr(). Filtering switch CANDIDATES was not enough: the charging-current
+  # machinery writes nodes (usb/current_max, pc_port/current_max, input_current_settled) through
+  # a completely separate path, so a node blocked in the app was refused 12 times by AMPS and
+  # then written anyway by the daemon -- proven from ACC's own write ledger on a Mi A3.
+  # A node reaches this list only by taking a phone down, so nothing is worth writing it for.
+  # The trade-off is deliberate: if you block the node ACC is holding the limit with, ACC stops
+  # holding the limit and the breach monitor says so, rather than silently writing it anyway.
+  # _BLRELEASE is the one exemption, and it exists because refusing every write can strand a
+  # phone NOT CHARGING: block the node ACC is currently holding the limit with and it can no
+  # longer write the value that RELEASES the cut either (measured: input_suspend stuck at 1 at
+  # 71% with the limit at 75%). The daemon therefore releases the node once, then stops using
+  # it. A release restores charging; it is the cut that carries the risk.
+  if [ "${_BLRELEASE:-0}" != 1 ] && [ -n "${2-}" ] \
+    && command -v sw_blacklisted >/dev/null 2>&1 && sw_blacklisted "$2"
+  then
+    ${isAccd:-false} && command -v _wlog >/dev/null 2>&1 && _wlog "blocked $2 (on the blocked list, not written)" || :
+    return 1
+  fi
 
   local i=y
   local seq=5
@@ -823,9 +978,108 @@ domain=vr25
 loopDelay=(3 9)
 execDir=/data/adb/$domain/acc
 export TMPDIR=/dev/.vr25/acc
+mkdir -p $TMPDIR 2>/dev/null || :   # rc21 (tmpfs): front-end guard -- see acquire-lock.sh. $TMPDIR is tmpfs; if a boot never recreated it, a cold front-end (`acc`, AccA) would die at batt-interface.sh's `touch $TMPDIR/.batt-interface.sh`. Self-create so it degrades to a direct battery read instead of crashing.
 dataDir=/data/adb/$domain/${id}-data
 : ${config:=$dataDir/config.txt}
 config_=$config
+
+# rc21: parse-safe config load, shared by the daemon and the front-end. Sourcing a config with a
+# SYNTAX error is fatal in mksh: the parse error aborts the shell and fires the exit trap BEFORE
+# `2>/dev/null || :` can act, because a redirect and a guard only catch RUNTIME failures. Test
+# that the file PARSES in a throwaway subshell first (exit trap cleared, so the subshell's own
+# abort has no side effects and never runs exxit), and source it for real only once it is known
+# well-formed. Returns 0 when the live shell now holds a parsed config, 1 when the file is
+# unusable and the caller should fall back.
+#
+# accd has had this since rc21 as _srccfg, which also maintains the known-good copy. The
+# front-end had nothing: `acc -i`, `acc -s` and `acc -D` all died on the very file a user would
+# run acc to repair. Deliberately NOT folded into accd's _srccfg -- that one is on the per-loop
+# hot path and is already tested; this is the same three lines without its bookkeeping.
+srccfg_try() {
+  _sctf=${1:-$config}
+  [ -f "$_sctf" ] || return 1
+  # Judge PARSEABILITY, not the config's exit status. The previous form was
+  #   ( trap - EXIT; . "$_sctf" ) || return 1
+  #   . "$_sctf" || return 1
+  # which had two defects, both measured on a Mi A3 and a Pixel 6a:
+  #  1. It returned 1 whenever the LAST command in the config exited non-zero. Config rules are
+  #     ordinary shell (applyOnBoot / applyOnPlug routinely end in a failing test, and ACC's own
+  #     `acc -e ... auto` appends ":; online || exec $TMPDIR/accd"), so a perfectly valid config
+  #     was declared malformed. acc.sh's chain then fell through to .config-good and finally
+  #     default-config.txt, silently replacing the user's pause/resume with different values.
+  #     The A3's own live config was judged malformed by this.
+  #  2. It sourced the file TWICE, so every side-effecting rule ran twice per invocation, and
+  #     the validation subshell could itself run an `exec` rule.
+  # sh -n is parse-only: it catches the real malformed case (a truncated "capacity=(") without
+  # executing anything. The single source that follows is then allowed to have any exit status.
+  # The interpreter MUST be an absolute path. acc.sh runs with a PATH that does not always
+  # resolve a bare `sh` (ACC's own early-cap.log records "sh: sh: No such file or directory"),
+  # and a bare `sh -n` that fails to EXEC is indistinguishable from a parse error, so every
+  # config was declared malformed and every acc invocation printed
+  #   "Warning: ... is malformed and no known-good copy exists; using defaults."
+  # while the file parsed perfectly. Measured on both a Magisk and a KernelSU phone.
+  # If no interpreter can be found at all, skip validation and source anyway: wrongly rejecting
+  # a good config is worse than not catching a bad one, and the caller already tolerates a
+  # failed source.
+  for _sctsh in /system/bin/sh /system/xbin/sh /bin/sh; do
+    [ -x "$_sctsh" ] || continue
+    "$_sctsh" -n "$_sctf" 2>/dev/null || return 1
+    break
+  done
+  # mksh does NOT honour `|| :` for a failure INSIDE a dot-sourced file: under set -e a config
+  # whose last command exits non-zero (applyOnBoot/applyOnPlug rules routinely end in a failing
+  # test, and `acc -e ... auto` appends ":; online || exec $TMPDIR/accd") aborted the whole
+  # front-end right here, so `acc -v` exited 1 having printed no version and no warning. Drop
+  # errexit only across the source and restore it exactly as it was, so a caller that never
+  # enabled it (acca.sh / set-prop.sh) is left unchanged.
+  case $- in
+    *e*) set +e; . "$_sctf" 2>/dev/null; set -e;;
+    *) . "$_sctf" 2>/dev/null || :;;
+  esac
+  return 0
+}
+
+# rc21: is this node one that already took the phone down? Two lists feed it: AMPS's crash
+# blacklist (survivor_check writes it after a scan that never returned) and ACC's own probe
+# blacklist. Both record a node that panicked mid-write, so nothing may write one again without
+# the owner clearing it via `acc -sb rm`. Accepts a bare node path; the AMPS list stores full
+# paths and the probe list stores "dir/node on off" rows, so match on the leading field of both.
+#
+# The leading field is the whole point. AMPS 7.2.1 changed its list from a bare path per line to
+# "path<TAB>value<TAB>when" so a crash record also says what was being written. The first version
+# of this function matched with `grep -qxF`, i.e. WHOLE LINE, which cannot match a tab-suffixed
+# row -- so every entry the shipping engine actually writes was invisible here, and the three
+# call sites that depend on it (write(), filter_sw, the configured-switch release) all failed
+# open and wrote the node that had already crashed the phone. Read the first field, not the line.
+#
+# No awk, no grep, no fork. Not for speed (though this runs on every write): awk is absent on
+# some vendor ROMs and toybox only grew it recently, and setup-busybox.sh may now legitimately
+# continue without busybox (BB_OPTIONAL). A blacklist that silently fails open on those phones
+# is precisely the boot loop it exists to prevent, so it must not depend on an external binary.
+# `while read` with a redirect (not a pipe) runs in this shell, so `return` inside it works.
+sw_blacklisted() {
+  [ -n "${1:-}" ] || return 1
+  _swbn=${1##*/sys/class/power_supply/}
+  _swfp=/sys/class/power_supply/$_swbn
+  _swcr=$(printf '\r')
+  if [ -s $dataDir/.acc-compat-blacklist ]; then
+    while IFS="$(printf '\t')" read -r _swl _swrest || [ -n "$_swl" ]; do
+      _swl=${_swl%"$_swcr"}
+      case "$_swl" in ''|'#'*) continue;; esac
+      [ "$_swl" = "$1" ] || [ "$_swl" = "$_swfp" ] || [ "$_swl" = "$_swbn" ] || continue
+      return 0
+    done < $dataDir/.acc-compat-blacklist
+  fi
+  if [ -s $dataDir/.probe-blacklist ]; then
+    while IFS=' ' read -r _swl _swrest || [ -n "$_swl" ]; do
+      _swl=${_swl%"$_swcr"}
+      case "$_swl" in ''|'#'*) continue;; esac
+      [ "$_swl" = "$_swbn" ] || [ "$_swl" = "$1" ] || [ "$_swl" = "$_swfp" ] || continue
+      return 0
+    done < $dataDir/.probe-blacklist
+  fi
+  return 1
+}
 
 [ -f $TMPDIR/.ghost-charging ] \
   && ghostCharging=true \

@@ -75,7 +75,10 @@ not_charging() {
             else
               printf "[$j] $chargingSwitch" >> $wsLog
               case "$chargingSwitch" in
-                *current*) [[ "$chargingSwitch" = *current_cmd* ]] || echo " {mcc}";;
+                # A current_cmd entry takes no {mcc} tag, but it still needs the newline every
+                # other arm emits: the bare `||` skipped the echo entirely, so the next switch
+                # logged merged onto the same line and both became unparseable to `acc -ss::`.
+                *current*) if [[ "$chargingSwitch" = *current_cmd* ]]; then echo; else echo " {mcc}"; fi;;
                 *control_limit_max*|*siop_level*|*temp_level*) echo " {tl}";;
                 *voltage*) echo " {mcv}";;
                 *) echo;;
@@ -211,7 +214,13 @@ status() {
     else
       _status=$(set -eu; eval '$battStatusOverride') || :
     fi
-  elif $battStatusWorkaround; then
+  # Was a bare $battStatusWorkaround. status() is reached from the daemon via not_charging(),
+  # which declares the variable local, but any OTHER caller left it unset -- and under set -u
+  # mksh does not abort there, it fails the command and hands the caller rc=1 with _status
+  # already fallen back, so a wrong charging status propagates quietly instead of loudly.
+  # An empty value (not_charging's `local battStatusWorkaround=${battStatusWorkaround-}` can
+  # produce one) was an empty command word for the same reason. :-false covers both.
+  elif ${battStatusWorkaround:-false}; then
     idle_discharging
   fi
 

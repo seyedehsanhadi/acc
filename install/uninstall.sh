@@ -9,6 +9,13 @@ id=acc
 domain=vr25
 export TMPDIR=/dev/.$domain/$id
 
+# rc21: the uninstaller is the recovery backstop -- it must run even where busybox cannot be set up
+# (bare recovery, no-busybox ROM, FBE). Its real work (rm -rf, echo>node, cat, grep, sed) uses only
+# /system/bin builtins that exist on every Android, so a missing busybox must NOT abort it. This flag
+# tells the shared busybox block below to warn-and-continue instead of `exit 3`. flock/timeout usage
+# further down is guarded for the same reason.
+BB_OPTIONAL=true
+
 # set up busybox
 #BB#
 bin_dir=/data/adb/vr25/bin
@@ -20,10 +27,60 @@ magisk_busybox="$(ls /data/adb/*/bin/busybox /data/adb/magisk/busybox 2>/dev/nul
   for f in $bin_dir/busybox $magisk_busybox /system/*bin/busybox*; do
     [ -x $f ] && eval $f --install -s $busybox_dir/ && break || :
   done
+  # Self-healing fallbacks (kept in sync with install.sh): on roots/ROMs that stash
+  # busybox elsewhere (KernelSU, APatch, MIUI, old Android) or where `--install -s`
+  # symlinks into /dev are not honoured, cast a wider net before giving up. Additive:
+  # only runs when the quick path above produced no usable applet.
   [ -x $busybox_dir/ls ] || {
-    echo "Install busybox or simply place it in $bin_dir/"
+    # `--install -s` (symlinks) -> `--install` (hardlinks/copies) -> manual applet
+    # symlinks from `--list` (covers busybox AND toybox multicall binaries).
+    _bb_try() {
+      [ -x "$1" ] || return 1
+      eval "$1" --install -s $busybox_dir/ 2>/dev/null || :
+      [ -x $busybox_dir/ls ] && return 0
+      eval "$1" --install $busybox_dir/ 2>/dev/null || :
+      [ -x $busybox_dir/ls ] && return 0
+      for _ap in $("$1" --list 2>/dev/null); do
+        ln -sf "$1" "$busybox_dir/$_ap" 2>/dev/null || :
+      done
+      unset _ap
+      [ -x $busybox_dir/ls ] && return 0
+      return 1
+    }
+    for f in \
+      $bin_dir/busybox \
+      /data/adb/magisk/busybox \
+      /data/adb/ksu/bin/busybox \
+      /data/adb/ap/bin/busybox \
+      /data/adb/*/bin/busybox \
+      /data/adb/*/busybox \
+      "$(command -v busybox 2>/dev/null || :)" \
+      /system/xbin/busybox \
+      /system/bin/busybox \
+      /system/*bin/busybox* \
+      /vendor/*bin/busybox* \
+      "$(command -v toybox 2>/dev/null || :)" \
+      /system/xbin/toybox \
+      /system/bin/toybox \
+      /system/*bin/toybox* \
+    ; do
+      _bb_try "$f" && break || :
+    done
+    # -f: _bb_try is a FUNCTION. Plain `unset` clears a VARIABLE of that name, which never
+    # existed, so the helper stayed defined for everything that ran afterwards. This block is
+    # the canonical copy: build.sh syncs it into install.sh, customize.sh, uninstall.sh and
+    # both online installers, so it has to be fixed here, not in the generated copies.
+    unset -f _bb_try 2>/dev/null || unset _bb_try 2>/dev/null || :
+  }
+  [ -x $busybox_dir/ls ] || {
+    echo "ERROR: a usable busybox/toybox could not be found or installed."
+    echo "Tried $bin_dir/, Magisk/KernelSU/APatch, and /system. Install busybox"
+    echo "(or place a static busybox binary at $bin_dir/busybox)."
     echo
-    exit 3
+    # BB_OPTIONAL: callers that only need /system builtins (the uninstaller: rm/echo/cat exist
+    # everywhere, even in a bare recovery with no busybox) set BB_OPTIONAL=true and continue instead
+    # of aborting. The daemon/installer leave it unset, so busybox stays mandatory for them.
+    ${BB_OPTIONAL:-false} && echo "-> BB_OPTIONAL set: continuing with /system tools (some steps limited)" || exit 3
   }
 }
 case $PATH in
@@ -36,14 +93,30 @@ unset f bin_dir busybox_dir magisk_busybox
 exec 2>/dev/null
 
 # terminate/kill $id processes
-mkdir -p $TMPDIR
-(flock -n 0 || {
-  read pid
-  kill $pid
-  timeout 10 flock 0
-  kill -KILL $pid >/dev/null 2>&1
-  flock 0
-}) <>$TMPDIR/${id}.lock
+mkdir -p $TMPDIR 2>/dev/null || :
+if command -v flock >/dev/null 2>&1; then
+  (flock -n 0 || {
+    read pid
+    kill $pid
+    timeout 10 flock 0
+    kill -KILL $pid >/dev/null 2>&1
+    timeout 10 flock 0
+  }) <>$TMPDIR/${id}.lock
+else
+  # rc21: no flock (bare recovery / no-busybox env, see the non-fatal busybox block above) -- just
+  # kill the daemon directly if it is running. In a cold recovery session there is no daemon at all,
+  # so this is usually a no-op. The final flock above is now timeout-bounded so it can never hang.
+  for _p in $(pgrep -f 'accd\.sh' 2>/dev/null); do kill "$_p" 2>/dev/null; done
+fi
+# rc21: belt-and-suspenders. A boot-started daemon (via start-stop-daemon) can leave a SECOND accd
+# process that the single-pid flock-kill above misses, so a no-reboot uninstall would leave it running
+# (harmless -- its data dir is about to be removed, so it fail-safes to charging -- but not clean).
+# Sweep any lingering accd: TERM first (lets its exit trap restore charging), brief grace, then KILL.
+if command -v pgrep >/dev/null 2>&1; then
+  for _p in $(pgrep -f 'accd\.sh' 2>/dev/null); do kill "$_p" 2>/dev/null; done
+  sleep 1
+  for _p in $(pgrep -f 'accd\.sh' 2>/dev/null); do kill -KILL "$_p" 2>/dev/null; done
+fi
 
 # uninstall
 # D2: clean ACC's own tmp files but PRESERVE the acc-compat tester artifact -- acc-compat-verified
@@ -51,6 +124,13 @@ mkdir -p $TMPDIR
 for f in /data/local/tmp/${id}[-_]*; do
   [ -e "$f" ] || continue
   case "$f" in *compat*) continue;; esac
+  # rc21: never delete an INSTALLER. The glob acc[-_]* matches the release archives
+  # (acc_v2025.5.18-6.5.1-rc21_202505301.zip / .tgz) that people download and leave in
+  # /data/local/tmp, so uninstalling ACC also deleted the file needed to install it again.
+  # That hurts most in the one case it matters: a tester uninstalls to recover a phone,
+  # then finds the zip gone. Caught by the clean-install reboot suite, which wiped its own
+  # installer this way. Ours are only ever scripts and logs, so archives are never ours.
+  case "$f" in *.zip|*.tgz|*.tar.gz|*.tar.bz2|*.apk) continue;; esac
   rm -rf "$f"
 done
 rm -rf \
@@ -94,7 +174,21 @@ rm -rf \
         [ -w "$_node" ] && echo "$_def" > "$_node" 2>/dev/null || :
       done
     done
-    unset _key _line _tok _node _def
+    # rc21: also replay the recorded chargingSwitch's ON value to whatever node the daemon locked.
+    # The ~20-name generic sweep below misses many vendor nodes (LG, Huawei, OPPO/OnePlus/Realme,
+    # Xiaomi qcom-battery, Motorola force_charger_suspend, ...); the config records the EXACT node
+    # ACC touched, so writing field-2 (ON) re-enables charging for it regardless of vendor. Works for
+    # every class: cut ON=0, level ON=100, current ON=high. Numeric ON only; every triplet replayed.
+    _sw=$(grep "^chargingSwitch=" "$_cfg" 2>/dev/null | head -1 | sed -e 's/^[^(]*(//' -e 's/).*$//')
+    ( set -- $_sw
+      while [ $# -ge 3 ] && [ -n "$1" ]; do
+        _n=$1; _on=$2
+        case "$_on" in ''|*[!0-9]*) shift 3; continue;; esac
+        case "$_n" in /*) ;; *) _n=/sys/class/power_supply/$_n;; esac
+        [ -w "$_n" ] && echo "$_on" > "$_n" 2>/dev/null || :
+        shift 3
+      done ) 2>/dev/null || :
+    unset _key _line _tok _node _def _sw
   fi
 
   # (a) re-enable cut/suspend/drain switches
@@ -181,6 +275,20 @@ rm -rf \
   # cleared /data/adb/$domain/*, leaving /dev/.vr25/acc (stale .config/.cfg/locks) on a
   # no-reboot uninstall. Leave /dev/.$domain/busybox (shared) intact.
   rm -rf "$TMPDIR" 2>/dev/null || :
+
+  # rc21: post-condition -- confirm the module is actually gone. On FBE/undecrypted /data (a recovery
+  # flash before the PIN/pattern is entered) /data/adb is unreachable, so every rm above silently
+  # no-ops and the script would otherwise exit 0 = "recovered" while the phone re-bricks on next boot.
+  # Fail loudly with the actionable cause instead of a false success.
+  if [ -e "/data/adb/modules/$id" ] || [ -e "/data/adb/$domain/$id" ] || [ -e "$(readlink -f /data/adb/$domain/$id 2>/dev/null)" ] 2>/dev/null; then
+    echo
+    echo "WARNING: ACC files are STILL PRESENT after removal -- nothing was actually removed."
+    echo "  /data is most likely not decrypted (FBE) in this recovery session."
+    echo "  Fix: in recovery, DECRYPT /data (enter your PIN/pattern), then re-flash this uninstaller;"
+    echo "  or run it from a booted system:  su -c 'sh /data/adb/$domain/$id/uninstall.sh'"
+    echo
+    exit 1
+  fi
 }
 
 exit 0

@@ -94,12 +94,15 @@ fi
 # update busybox config (from install/setup-busybox.sh) in install/uninstall.sh and install scripts
 set -e
 for file in ./install/uninstall.sh ./install*.sh; do
-  [ $file -ot install/setup-busybox.sh ] && {
-    { sed -n '1,/#BB#/p' $file; \
-    grep -Ev '^$|^#' install/setup-busybox.sh; \
-    sed -n '/^#\/BB#/,$p' $file; } > ${file}.tmp
-    mv -f ${file}.tmp $file
-  }
+  # rc21: ALWAYS re-sync the #BB# block. This was `[ $file -ot install/setup-busybox.sh ]`
+  # (mtime-gated) -- which silently STOPPED firing the moment a file was edited after
+  # setup-busybox.sh, which is exactly how install/uninstall.sh drifted to a stale, weaker,
+  # FATAL busybox block: the one script that most needs the current wide + non-fatal net.
+  # Idempotent; content is sourced only from setup-busybox.sh.
+  { sed -n '1,/#BB#/p' $file; \
+  grep -Ev '^$|^#' install/setup-busybox.sh; \
+  sed -n '/^#\/BB#/,$p' $file; } > ${file}.tmp
+  mv -f ${file}.tmp $file
 done
 set +e
 
@@ -122,9 +125,55 @@ if [ bin/${id}_flashable_uninstaller.zip -ot install/uninstall.sh ] || [ ! -f bi
   mkdir -p bin $tmpDir
   sed 's|#!/system/bin/sh|#!/sbin/sh|' install/uninstall.sh > $tmpDir/update-binary
   echo "#MAGISK" > $tmpDir/updater-script
-  (cd .tmp
-  zip -r9 ../bin/${id}_flashable_uninstaller.zip * \
-    | sed 's|.*adding: ||' | grep -iv 'zip warning:')
+  # This is the RECOVERY artifact: the thing someone flashes when a phone will not boot. The old
+  # code called `zip` and swallowed the failure, and Git Bash on Windows has no `zip` at all -- so
+  # the branch above had already DELETED the previous zip and this step then produced nothing,
+  # silently shipping a release with no recovery path. Prefer python (present wherever build-zip.py
+  # runs), keep zip as a fallback, and fail the build loudly rather than continue without it.
+  # update-binary must be 0755: recovery execs it directly.
+  py=$(command -v python3 || command -v python) 2>/dev/null
+  if [ -n "$py" ]; then
+    "$py" - .tmp "bin/${id}_flashable_uninstaller.zip" <<'EOF' || { echo "BUILD ERROR: could not package the flashable uninstaller" >&2; exit 9; }
+import os, sys, zipfile
+src, out = sys.argv[1], sys.argv[2]
+os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
+with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
+    for root, dirs, files in os.walk(src):
+        dirs.sort(); files.sort()
+        for d in dirs:
+            rel = os.path.relpath(os.path.join(root, d), src).replace('\\', '/') + '/'
+            zi = zipfile.ZipInfo(rel); zi.create_system = 3
+            zi.external_attr = (0o40755 << 16) | 0x10
+            z.writestr(zi, b'')
+        for f in files:
+            p = os.path.join(root, f)
+            rel = os.path.relpath(p, src).replace('\\', '/')
+            mode = 0o100755 if f == 'update-binary' else 0o100644
+            zi = zipfile.ZipInfo(rel); zi.create_system = 3
+            zi.external_attr = mode << 16
+            zi.compress_type = zipfile.ZIP_DEFLATED
+            with open(p, 'rb') as fh: z.writestr(zi, fh.read())
+with zipfile.ZipFile(out) as z:
+    names = z.namelist()
+    ub = 'META-INF/com/google/android/update-binary'
+    assert ub in names, 'update-binary missing'
+    assert 'META-INF/com/google/android/updater-script' in names, 'updater-script missing'
+    for e in z.infolist():
+        assert e.create_system == 3, 'no unix host on ' + e.filename
+        assert (e.external_attr >> 16) & 0xFFFF, 'no mode bits on ' + e.filename
+    m = (z.getinfo(ub).external_attr >> 16) & 0o777
+    assert m == 0o755, 'update-binary is %o, must be 755' % m
+print('   uninstaller: %d entries, update-binary 0755, unix modes on all' % len(names))
+EOF
+  elif command -v zip >/dev/null 2>&1; then
+    (cd .tmp
+    zip -r9 ../bin/${id}_flashable_uninstaller.zip * \
+      | sed 's|.*adding: ||' | grep -iv 'zip warning:')
+  else
+    echo "BUILD ERROR: no python and no zip -- cannot package the flashable uninstaller" >&2; exit 9
+  fi
+  [ -s bin/${id}_flashable_uninstaller.zip ] \
+    || { echo "BUILD ERROR: flashable uninstaller is missing or empty after packaging" >&2; exit 9; }
   rm -rf .tmp
   echo
 fi
@@ -143,9 +192,23 @@ fi
   # Magisk's updateJson one-tap download.
   basename_=$basename
   echo "=> _builds/${basename}/${basename_}.zip"
-  zip -r9 _builds/${basename}/${basename_}.zip \
-    * .gitattributes .gitignore .github \
-    -x _\*/\* | sed 's|.*adding: ||' | grep -iv 'zip warning:'
+  # Root managers read each file's UNIX mode out of the zip entry itself. Windows zip tools
+  # (7-Zip, PowerShell) omit it, so every *.sh extracts non-executable: Magisk tolerates that
+  # and installs anyway (hiding the fault), but KernelSU/APatch fail and the module DISAPPEARS
+  # after the next reboot. That shipped once in rc21 and cost a tester a rollback. Git Bash also
+  # has no `zip` at all, so this step silently produced nothing on Windows. build-zip.py writes
+  # create_system=3 + real mode bits on every OS and verifies the result, so prefer it.
+  py=$(command -v python3 || command -v python) 2>/dev/null
+  if [ -n "$py" ]; then
+    "$py" build-zip.py _builds/${basename}/${basename_}.zip || {
+      echo "BUILD ERROR: flashable zip failed verification -- would not install on KernelSU" >&2; exit 9; }
+  elif command -v zip >/dev/null 2>&1; then
+    zip -r9 _builds/${basename}/${basename_}.zip \
+      * .gitattributes .gitignore .github \
+      -x _\*/\* | sed 's|.*adding: ||' | grep -iv 'zip warning:'
+  else
+    echo "BUILD ERROR: no python and no zip -- cannot package a flashable zip" >&2; exit 9
+  fi
   echo
 
   # prepare files to be included in $id installable tarball

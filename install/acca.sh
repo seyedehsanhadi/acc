@@ -9,9 +9,23 @@ at() { :; }
 online() { :; }
 
 
+# Same tmpfs bootstrap acc.sh does: $TMPDIR/accd is a symlink created by accd.sh's own init, so
+# losing $TMPDIR leaves both front-ends unable to launch the daemon that would rebuild it. The
+# start-stop-daemon branch below already calls $execDir/accd.sh directly and is unaffected; the
+# setsid and nohup branches go through the symlink. execDir is persistent. Idempotent.
+ensure_tmpdir_links() {
+  _eti="${id:-acc}"
+  [ -e "$TMPDIR/${_eti}d" ] && [ -d "$TMPDIR" ] && return 0
+  mkdir -p "$TMPDIR" 2>/dev/null || :
+  ln -fs "$execDir/service.sh" "$TMPDIR/${_eti}d" 2>/dev/null || :
+  ln -fs "$execDir/${_eti}.sh" "$TMPDIR/$_eti" 2>/dev/null || :
+  ln -fs "$execDir/${_eti}a.sh" "$TMPDIR/${_eti}a" 2>/dev/null || :
+}
+
 daemon_ctrl() {
   case "${1-}" in
     start|restart)
+      ensure_tmpdir_links
       # Detach so the daemon survives a transient caller. A bare `exec accd` leaves
       # accd in the caller's session/process-group; when that caller is a one-shot
       # script (e.g. the switch scanner run from a front-end), accd dies the moment

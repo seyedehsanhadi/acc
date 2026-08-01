@@ -4,9 +4,30 @@
 # License: GPLv3+
 
 
+# $TMPDIR (/dev/<domain>/<id>) is tmpfs: wiped every reboot and rebuilt only by accd.sh's own
+# init, which creates these launcher symlinks. That is circular -- every start path below runs
+# `exec $TMPDIR/accd`, and $TMPDIR/accd is a symlink to service.sh created BY the daemon it
+# launches. Lose the dir while the phone is up (a boot where service.sh never ran, a cleanup
+# that removed it) and `acc -D start` prints "accd started" and then dies with
+# "/dev/.vr25/acc/accd: inaccessible or not found", with no supported way back short of a
+# reboot. Measured on both Magisk and KernelSU. execDir is on persistent storage and always
+# present, so rebuild the links from there. Idempotent: a no-op on every normal boot.
+ensure_tmpdir_links() {
+  local _i="${id:-acc}"
+  [ -e "$TMPDIR/${_i}d" ] && [ -d "$TMPDIR" ] && return 0
+  mkdir -p "$TMPDIR" 2>/dev/null || :
+  ln -fs "$execDir/service.sh" "$TMPDIR/${_i}d" 2>/dev/null || :
+  ln -fs "$execDir/${_i}.sh" "$TMPDIR/$_i" 2>/dev/null || :
+  ln -fs "$execDir/${_i}.sh" "$TMPDIR/${_i}d," 2>/dev/null || :
+  ln -fs "$execDir/${_i}.sh" "$TMPDIR/${_i}d." 2>/dev/null || :
+  ln -fs "$execDir/${_i}a.sh" "$TMPDIR/${_i}a" 2>/dev/null || :
+}
+
 daemon_ctrl() {
 
   local isRunning=false
+
+  ensure_tmpdir_links
 
   flock -n 0 <>$TMPDIR/acc.lock || isRunning=true
 
@@ -273,6 +294,11 @@ parse_switches() {
     # blacklist
     i="$(echo "$i $n" | grep -Eiv 'authentic|brightness|calibrat|capacitance|count|curr|cycle|daemon|demo|design|detect|disk|empty|factory|fast|fcc|flash|full|info|init|learn|mask|moist|nvram|online|otg|parallel|present|priority|protect|reboot|refcnt|report|resistance|reset|reverse|scale|time|rx_|ship|shutdown|state|status|step|sync|temp|timer|tx_|type|update|user|vbus|verif|volt|wait|wake')" || :
 
+    # rc21: never SUGGEST a node that already crashed this phone. -p is where an owner goes
+    # looking for a switch after the scan came up empty, which is exactly the phone where the
+    # blacklist is non-empty, so offering the killer node back is the worst possible advice.
+    [ -z "$i" ] || ! sw_blacklisted "${i%% *}" || continue
+
     [ -z "$i" ] || echo "$i"
 
   done
@@ -311,7 +337,30 @@ set_prop_() {
 }
 
 
-! ${verbose:-true} || echo
+# Cosmetic blank line before human-facing output. It must NOT precede a machine-readable
+# stream: `acc -j` / `--state` is JSON that AccA parses, and this spacer made every reply start
+# with an empty line (measured: `acc -j | od -c` began "\n{"), which a strict parser rejects.
+# `-sp` is a key=value read the app also consumes, so it is excluded too. Same guard style as
+# the verbose-log exclusion below.
+case "${1-}" in
+  # Machine-readable arms: suppress BOTH spacers. The leading one is this echo; the trailing one
+  # comes from exxit()'s `! ${noEcho:-false} && ${verbose:-true} && echo` on the EXIT trap, which
+  # already has a noEcho flag for exactly this purpose. Together they made `acc -j` emit a blank
+  # line before AND after the JSON.
+  # -ss: and -ss:: are the switch listings AccA reads to build its picker, one switch per line.
+  # The spacer put an empty first line in front of both, so the app saw a blank entry and every
+  # line count was one too high (`acc -ss:` on a 3-switch list reported 4).
+  -j|--state|-sp|-sp:|-ss:|-ss::|--print*|--charging*witch:|--charging*witch::) noEcho=true;;
+  # Same arms reached the long way round: `acc -s --charging_switch:` is `acc -ss:`, so it has to
+  # suppress the spacer too or the two forms disagree on their first line.
+  -s|--set)
+    case "${2-}" in
+      --charging*witch:|--charging*witch::|--print*) noEcho=true;;
+      *) ! ${verbose:-true} || echo;;
+    esac
+  ;;
+  *) ! ${verbose:-true} || echo;;
+esac
 execDir=/data/adb/vr25/acc
 defaultConfig=$execDir/default-config.txt
 
@@ -345,7 +394,19 @@ unset -f get_prop
 misc_stuff "${1-}"
 [[ "${1-}" != */* ]] || shift
 
-. $config
+# rc21: this was a bare `. $config`, and a truncated config killed the front-end here. The daemon
+# survives one (accd's _srccfg), so the phone kept its limit while `acc -i`, `acc -s`, `acc -D`
+# and every AccA call died -- on exactly the file the user would run acc to repair. Same guard,
+# then the daemon's last known-good copy, then the shipped defaults, and say which happened.
+if ! srccfg_try "$config"; then
+  if srccfg_try $dataDir/.config-good; then
+    echo "Warning: $config is malformed; using the last known-good settings." >&2
+  else
+    . $defaultConfig 2>/dev/null || :
+    echo "Warning: $config is malformed and no known-good copy exists; using defaults." >&2
+  fi
+  echo "Repair it with: acc -s --reset" >&2
+fi
 
 
 # load default language (English)
@@ -395,6 +456,20 @@ case "${1-}" in
         exit 2
       ;;
     esac
+    # rc21: rc21 rejected non-numeric input but a numeric value OUT OF RANGE still slipped
+    # through: `acc 999` was accepted with a success tick and silently stored 80/75 instead,
+    # which is the same "success tick over a value you did not ask for" this arm exists to stop.
+    # It fails safe rather than dangerously (a limit is still applied, never removed), but the
+    # user is told nothing. Ranges are the documented ones: percent, or millivolts.
+    for _cv in $1 ${2-}; do
+      if [ "$_cv" -le 100 ] 2>/dev/null; then :
+      elif [ "$_cv" -ge 3001 ] 2>/dev/null && [ "$_cv" -le 5000 ] 2>/dev/null; then :
+      else
+        echo "Capacity out of range: $_cv" >&2
+        echo "Expected 0-100 (percent) or 3001-5000 (mV), e.g. acc 75 70" >&2
+        exit 2
+      fi
+    done
     pause_capacity=$1
     resume_capacity=${2:-5000}
     . $execDir/write-config.sh
@@ -403,6 +478,95 @@ case "${1-}" in
 
   -b*|--rollback*)
     rollback "${*-}"
+  ;;
+
+  -sk|--rekick)
+    # The charger re-kick re-runs input detection when charging looks stalled. It is what
+    # recovers a stuck charger, and also what can collapse a fast-charge handshake on a phone
+    # whose stall check misfires, so it needs an off switch that is not a script edit.
+    case "${2-}" in
+      off) touch $dataDir/.rekick-off 2>/dev/null || :
+           echo "Charger re-kick OFF. ACC will not re-run charger input detection."
+           echo "If charging ever stalls and does not resume, turn it back on: acc -sk on";;
+      on)  rm -f $dataDir/.rekick-off 2>/dev/null || :
+           echo "Charger re-kick ON (the default).";;
+      ''|status)
+           [ -f $dataDir/.rekick-off ] && echo "off" || echo "on";;
+      *)   echo "usage: acc -sk [on|off]   (no argument prints the current setting)" >&2; exit 2;;
+    esac
+  ;;
+
+  --early-cap)
+    # rc21: the boot-gap cap runs at post-fs-data, before Android exists, so it is the one write
+    # that can boot-loop a phone. It self-disables by latching $dataDir/.no-early-cap after a
+    # crash or 3 bad boots -- but nothing ever removed that latch, it was undocumented, and it had
+    # no CLI. A user who tripped it once lost boot-gap overcharge protection permanently with no
+    # way back short of deleting a hidden file they had no way to learn about.
+    case "${2-}" in
+      off) touch $dataDir/.no-early-cap 2>/dev/null || :
+           echo "Boot-gap cap OFF. ACC will not touch the charging switch before Android starts."
+           echo "The daemon still enforces your limit a few seconds into the boot.";;
+      on)  rm -f $dataDir/.no-early-cap 2>/dev/null || :
+           echo "Boot-gap cap ON (the default)."
+           echo "If the phone ever fails to boot after this, it self-disables again on the next boot.";;
+      ''|status)
+           if [ -f $dataDir/.no-early-cap ]; then
+             echo "off"
+             echo "It was either turned off by hand, or latched off automatically after a boot" >&2
+             echo "that did not complete. Re-enable with: acc --early-cap on" >&2
+           else echo "on"; fi;;
+      *)   echo "usage: acc --early-cap [on|off]   (no argument prints the current setting)" >&2; exit 2;;
+    esac
+  ;;
+
+  -sb|--blacklist)
+    # rc21: reach AMPS's crash blacklist from the `acc` command. The engine already owned
+    # this (it has to: it runs on a phone that is currently unsafe to scan), but it was only
+    # reachable by calling acc-compat.sh at its full path, which nobody can be expected to
+    # remember. Router only; the engine stays the single implementation. Resolved by search so
+    # it works whichever root manager mounts the module.
+    shift
+    _amps=
+    for _a in $execDir/acc-compat.sh /data/adb/vr25/acc/acc-compat.sh \
+              /data/adb/modules/acc/acc-compat.sh; do
+      [ -f "$_a" ] && { _amps=$_a; break; }
+    done
+    [ -n "$_amps" ] || { echo "AMPS engine not found (looked in $execDir and the module dir)" >&2; exit 3; }
+    # rc21: "clear" must also release ACC's OWN crash state, not just the engine's list. The probe
+    # journal (.probe-blacklist) and the global probe latch (.no-probe) are written by accd, not by
+    # AMPS, so an exec straight into the engine left a latched phone with no way back short of
+    # deleting files by hand. Done before the exec, which replaces this process.
+    case ${1-} in
+      clear)
+        rm -f "$dataDir/.probe-blacklist" "$dataDir/.no-probe" 2>/dev/null || :
+        sync 2>/dev/null || :
+        echo "Cleared ACC's crash blacklist and re-enabled automatic switch searching."
+      ;;
+      ''|list)
+        # A latched phone stops looking for a switch, which otherwise looks like ACC has simply
+        # stopped working. Say so here, where the user is already looking.
+        [ ! -f "$dataDir/.no-probe" ] || {
+          echo "Automatic switch searching is OFF."
+          # .no-probe and .probe-blacklist are written independently by accd, so the latch can
+          # exist with no blacklist file yet. The `2>/dev/null` on the `done` line does NOT
+          # suppress the shell's own failed-open diagnostic for an input redirect, so `acc -sb
+          # list` aborted with "can't open .../.probe-blacklist: No such file or directory" and
+          # rc=1 (reproduced on both Magisk and KernelSU). Only read it if it is there.
+          _nbl=0
+          if [ -f "$dataDir/.probe-blacklist" ]; then
+            while IFS= read -r _bll || [ -n "${_bll:-}" ]; do
+              case ${_bll} in ''|'#'*) continue;; esac
+              _nbl=$(( _nbl + 1 ))
+            done < "$dataDir/.probe-blacklist"
+          fi
+          echo "  $_nbl switch(es) crash-rebooted this phone, so ACC stopped trying to find one."
+          echo "  Pick one by hand:  acc -ss"
+          echo "  Or start over:     acc -sb clear"
+          echo ""
+        }
+      ;;
+    esac
+    exec sh "$_amps" --blacklist "$@"
   ;;
 
   -c|--config)
@@ -436,10 +600,29 @@ case "${1-}" in
     cap=100
     shift
 
+    # rc21: an argument that was neither a number nor -a used to be silently DISCARDED, leaving
+    # the default cap=100 -- so `acc -f 8O` (letter O for zero), or any typo, force-charged the
+    # phone to FULL. That is the most aggressive possible outcome of a typo, on a tool whose
+    # entire purpose is not charging to full. Same class as `acc 999` and `acc 12abc`, which are
+    # already refused; -f was missed. AccA passes a plain number here (charge-once), so a valid
+    # limit is unaffected, and `acc -f` with no argument still means 100 as documented.
     for i in ${1-} ${2-}; do
-      [[ $i != [0-9]* ]] || { cap=$i; shift; }
-      [ $i != -a ] || { auto=true; shift; }
+      [ -n "$i" ] || continue
+      case "$i" in
+        -a) auto=true; shift;;
+        *[!0-9]*)
+          echo "Invalid argument for -f: $i" >&2
+          echo "Usage: acc -f [capacity] [-a]     e.g. acc -f 90" >&2
+          exit 2
+        ;;
+        *) cap=$i; shift;;
+      esac
     done
+    case ${cap:-100} in ''|*[!0-9]*) cap=100;; esac
+    { [ "$cap" -ge 1 ] && [ "$cap" -le 100 ]; } 2>/dev/null || {
+      echo "Capacity out of range for -f: $cap (expected 1-100)" >&2
+      exit 2
+    }
 
     cp -f $config $TMPDIR/.acc-f-config
     config=$TMPDIR/.acc-f-config
@@ -463,7 +646,12 @@ case "${1-}" in
     . $execDir/write-config.sh)
 
     ! $auto || print '\n:; online || exec $TMPDIR/accd' >> $config
-    [ -z "${1-}" ] || eval $TMPDIR/acca $config "$@"
+    # rc21 SECURITY: was `eval $TMPDIR/acca $config "$@"`. The pass-through options of
+    # `acc -f 90 -s mcc=500` are already separate words by the time they reach here, so eval
+    # bought nothing and handed the caller's argument to the shell: `acc -f '$(cmd)'` ran cmd
+    # AS ROOT. Same class as the rc21 eq() fix, in a path that fix did not cover. Calling the
+    # helper directly passes the identical words without a round trip through the parser.
+    [ -z "${1-}" ] || "$TMPDIR/acca" "$config" "$@"
 
     print_charging_enabled_until ${cap}%
     $auto || print_restart_accd
@@ -472,6 +660,7 @@ case "${1-}" in
       echo
     }
     unset auto cap i
+    ensure_tmpdir_links
     exec $TMPDIR/accd $config
   ;;
 
@@ -508,7 +697,10 @@ case "${1-}" in
   -j|--state)
     # publish/print the machine-readable state export (subsystem A): cats the daemon's
     # tmpfs snapshot, or generates one on demand if the daemon is not running.
-    print_state
+    # Emit EXACTLY one line. state.json is a single line ending in one newline, but something
+    # on the exit path appended a second, so `acc -j` returned two lines where AccA expects
+    # one. Command substitution strips every trailing newline; printf puts back exactly one.
+    printf '%s\n' "$(print_state)"
   ;;
 
   -la)
@@ -570,7 +762,60 @@ case "${1-}" in
 
   -ss)
     shift
-    set_prop_ --charging_switch
+    # rc21: two shorthands people kept asking for, both resolving to things ACC already does
+    # but only through the app or a full path. Anything else falls through to the old behaviour
+    # unchanged, so `acc -ss` and `acc -ss <switch spec>` are exactly what they were.
+    case "${1-}" in
+      f|find)
+        # run the switch finder (AMPS), the same engine AccA's "Find my switch" calls
+        shift
+        _amps=
+        for _a in $execDir/acc-compat.sh /data/adb/vr25/acc/acc-compat.sh \
+                  /data/adb/modules/acc/acc-compat.sh; do
+          [ -f "$_a" ] && { _amps=$_a; break; }
+        done
+        [ -n "$_amps" ] || { echo "AMPS engine not found (looked in $execDir and the module dir)" >&2; exit 3; }
+        exec sh "$_amps" "$@"
+      ;;
+      # Match ANY digit-led argument, not just 1-2 digits. The old [0-9]|[0-9][0-9] pattern let a
+      # 3+ digit index fall through to the *) arm below, which opens the interactive picker: on
+      # both a Magisk and a KernelSU phone `acc -ss 111` and `acc -ss 1000` returned rc=0 having
+      # silently taken that branch, so the out-of-range guard inside this arm was never reached.
+      # Non-numeric input is still rejected by the guard immediately below.
+      [0-9]*)
+        # pick switch number N straight from the list `acc -ss::` prints. Same file, same sort,
+        # same numbering, so what the user reads is what they can select. Setting it goes through
+        # charging_switch=, not --charging_switch: the latter always opens the interactive picker
+        # and ignores arguments, so it cannot be driven from a script.
+        _swn=$1
+        # Reject a selection that cannot exist BEFORE using it as a sed address. toybox sed
+        # folds address 0 into 1, so `acc -ss 0` silently selected the FIRST switch and applied
+        # it (measured on both Magisk and KernelSU: it wrote a real switch, and on Tensor it
+        # also carried the " --" user-lock marker). The numbering the user reads from `acc -ss::`
+        # starts at 1, so anything below that is a typo, not a choice.
+        case "$_swn" in ''|*[!0-9]*) echo "Switch number must be a positive integer. 'acc -ss::' lists them." >&2; exit 3;; esac
+        [ "$_swn" -ge 1 ] 2>/dev/null || { echo "No switch number $_swn. Numbering starts at 1; 'acc -ss::' lists them." >&2; exit 3; }
+        _swf=$dataDir/logs/working-switches.log
+        [ -s "$_swf" ] || { echo "No working switches recorded yet. Run 'acc -t' or Find my switch first." >&2; exit 3; }
+        # Strip the class marker AND the {mcc}/{mcv}/{tl} support annotations that -ss:: shows.
+        # Those are display only; leaving one in put "main/current_max 3000000 0 {mcc} --" into
+        # the config, which the daemon cannot parse, so every cut failed with a total-switch
+        # error. Removing braces rather than truncating to three fields keeps multi-node group
+        # switches (the Pixel/Tensor multi-path cut is one entry listing several nodes) intact.
+        _swline=$(sort "$_swf" 2>/dev/null | sed -n "${_swn}p" | sed -e 's/^\[.\] *//' -e 's/ *{[^}]*}//g' -e 's/ *$//')
+        [ -n "$_swline" ] || { echo "No switch number $_swn. 'acc -ss::' lists them." >&2; exit 3; }
+        if sw_blacklisted "${_swline%% *}"; then
+          echo "Switch $_swn (${_swline%% *}) crashed this phone before and is blocked." >&2
+          echo "Allow it again with: acc -sb rm ${_swline%% *}" >&2
+          exit 3
+        fi
+        echo "Setting switch $_swn: $_swline"
+        set_prop_ "charging_switch=$_swline --"
+      ;;
+      *)
+        set_prop_ --charging_switch
+      ;;
+    esac
   ;;
 
   -ss:)
@@ -647,7 +892,7 @@ case "${1-}" in
         sleep 1
         set +x
       done
-      log_on
+      eval "${_logOn:-:}"
     }
 
     . $execDir/read-ch-curr-ctrl-files-p2.sh
@@ -687,6 +932,13 @@ case "${1-}" in
       mv -f $TMPDIR/ch-switches_ $TMPDIR/ch-switches
       while read _chargingSwitch; do
         echo "x$_chargingSwitch" | grep -Eq '^x$|^x#' && continue
+        # rc21: honour the crash blacklist. -t WRITES every candidate to see which one holds,
+        # so without this it re-tests the exact node that already took the phone down, on a list
+        # AMPS refuses to touch for that reason. Skipped loudly, and `acc -sb rm <node>` re-allows.
+        if sw_blacklisted "$(echo "$_chargingSwitch" | cut -d ' ' -f 1)"; then
+          echo "skipped (crashed this phone before): $_chargingSwitch" | tee -a $logF
+          continue
+        fi
         [ -f "$(echo "$_chargingSwitch" | cut -d ' ' -f 1)" ] && {
           { test_charging_switch $_chargingSwitch; echo $? > $TMPDIR/.exitCode; } | tee -a $logF
           rm $TMPDIR/.sw 2>/dev/null || :
@@ -777,6 +1029,10 @@ case "${1-}" in
 
   -U|--uninstall)
     set +eu
+    # rc21: "a" answers the prompt up front, for a phone with no usable console. The prompt
+    # reads from stdin, so over `su -c` or from a front-end with nothing attached it sees EOF,
+    # takes that as "not yes", and exits 0 having removed nothing while looking like it worked.
+    [ ".${2-}" = .a ] && verbose=false || :
     ! ${verbose:-true} || {
       print_uninstall
       echo yes/no
@@ -814,6 +1070,40 @@ case "${1-}" in
     cat $config > "$2" 2>/dev/null \
       && echo "✅ $2" \
       || { echo "Could not write $2"; exit 1; }
+  ;;
+
+  # rc21: the ONE diagnostic. Passive, read-only collector -> a single shareable .tgz with everything
+  # needed to debug any problem (identity, config, live state, ACC's own logs, plus Android's own free
+  # 24/7 logs: logcat, pstore/panic, DropBox crash/anr, tombstones, ANR, thermal, bootreason) + a
+  # manifest of what was/wasn't captured. Nothing runs in the background; this only executes on demand.
+  # `--diag --sample` adds a 20s live read. Both CLI users and AccA call the same collector.
+  --diag|--diagnostics|-G)
+    shift
+    /system/bin/sh $execDir/diag-collect.sh "$@"
+  ;;
+
+  # rc21: opt-in verbose capture, for the rare intermittent bug a single snapshot misses. DEFAULT is
+  # off (fully zero-background). Arming does NOT touch the daemon loop -- that would cost idle battery,
+  # which we refuse -- it only tells the next on-demand `acc --diag` to include a live sample. It
+  # auto-expires so it can never be left on by accident.
+  --diag-verbose)
+    shift
+    _vf=$dataDir/.diag-verbose-armed
+    case "${1:-}" in
+      on|On|ON)
+        _hrs=${2:-24}; case "$_hrs" in ''|*[!0-9]*) _hrs=24 ;; esac
+        echo "$(date +%s 2>/dev/null || echo 0) $_hrs armed $(date 2>/dev/null)" > $_vf 2>/dev/null
+        echo "verbose capture ARMED for ${_hrs}h. The next 'acc --diag' will include a live sample."
+        echo "(daemon unchanged -- zero extra battery; this only affects the on-demand collect.)"
+      ;;
+      off|Off|OFF)
+        rm -f $_vf 2>/dev/null; echo "verbose capture disarmed."
+      ;;
+      *)
+        [ -f $_vf ] && echo "verbose capture: ARMED ($(cat $_vf 2>/dev/null))" || echo "verbose capture: off"
+        echo "usage: acc --diag-verbose on [hours] | off"
+      ;;
+    esac
   ;;
 
   # Line 346 shifts a leading config path away before this case runs, so */* is

@@ -73,14 +73,21 @@ magisk_busybox="$(ls /data/adb/*/bin/busybox /data/adb/magisk/busybox 2>/dev/nul
     ; do
       _bb_try "$f" && break || :
     done
-    unset _bb_try
+    # -f: _bb_try is a FUNCTION. Plain `unset` clears a VARIABLE of that name, which never
+    # existed, so the helper stayed defined for everything that ran afterwards. This block is
+    # the canonical copy: build.sh syncs it into install.sh, customize.sh, uninstall.sh and
+    # both online installers, so it has to be fixed here, not in the generated copies.
+    unset -f _bb_try 2>/dev/null || unset _bb_try 2>/dev/null || :
   }
   [ -x $busybox_dir/ls ] || {
     echo "ERROR: a usable busybox/toybox could not be found or installed."
     echo "Tried $bin_dir/, Magisk/KernelSU/APatch, and /system. Install busybox"
     echo "(or place a static busybox binary at $bin_dir/busybox)."
     echo
-    exit 3
+    # BB_OPTIONAL: callers that only need /system builtins (the uninstaller: rm/echo/cat exist
+    # everywhere, even in a bare recovery with no busybox) set BB_OPTIONAL=true and continue instead
+    # of aborting. The daemon/installer leave it unset, so busybox stays mandatory for them.
+    ${BB_OPTIONAL:-false} && echo "-> BB_OPTIONAL set: continuing with /system tools (some steps limited)" || exit 3
   }
 }
 case $PATH in

@@ -26,6 +26,15 @@
 probePending=$dataDir/.probe-pending
 probeBlacklist=$dataDir/.probe-blacklist
 
+# rc21: global probe stop. Blacklisting one node per crash-boot is correct but the cost is one
+# HARD REBOOT per bad node, and a Qualcomm device that keeps crashing early enough can fall into
+# EDL before the candidate list is exhausted (field report: OnePlus SM8250 on KernelSU -- boot to
+# desktop, freeze, no touch, reboot, EDL). After this many switches have taken the phone down,
+# stop searching for one automatically; the user picks with `acc -ss`. Charging itself is never
+# blocked by the latch. Cleared by `acc -sb clear`.
+probeLatch=$dataDir/.no-probe
+probeStrikeMax=${probeStrikeMax:-3}
+
 
 # journal_arm <switch-line>
 # Persist the candidate switch line that is ABOUT to be written, then flush it all the
@@ -77,6 +86,36 @@ journal_check() {
     # permanently blacklisted; without this the switch silently disappears and the phone can be left
     # with no working limit and no explanation.
     command -v notif >/dev/null 2>&1 && notif "⚠️ ACC: a charging switch crash-rebooted this phone and was permanently disabled for safety ($line). If charging no longer stops at your limit, run a switch scan in AccA → Scripts." || :
+    # rc21: trip the global latch once probing has taken this phone down too many times. Counted
+    # from the blacklist itself, which only ever grows by a crash attribution -- no extra state to
+    # keep in sync. Guarded so a device with a legitimately odd driver still gets its 3 attempts.
+    # Counted with the shell, not grep. toybox grep has no \s, and this runs early enough that
+    # busybox is not guaranteed on PATH -- a miscount here silently disables the whole latch.
+    _pbn=0
+    # Guard the redirect. `2>/dev/null` on the `done` line silences the loop's stderr but NOT a
+    # failed open of the input file, so an unreadable/absent blacklist aborted here under set -e
+    # -- and `rm -f "$probePending"` below never ran, stranding .probe-pending on persistent
+    # storage, which makes the NEXT boot look like a probe crash. Same failed-open class as the
+    # `acc -sb list` abort fixed in acc.sh.
+    if [ -r "$probeBlacklist" ]; then
+      # The case WORD was unquoted. A device shell field-splits it, so a whitespace-only line
+      # collapses to '' and an indented '#' loses its leading blank and reads as a comment --
+      # both get skipped, the strike count comes out short, and the latch never trips on a
+      # hand-edited blacklist. Quote it, and precompute the CR once instead of nesting quotes
+      # inside ${..} inside the quoted word (and forking a printf per line). Same idiom as
+      # sw_blacklisted in misc-functions.sh and bl_in in amps.sh.
+      _pbcr=$(printf '\r')
+      while IFS= read -r _pbl || [ -n "${_pbl:-}" ]; do
+        _pbl=${_pbl%"$_pbcr"}
+        case "$_pbl" in ''|'#'*) continue;; esac
+        _pbn=$(( _pbn + 1 ))
+      done < "$probeBlacklist"
+    fi
+    if [ "$_pbn" -ge "${probeStrikeMax:-3}" ] && [ ! -f "$probeLatch" ]; then
+      : > "$probeLatch" 2>/dev/null || :
+      sync 2>/dev/null || :
+      command -v notif >/dev/null 2>&1 && notif "⚠️ ACC: $_pbn charging switches have crash-rebooted this phone. Automatic switch searching is now OFF so it cannot happen again. Pick one by hand with 'acc -ss', or clear with 'acc -sb clear'." || :
+    fi
   fi
   rm -f "$probePending" 2>/dev/null || :
   sync 2>/dev/null || :

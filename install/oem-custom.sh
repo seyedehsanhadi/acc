@@ -5,7 +5,10 @@ _is_board() { getprop ro.product.board | grep -Eiq "$1"; }
 # patch/reset [broken/obsolete] config
 if (set +x; . $config) >/dev/null 2>&1; then
   configVer=0$(_get_prop configVerCode)
-  defaultConfVer=0$(cat $TMPDIR/.config-ver)
+  # Same tmpfs dependency as write-config.sh: a missing .config-ver made this read 0, which never
+  # equals the stored version, so every run force-rewrote the config through acca. The constant
+  # lives in default-config.txt on persistent storage.
+  defaultConfVer=0$(cat $TMPDIR/.config-ver 2>/dev/null || sed -n '/^configVerCode=/s/.*=//p' $execDir/default-config.txt 2>/dev/null)
   [ $configVer -eq $defaultConfVer ] || $TMPDIR/acca $config --set dummy=
 else
   cat $execDir/default-config.txt > $config

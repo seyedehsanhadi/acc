@@ -20,12 +20,53 @@ set_prop() {
     # set multiple properties
     *=*)
       . $defaultConfig
-      . $config
+      # rc21: parse-safe, same reason as acc.sh. The defaults are already loaded above, so a
+      # malformed config leaves those in place and the write below REPAIRS the file rather than
+      # the whole command dying on it.
+      #
+      # MUST stay guarded. set-prop.sh is shared by two front-ends: acc.sh, which sources
+      # misc-functions.sh (where srccfg_try lives), and acca.sh, the minimal front-end used by
+      # AccA and by the daemon itself, which sources neither. Calling srccfg_try unguarded here
+      # made `$TMPDIR/acca $config --set charging_switch=` fail silently under acca.sh, so the
+      # daemon could no longer clear a blocked charging switch -- device-proven on a Mi A3.
+      if command -v srccfg_try >/dev/null 2>&1; then
+        srccfg_try "$config" || :
+      else
+        . $config 2>/dev/null || :
+      fi
+
+      # rc21: these keys are ARRAYS in the config. Exporting one as a scalar (which is exactly
+      # what `acc -s capacity="5 101 70 75 true"` does) leaves write-config reading ${capacity[0]}
+      # as the whole string and ${capacity[4]} as empty, so every field silently falls back to its
+      # default and the command reports success while changing nothing. The config header
+      # documents the array shape, so users type this. charging_switch is NOT listed: it is a
+      # scalar setter and the daemon itself uses it.
+      for _spk in "$@"; do
+        case "$_spk" in
+          capacity=*|temperature=*|cooldownRatio=*|cooldown_ratio=*|loopDelay=*|loop_delay=*)
+            echo "Cannot set ${_spk%%=*} directly: it is an array in the config." >&2
+            echo "Use the individual settings, for example:" >&2
+            echo "  acc -s shutdown_capacity=5 cooldown_capacity=60 resume_capacity=70 pause_capacity=75 capacity_mask=false" >&2
+            echo "  acc -s cooldown_temp=45 max_temp=50 resume_temp=40 shutdown_temp=55" >&2
+            echo "  acc 75 70    (shortcut for pause and resume capacity)" >&2
+            return 2
+          ;;
+        esac
+      done
 
       export "$@"
 
+      # set_ch_curr REFUSES an out-of-range milliamp value (prints "[0-9999] mA only", returns
+      # 11) - it never clamps. `|| :` swallowed that and left the refused scalar exported, so
+      # write-config.sh's own clamp (`[ $mcc -le 9999 ] || mcc=9999`) then PERSISTED it: the
+      # command told the user the value was refused and still wrote a 9999 mA cap nobody asked
+      # for. Drop the key on a refusal so write-config falls back to ${maxChargingCurrent[@]}
+      # and the stored value is left exactly as it was. Only exit 11 (the range refusal) is
+      # treated this way; the documented no-control-file exit (0) still persists the intent for
+      # the daemon to re-apply, and a failed apply (1) is unchanged.
       [ .${mcc-${max_charging_current-x}} = .x ] \
-        || set_ch_curr ${mcc:-${max_charging_current:--}} || :
+        || set_ch_curr ${mcc:-${max_charging_current:--}} \
+        || { [ $? -ne 11 ] || unset mcc max_charging_current; }
 
       [ ".${mcv-${max_charging_voltage-x}}" = .x ] \
         || set_ch_volt "${mcv:-${max_charging_voltage:--}}" || :
@@ -47,14 +88,19 @@ set_prop() {
     # print default config
     d|--print-default)
       . $defaultConfig
-      two="${2//,/|}"
+      # $2 is UNSET for the long forms (`acc -s --print`, `acc -s --print-default`), and acc.sh
+      # is under `set -eu` from misc_stuff by the time it dispatches here, so a bare
+      # "${2//,/|}" aborts the command with "parameter not set" instead of printing anything.
+      # acc.sh's own -sp/-sd wrappers hide it by passing "${2-.*}"; the long forms pass nothing.
+      # Same guard acca.sh already carries (rc7/F7). Empty still falls back to "." below.
+      two="${2-}"; two="${two//,/|}"
       . $execDir/print-config.sh ns | { grep -E "${two:-.}" | more; } || :
       return 0
     ;;
 
     # print current config
     p|--print)
-      two="${2//,/|}"
+      two="${2-}"; two="${two//,/|}"   # unset $2 under set -u: see --print-default above
       . $execDir/print-config.sh | { grep -E "${two:-.}" | more; } || :
       return 0
     ;;
@@ -93,12 +139,29 @@ set_prop() {
 
     # set charging current
     c|--current)
+      # Reject a non-numeric milliamp value BEFORE it reaches the config. `acc -sc abc` stored
+      # cooldownCurrent=(abc) verbatim: the setter's own range check only guards numbers, and
+      # nothing downstream re-validates, so a typo became a live setting that the daemon then
+      # fed to raw arithmetic. Empty and "-" are the documented "unset" forms and still pass.
+      case "${2-}" in
+        ''|-) ;;
+        *[!0-9]*) echo "Charging current must be a whole number of mA (or '-' to unset)." >&2; return 3;;
+      esac
       set_ch_curr ${2-}
     ;;
 
     # set charging voltage
     v|--voltage)
       shift
+      # Same guard for voltage. `acc -sv abc` stored maxChargingVoltage=(3700 abc...) and a
+      # typo'd voltage becomes a value ACC writes to a real charge node. The accepted forms are
+      # a bare mV number, "-", empty, or a node spec (path::min::max), so require that the
+      # argument contain at least one digit rather than demanding all-digits.
+      case "${1-}" in
+        ''|-) ;;
+        *[0-9]*) ;;
+        *) echo "Charging voltage must contain a number (mV, a node spec, or '-' to unset)." >&2; return 3;;
+      esac
       set_ch_volt "$@"
     ;;
 
