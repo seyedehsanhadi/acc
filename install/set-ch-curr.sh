@@ -44,10 +44,17 @@ set_ch_curr() {
           # it left the caps applied with a clean config - the phone stayed current-limited until
           # reboot, and the daemon's own later `set_ch_curr -` no-ops once the marker is gone
           # (field report: disabled Charging power control, UI clean, still capped at 1100 mA).
+          # rc22: drop the marker FIRST. It is what says "a cap is applied", and the daemon can be
+          # mid-loop holding the config it read before the user cleared it. Releasing before the
+          # marker goes leaves a window where the daemon re-applies the cap a second later -- and
+          # with the marker then gone, every later `set_ch_curr -` no-ops, so the phone stays capped
+          # for good. Ledger from a Mi A3, one second apart:
+          #   20:43:47 write usb/current_max <- 5000000 (was 1000000)   the release
+          #   20:43:48 write usb/current_max <- 1000000 (was 2050000)   the daemon putting it back
+          rm $f 2>/dev/null || :
           grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null \
             && (applyOnPlug=(); maxChargingVoltage=(); maxChargingCurrent=(); apply_on_plug default) || :
           rekick_usb clear-not-charging || :
-          rm $f 2>/dev/null || :
           $isAccd || print_curr_restored
           return 0
         ;;
@@ -83,6 +90,8 @@ set_ch_curr() {
     # showed 1100 mA). The not-charging clear above only covers the no-.mcc-read case; this covers
     # the .mcc-read-set-but-unresolved case. Mirrors set-ch-volt's clear.
     if [ $1 = - ]; then
+      # rc22: marker first, same re-apply race as the clear above.
+      rm $f 2>/dev/null || :
       grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null && {
         apply_on_plug_ default
         # The stored "defaults" are snapshots from probe time, and negotiation-owned input nodes

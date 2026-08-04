@@ -112,30 +112,17 @@ inp() {   # $1 = node path -> the value a RESTORE writes
 }
 [ "$(inp /sys/class/power_supply/usb/current_max)" = 5000000 ]   && ok "usb/current_max restored high" || no "usb/current_max still gets the snapshot"
 
-# An input node the DRIVER owns must be left alone. Writing over a live negotiated value re-triggers
-# AICL and it settles lower: measured on a Mi A3, a restore wrote 5000000 over a healthy live
-# 1200000 and the driver came back at 200000.
-grep -q '\-le 100000' "$MF"   && ok "the input lift is bounded to nodes ACC could have capped"   || no "the lift is unbounded - it will disturb a live negotiation"
 
-lift() {   # $1 = live value, $2 = what ACC applied -> 0 means "write 5000000"
-  case "${1:-x}" in ''|*[!0-9]*) return 0;; esac
-  [ "$1" = "${2:-}" ] && return 0
-  [ "$1" -le 100000 ]
-}
-lift 0 v000        && ok "a zeroed input node IS lifted"      || no "a zeroed node is not lifted"
-lift 10000 v000    && ok "a 10000 cap token IS lifted"        || no "a cap token is not lifted"
-lift 100000 v000   && ok "exactly 100mA is lifted (boundary)" || no "the 100mA boundary excludes itself"
-lift abc v000      && ok "an unreadable live value still lifts" || no "an unreadable value blocked the lift"
+# A restore RELEASES an input node unconditionally: write high, let the driver clamp. Two narrower
+# rules were tried and both broke the release. "At or below 100mA" refused to lift a 1000mA user cap
+# (reproduced as "the cap will not clear" on a Pixel 6a and a Mi A3). "Still reads what ACC applied"
+# fails on the unit boundary -- config carries milliamps, the node holds microamps.
+inp_release() { case "$1" in */current_max|*/input_current|*/input_current_limit|*/input_current_settled) echo 5000000;; *) echo snapshot;; esac; }
+[ "$(inp_release /sys/class/power_supply/usb/current_max)" = 5000000 ]   && ok "an input node is released high regardless of what it currently reads"   || no "an input node is not released"
 
-# The regression this rule exists for, measured on a Pixel 6a: ACC capped usb/current_max to
-# 1000000 on a 2200000 charger, and a clear left it there because 1000000 is above the near-zero
-# bound. "The cap will not clear" is a field report this whole path exists to prevent.
-lift 1000000 1000000 && ok "a node still holding ACC's own 1000000 cap IS released"                      || no "ACC's own cap is not released - the cap will not clear"
-lift 2200000 1000000 && no "a live 2200000 was overwritten while ACC had applied 1000000"                      || ok "a value the driver has since raised is left alone"
-lift 1200000 v000    && no "a live negotiated 1200000 was overwritten (the A3 AICL collapse)"                      || ok "a live negotiated 1200000 is left alone"
-lift 2450000 v000    && no "a live 2450000 was overwritten"   || ok "a live 2450000 is left alone"
-[ "$(inp /sys/class/power_supply/main/input_current_settled)" = 5000000 ]   && ok "input_current_settled restored high" || no "input_current_settled still gets the snapshot"
-[ "$(inp /sys/class/power_supply/pc_port/current_max)" = 5000000 ]   && ok "pc_port/current_max restored high" || no "pc_port/current_max still gets the snapshot"
-[ "$(inp /sys/class/power_supply/battery/constant_charge_current)" = snapshot ]   && ok "the battery-side charge current keeps the never-lower rule, not the high write"   || no "constant_charge_current was wrongly treated as an input node"
+# The two rules that broke it must not come back.
+_ap2=$(sed -n '/^apply_on_plug() {/,/^  wait/p' "$MF")
+printf '%s' "$_ap2" | grep -q '_lv" -le 100000'   && no "the 100mA bound is back - a 1000mA user cap will not clear"   || ok "no magnitude bound on the input release"
+printf '%s' "$_ap2" | grep -q '"\$_lv" = "\${value'   && no "the applied-value comparison is back - it fails on the mA/uA unit boundary"   || ok "no applied-value comparison on the input release"
 
 fin

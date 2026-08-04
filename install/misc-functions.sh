@@ -64,6 +64,16 @@ apply_on_plug() {
     #  - the charging SWITCH is enforced elsewhere and is untouched here, so this
     #    can never weaken the pause/overcharge guard; the worst case is a current
     #    cap that leaks high on one node it could not have held anyway.
+    # rc22: never APPLY a current cap once the marker is gone. The marker is created when a cap is
+    # set and removed the moment one is cleared, so its absence means "no cap is configured" -- and
+    # the daemon can reach here holding a config it read before the user cleared it. Without this
+    # the cap is re-applied a second after being released, and the phone stays capped.
+    if [ "$arg" = value ] && [ -n "${maxChargingCurrent[0]-}" ]        && [ ! -f "$TMPDIR/.mcc-custom" ] && [ -z "${exitCode_-}" ]; then
+      case "$file" in
+        */current_max|*/input_current|*/input_current_limit|*/input_current_settled|*constant_charge_current*) continue;;
+      esac
+    fi
+
     if [ "$arg" = value ] && [ -z "${exitCode_-}" ]; then
       _rk=$TMPDIR/.mccrej-${file//\//_}
       read -r _rv _rc < "$_rk" 2>/dev/null || { _rv=; _rc=0; }
@@ -95,23 +105,24 @@ apply_on_plug() {
           #    nodes written to 500000, phone left at 4836mV/500mA. Writing high lets the driver
           #    clamp to what the charger can really deliver -- 0 -> 1.9A on that phone, device-proven
           #    -- and it is what the uninstaller already writes for these same nodes.
-          # "Is this cap OURS to release?" is answerable exactly, so do not guess it from a
-          # magnitude. $value is what ACC last applied to this node (the entry is
-          # node::applied::default). If the node still reads that, ACC put it there and a clear must
-          # lift it. If it reads anything else the driver has since moved it and it is not ours --
-          # writing over a live negotiated value re-triggers AICL and it settles LOWER (measured on
-          # a Mi A3: 5000000 written over a live 1200000, driver came back at 200000).
-          # A cap ACC wrote for a cut reads 0, or a small token, so keep that as a second way in --
-          # and it is the only one available on the clear path, where the entry carries the literal
-          # placeholder "v000" instead of an applied value.
-          _lv=; { read -r _lv < "$file"; } 2>/dev/null || _lv=
-          case "${_lv:-x}" in
-            ''|*[!0-9]*) : ;;                       # unreadable -> fail toward releasing
-            *) if [ "$_lv" = "${value:-}" ]; then :  # exactly what ACC applied: ours
-               elif [ "$_lv" -le 100000 ] 2>/dev/null; then :   # zeroed or a cut token: ours
-               else continue                         # the driver owns this value now
-               fi;;
-          esac
+          # A RESTORE means "ACC is no longer capping this", so release it: write high and let the
+          # driver clamp to what the charger can actually deliver. The recorded default must not be
+          # used -- it is only whatever the node read when ACC first identified it, and captured on
+          # a weak source that is 500000, which then caps a 2A charger at 500mA every time the
+          # driver zeroes the node (measured on a Mi A3). Writing high is what the uninstaller
+          # already does for these same nodes.
+          #
+          # Two narrower rules were tried here and both were wrong. Gating on "at or below 100mA"
+          # refused to release ACC's own cap, because a user cap of 1000mA sits above that bound --
+          # reproduced on a Pixel 6a and a Mi A3 as "the cap will not clear". Gating on "the node
+          # still reads exactly what ACC applied" fails on the unit boundary: the config carries
+          # milliamps (1000) and the node holds microamps (1000000), so it never matched.
+          #
+          # The measurement that motivated those bounds -- 5000000 written over a live 1200000,
+          # after which the driver settled at 200000 -- was later explained by the cable: that phone
+          # has ~500 milliohm of series resistance, and its input collapses to zero identically with
+          # ACC uninstalled and never run. So there was no live negotiation being harmed, only a
+          # supply that cannot hold current at all.
           default=5000000
           ;;
         *)
