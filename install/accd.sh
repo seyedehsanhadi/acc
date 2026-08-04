@@ -26,7 +26,20 @@ _INIT=false
 
 case "$*" in
   *-i*) _INIT=true;;
-  *) [ -f $TMPDIR/.batt-interface.sh ] || _INIT=true;;
+  # rc22: rebuild when the cache is UNUSABLE, not merely when it is absent. The old test was -f,
+  # which an empty file passes -- so a truncated cache left _INIT false, the daemon sourced nothing,
+  # and it ran blind on fail-safe defaults with no way back short of deleting the file or rebooting.
+  # There is a real path to that state: the cache is written with a truncating redirect, so a crash
+  # or a kill between the truncate and the write leaves it zero-length for good.
+  # The consequence is not subtle. With battCapacity unset, batt_cap coerces to 100, _ge_pause_cap
+  # is then always true, and a daemon started in that state pauses charging permanently.
+  # Found on both test phones at once: acc -i returned nothing on either, because every CLI call
+  # sources this same file, while the already-running daemons kept working from memory and looked
+  # perfectly healthy.
+  # battCapacity is the right sentinel: the init block below exits rather than write the cache
+  # without one, so its presence means the file was written completely.
+  *) { [ -s $TMPDIR/.batt-interface.sh ] \
+       && grep -q '^battCapacity=' $TMPDIR/.batt-interface.sh 2>/dev/null; } || _INIT=true;;
 esac
 
 
