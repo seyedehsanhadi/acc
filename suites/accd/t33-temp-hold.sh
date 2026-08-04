@@ -119,4 +119,36 @@ init_release 80 75 300 40 && no "released at level 80 with pause 75 - the capaci
 init_release 80 75 404 40 && no "released at level 80 while also over temp" \
                           || ok "at/above pause_capacity nothing releases, hot pack included"
 
+# ---- rc22: the cooldown cycle's re-enable ------------------------------------------------------
+# The cooldown loop tests the temperature BEFORE its off-phase, then sleeps a whole cooldownRatio
+# and re-enables charging on the other side without asking again. A pack that crossed max_temp
+# during that wait would get charging back for another full cycle. Same shape as the three paths
+# that did let charging resume over the limit.
+sed -n '/# cooldown cycle/,/^        done/p' "$SRC" | grep -q '_temp_hold || enable_charging'   && ok "the cooldown re-enable re-checks temperature after its sleep"   || no "the cooldown re-enable hands charging back without re-checking temperature"
+
+# It must remain a re-enable, not a pause: guarding it must not stop the cycle from resuming a cool
+# pack, which is the whole point of a duty cycle.
+_cd=$(sed -n '/# cooldown cycle/,/^        done/p' "$SRC")
+printf '%s' "$_cd" | grep -q 'enable_charging'   && ok "the cooldown cycle still re-enables a cool pack"   || no "the cooldown cycle no longer re-enables at all - the duty cycle is broken"
+
+# ---- rc22: the MAIN resume path -----------------------------------------------------------------
+# Its own condition reads the temperature, but a sleep runs between that read and enable_charging
+# whenever a force-off marker had to be cleared. Every re-enable in the daemon must act on a fresh
+# reading; a guard on three paths out of four is what made the original report hard to find.
+grep -q '_temp_hold || enable_charging' "$SRC"   && ok "the main resume re-checks temperature after its sleep"   || no "the main resume enables charging on a pre-sleep temperature reading"
+
+# Count the GUARDED sites rather than trying to parse the unguarded ones. Six call sites exist:
+#   330  exit trap                       guarded
+#   383  switch probe at init            disable_charging then enable_charging -- not a resume
+#   923  cooldown cycle                  guarded
+#   1058 idle-avoidance                  enable then immediately disable, net off -- not a resume
+#   1072 main resume                     guarded
+#   1633 generic_rearm                   guarded at function entry
+# Every path that RESUMES charging consults the temperature; the two that do not are a probe and a
+# cycle that ends disabled.
+_g=$(grep -c '_temp_hold' "$SRC")
+[ "${_g:-0}" -ge 6 ]   && ok "the temperature guard is referenced at $_g places (>=6: definition plus every resume path)"   || no "only $_g references to the temperature guard - a resume path has lost it"
+
+sed -n '/generic_rearm() {/,/^  }/p' "$SRC" | grep -q '_temp_hold'   && ok "generic_rearm is guarded at entry" || no "generic_rearm lost its guard"
+
 fin

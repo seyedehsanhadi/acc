@@ -914,7 +914,13 @@ if ! $_INIT; then
             dsys_batt set ac 1
             disable_charging || :
             sleep ${cooldownRatio[1]:-${loopDelay[0]}}
-            enable_charging
+            # rc22: re-check the temperature across the sleep. The loop's own gate above tested it
+            # BEFORE the off-phase, and this re-enable is on the other side of a wait that can run
+            # for a whole cooldownRatio. A pack that crossed max_temp during it would be handed
+            # charging back for another full cycle before the gate catches up. Cooling with the
+            # switch off makes that unlikely but not impossible under load, and it is the same
+            # shape as the three re-enable paths that DID let charging resume over the limit.
+            _temp_hold || enable_charging
             # The `set ac 1` above is cosmetic (it stops the notification flickering while the
             # switch is toggled) but it also stops Android's battery updates, and a long
             # cooldown on a hot phone never leaves this loop -- so before rc20 the level stayed
@@ -1057,7 +1063,13 @@ if ! $_INIT; then
         elif _le_resume_cap && [ $(temp_now) -le $(( ${temperature[2]} * 10 )) ]; then
           rm $TMPDIR/.forceoff* 2>/dev/null && sleep ${loopDelay[0]} || :
           _ccResume0=$(cc_now)
-          enable_charging
+          # rc22: the temperature in this branch's own condition was read BEFORE the sleep above,
+          # which runs whenever a force-off marker had to be cleared. Re-ask before actually
+          # resuming, so no path in the daemon enables charging on a stale reading. The window is
+          # narrow here -- the pack would have to cross from resume_temp past max_temp inside one
+          # loopDelay -- but a guard on three of four re-enable paths and not the fourth is exactly
+          # what made the original "charging resumes above max_temp" report so hard to find.
+          _temp_hold || enable_charging
           # rc20: re-apply the charging-current limit IMMEDIATELY on resume. enable_charging
           # writes the switch's ON value, and on a current-class switch that ON value IS the
           # uncapped default (e.g. constant_charge_current_max 3000000 0), so the user's limit
