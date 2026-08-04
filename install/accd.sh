@@ -1544,10 +1544,18 @@ if ! $_INIT; then
     then
       return 0
     fi
-    # KNOWN GAP (unfixed, 2026-07-31): raising pause while the firmware is latched does NOT
-    # resume charging. Reproduced on a Pixel with a 3 A charger: pause 72 at 72% latches, raising
-    # to 80 writes charge_stop_level=80 and the phone stays at 0 mA until it drains to
-    # resume_capacity. Neither trigger below covers it - not a fresh plug, and above resume.
+    # RESOLVED 2026-08-04. This was recorded on 2026-07-31 as a KNOWN GAP: "raising pause while the
+    # firmware is latched does not resume charging; the phone stays at 0 mA until it drains to
+    # resume_capacity". It was misattributed. The daemon was frozen, not the firmware -- on a
+    # native-limit phone with allow_idle_above_pcap=false the loop fell through to the generic switch
+    # prober and stopped running entirely, so nothing was writing charge_stop_level at all. With that
+    # fixed, re-measured at the exact conditions in the original note (pause set equal to the level,
+    # then raised): the phone latched, the raise took effect within 25s, and charging resumed at
+    # 1.2A without draining to resume. The loop was verified alive throughout.
+    #
+    # The measurements below (stop=100 alone, stop=100 + start>SOC, bd_clear=1) were all taken
+    # against that frozen daemon and prove nothing either way. Kept only as a record of what was
+    # tried; do not treat them as evidence about the firmware.
     #
     # Do NOT "fix" this by pulsing charge_stop_level/charge_start_level without testing on
     # hardware first. Measured, with the DAEMON STOPPED so nothing could revert the writes:
