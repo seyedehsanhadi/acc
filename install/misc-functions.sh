@@ -95,10 +95,22 @@ apply_on_plug() {
           #    nodes written to 500000, phone left at 4836mV/500mA. Writing high lets the driver
           #    clamp to what the charger can really deliver -- 0 -> 1.9A on that phone, device-proven
           #    -- and it is what the uninstaller already writes for these same nodes.
+          # "Is this cap OURS to release?" is answerable exactly, so do not guess it from a
+          # magnitude. $value is what ACC last applied to this node (the entry is
+          # node::applied::default). If the node still reads that, ACC put it there and a clear must
+          # lift it. If it reads anything else the driver has since moved it and it is not ours --
+          # writing over a live negotiated value re-triggers AICL and it settles LOWER (measured on
+          # a Mi A3: 5000000 written over a live 1200000, driver came back at 200000).
+          # A cap ACC wrote for a cut reads 0, or a small token, so keep that as a second way in --
+          # and it is the only one available on the clear path, where the entry carries the literal
+          # placeholder "v000" instead of an applied value.
           _lv=; { read -r _lv < "$file"; } 2>/dev/null || _lv=
           case "${_lv:-x}" in
-            ''|*[!0-9]*) : ;;
-            *) [ "$_lv" -le 100000 ] 2>/dev/null || continue;;
+            ''|*[!0-9]*) : ;;                       # unreadable -> fail toward releasing
+            *) if [ "$_lv" = "${value:-}" ]; then :  # exactly what ACC applied: ours
+               elif [ "$_lv" -le 100000 ] 2>/dev/null; then :   # zeroed or a cut token: ours
+               else continue                         # the driver owns this value now
+               fi;;
           esac
           default=5000000
           ;;

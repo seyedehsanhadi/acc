@@ -117,16 +117,23 @@ inp() {   # $1 = node path -> the value a RESTORE writes
 # 1200000 and the driver came back at 200000.
 grep -q '\-le 100000' "$MF"   && ok "the input lift is bounded to nodes ACC could have capped"   || no "the lift is unbounded - it will disturb a live negotiation"
 
-lift() {   # $1 = live value on an input node -> 0 means "write 5000000"
+lift() {   # $1 = live value, $2 = what ACC applied -> 0 means "write 5000000"
   case "${1:-x}" in ''|*[!0-9]*) return 0;; esac
+  [ "$1" = "${2:-}" ] && return 0
   [ "$1" -le 100000 ]
 }
-lift 0        && ok "a zeroed input node IS lifted"            || no "a zeroed node is not lifted"
-lift 10000    && ok "a 10000 cap token IS lifted"              || no "a cap token is not lifted"
-lift 100000   && ok "exactly 100mA is lifted (boundary)"       || no "the 100mA boundary excludes itself"
-lift 1200000  && no "a live negotiated 1200000 was overwritten (the A3 AICL collapse)"               || ok "a live negotiated 1200000 is left alone"
-lift 2450000  && no "a live 2450000 was overwritten"           || ok "a live 2450000 is left alone"
-lift abc      && ok "an unreadable live value still lifts"     || no "an unreadable value blocked the lift"
+lift 0 v000        && ok "a zeroed input node IS lifted"      || no "a zeroed node is not lifted"
+lift 10000 v000    && ok "a 10000 cap token IS lifted"        || no "a cap token is not lifted"
+lift 100000 v000   && ok "exactly 100mA is lifted (boundary)" || no "the 100mA boundary excludes itself"
+lift abc v000      && ok "an unreadable live value still lifts" || no "an unreadable value blocked the lift"
+
+# The regression this rule exists for, measured on a Pixel 6a: ACC capped usb/current_max to
+# 1000000 on a 2200000 charger, and a clear left it there because 1000000 is above the near-zero
+# bound. "The cap will not clear" is a field report this whole path exists to prevent.
+lift 1000000 1000000 && ok "a node still holding ACC's own 1000000 cap IS released"                      || no "ACC's own cap is not released - the cap will not clear"
+lift 2200000 1000000 && no "a live 2200000 was overwritten while ACC had applied 1000000"                      || ok "a value the driver has since raised is left alone"
+lift 1200000 v000    && no "a live negotiated 1200000 was overwritten (the A3 AICL collapse)"                      || ok "a live negotiated 1200000 is left alone"
+lift 2450000 v000    && no "a live 2450000 was overwritten"   || ok "a live 2450000 is left alone"
 [ "$(inp /sys/class/power_supply/main/input_current_settled)" = 5000000 ]   && ok "input_current_settled restored high" || no "input_current_settled still gets the snapshot"
 [ "$(inp /sys/class/power_supply/pc_port/current_max)" = 5000000 ]   && ok "pc_port/current_max restored high" || no "pc_port/current_max still gets the snapshot"
 [ "$(inp /sys/class/power_supply/battery/constant_charge_current)" = snapshot ]   && ok "the battery-side charge current keeps the never-lower rule, not the high write"   || no "constant_charge_current was wrongly treated as an input node"
