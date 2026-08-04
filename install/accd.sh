@@ -69,6 +69,38 @@ if ! $_INIT; then
   }
 
 
+  _temp_hold() {
+    # rc22: true only when the pack is PROVABLY at or above max_temp, i.e. a thermal pause is in
+    # force and charging must NOT be turned back on.
+    #
+    # Three paths re-enable charging on a capacity test alone: the EXIT trap, the init release of a
+    # left-cut switch, and generic_rearm. Their shared reasoning -- "the level is below the pause
+    # level, so a release can never overcharge" -- is correct for a CAPACITY pause and blind to
+    # every other kind. With the pack over max_temp and the level anywhere under pause_capacity
+    # (the ordinary case), each of them turns charging back on while the thermal pause is still
+    # meant to be holding. Field report on a sweet: repeated re-enables at 40.4-41.4C against
+    # max_temp 40, one of them logged as `init release ... (left cut, level 64 < pause 75)` -- a
+    # decision made on capacity with no temperature term in it at all.
+    #
+    # Deliberately one-sided: any doubt returns FALSE (no hold). Blocking a release on a sensor we
+    # cannot read would resurrect the bug the init block at the bottom of this file exists to fix
+    # -- switch left cut, charger reading offline, phone discharging on a live cable across
+    # reboots. Refusing to release is the dangerous direction; only a positive over-temperature
+    # reading is allowed to block one. So this reads the node itself rather than going through
+    # temp_now(), whose 250 fallback would fabricate a hold out of a dead sensor.
+    #
+    # Safe at all three sites because a live main loop still owns the eventual release: it resumes
+    # as soon as the pack cools. The one case where no daemon remains -- `acc -D stop` while hot --
+    # already behaves this way for capacity (see the EXIT trap), where leaving the switch held and
+    # letting a replug clear it is the documented, safer trade-off.
+    local _th=
+    case ${temperature[1]-} in ''|*[!0-9]*) return 1;; esac
+    { read -r _th < "${temp:-/nonexistent}"; } 2>/dev/null || return 1
+    case ${_th:-x} in ''|*[!0-9-]*) return 1;; esac
+    [ "$_th" -ge $(( ${temperature[1]} * 10 )) ] 2>/dev/null
+  }
+
+
   _le_pause_cap() {
     case ${capacity[3]-} in ''|*[!0-9]*) return 1;; esac
     { [ ${capacity[3]} -le 100 ] || { [ ${capacity[3]} -gt 3000 ] && [ ${capacity[3]} -le 5000 ]; }; } || return 1
@@ -292,7 +324,10 @@ if ! $_INIT; then
     # seamless; below it we resume charging exactly as before. If the cap can't be determined we keep the
     # old behavior (enable). Trade-off: 'acc -D stop' AT the cap leaves the phone paused until replug --
     # the safe direction (never overshoot).
-    if _ge_pause_cap 2>/dev/null; then :; else enable_charging; fi
+    # rc22: ...and the same applies to a THERMAL pause. Resuming here because the level happens to
+    # sit below pause_capacity hands back an uncapped charge on a pack that is over max_temp, with
+    # no daemon left to pause it again. See _temp_hold.
+    if _ge_pause_cap 2>/dev/null || _temp_hold 2>/dev/null; then :; else enable_charging; fi
     if [[ "$exitCode" = @(1|2|7|127) ]]; then
       . $execDir/logf.sh
       logf --export
@@ -693,15 +728,29 @@ if ! $_INIT; then
           _nap ${loopDelay[1]:-9}
           continue
         fi
-        # Falling through is not enough on its own. The generic idle-avoidance is gated behind
-        # cap_idle_threshold, which wants pause > 60 AND level > pause+1 -- sensible where idling
-        # is an incidental side effect, but wrong here. The Pixel 3a sat at exactly pause+1 (81 vs
-        # 80) and the Pixel 4a at pause itself (40 vs 40), so both stayed inert even after the
-        # branch handed over. On a firmware-limit phone idling above the cap is what the hardware
-        # DOES, which is the very thing allow_idle_above_pcap=false forbids, so the threshold must
-        # not get a veto. This flag is set ONLY on this path (native limit + user chose false +
-        # at/above the limit), so the generic behaviour for everyone else is untouched.
-        _nativeIdleAvoid=true
+        # rc22: DO NOT hand a firmware-limit phone to the generic switch logic. Falling through
+        # sends it into cycle_switches, and every candidate that does not hold costs a full
+        # not_charging verification -- 35 one-second iterations each. The main loop is stopped for
+        # the whole sweep: no flight.log, no sync_native_limit, and the firmware levels frozen at
+        # whatever they held when it started.
+        #
+        # Device-proven on a Pixel 6a. Config said pause at 74% and the level was 42%, yet
+        # charge_stop_level sat at 41 and the phone would not charge. acc.lock pointed at a live
+        # pid in state S, so every health check said "daemon alive" while flight.log had not moved
+        # in 30s; the child subshell's log grew 644 -> 5440 lines over 90s working through the
+        # candidate list. `acc -D restart` recovered it instantly.
+        #
+        # And the sweep cannot succeed anyway: the generic toggle does not gate Tensor's charge
+        # path at all, which is the entire reason the native path exists. So this was an unbounded
+        # freeze in exchange for nothing. A frozen daemon enforces no limit, which is a worse
+        # outcome than one setting going unhonoured -- say so plainly and keep the firmware limit,
+        # which is still holding correctly throughout.
+        if ! ${_niaWarned:-false}; then
+          _niaWarned=true
+          warn_once_per nativenoidle 86400 "ACC: 'never sit above the limit' cannot be applied on this phone. Its charge limit is held by the firmware, and the only way to drain down to the resume level would be a charging switch this hardware does not honour. Your limit is still being held; the battery will rest at it instead of cycling down." || :
+        fi
+        _nap ${loopDelay[1]:-9}
+        continue
       fi
 
       leak_backstop && { _nap ${loopDelay[1]:-9}; continue; }
@@ -1268,13 +1317,36 @@ if ! $_INIT; then
     # The firmware charges to charge_stop_level, holds idle, and resumes at
     # charge_start_level. Temperature safety: at/above max_temp, force a pause by lowering
     # the stop level to the resume level; it self-restores once the battery cools.
-    local stop=${capacity[3]:-80} start=${capacity[2]:-75} t
+    local stop=${capacity[3]:-80} start=${capacity[2]:-75} t _tl=
     # the firmware nodes are a percentage: clamp to [0..100] so a bad/out-of-range config
     # value can never be written raw to charge_stop_level / charge_start_level.
     case $stop in ''|*[!0-9]*) stop=80;; esac; [ "$stop" -le 100 ] || stop=100
     case $start in ''|*[!0-9]*) start=75;; esac; [ "$start" -le 100 ] || start=100
     t=$(cat $temp 2>/dev/null || echo 0)
-    [ "$t" -ge $(( ${temperature[1]:-50} * 10 )) ] 2>/dev/null && stop=$start
+    if [ "$t" -ge $(( ${temperature[1]:-50} * 10 )) ] 2>/dev/null; then
+      # rc22: a thermal pause has to be BELOW the current level to be a pause at all. The firmware
+      # charges until level >= charge_stop_level, so clamping stop to start only holds when the pack
+      # already sits above start -- and below that it does nothing whatsoever. Measured on a Pixel 6a
+      # at 38C against a 37C limit: stop=82, start=70, level=63, still drawing 1.2A with the
+      # temperature limit supposedly in force. That is the whole limit silently absent for any
+      # battery below its resume level, which is most of a charge.
+      # Hold AT the present level instead, with start one point under it so the firmware does not
+      # immediately resume. This is recomputed every loop, so as the pack drains the hold follows it
+      # down, and it lifts on its own once the temperature drops back under max_temp.
+      _tl=$(batt_cap 2>/dev/null)
+      case "${_tl:-x}" in ''|*[!0-9]*) _tl=;; esac
+      if [ -n "$_tl" ] && [ "$_tl" -lt "$start" ] 2>/dev/null; then
+        stop=$_tl
+        start=$_tl
+        [ "$start" -le 0 ] 2>/dev/null || start=$(( start - 1 ))
+      else
+        # Already at or above start: clamping stop down to start does hold. Drop start a point too,
+        # or stop and start are equal and the firmware resumes the instant the pack loses 1% -- while
+        # it is still over max_temp.
+        stop=$start
+        [ "$start" -le 0 ] 2>/dev/null || start=$(( start - 1 ))
+      fi
+    fi
     # 6.5.1-rc14 DEEP FIX (Pixel/Tensor fast-charge + wireless): IDEMPOTENT native sync. Only
     # chmod+write a level node that is NOT already at target. Re-writing charge_start_level /
     # charge_stop_level (and the chmod) on EVERY loop re-triggers the google_charger MSC state
@@ -1486,6 +1558,21 @@ if ! $_INIT; then
     # an attempted fix along those lines was reverted rather than shipped unverified. A physical
     # unplug/replug does clear it, which is why the freshPlug path works. The actual trigger is
     # still unidentified; charging_status=31 and the bd_* Battery Defender block are unexplored.
+    # rc22: never pulse while a thermal pause is in force. The pulse below sets charge_stop_level
+    # to 100 -- no limit at all -- and then SLEEPS a full loopDelay before sync_native_limit pulls
+    # it back. On a pack over max_temp that is a ~10s window of unrestricted charging, and
+    # _le_resume_cap is true on every loop while the level sits below resume, so it repeats
+    # indefinitely. Measured on a Pixel 6a at 38C against a 37C limit: charge_stop_level read 100
+    # and the pack took 913mA for a whole 20s window with the temperature limit supposedly active.
+    #
+    # An earlier attempt at this guard was reverted on 2026-08-04 after an A/B appeared to show it
+    # latching charge_stop_level at its old value. That A/B was confounded: the daemon was frozen in
+    # the generic switch prober at the time (see the allow_idle_above_pcap fall-through), so nothing
+    # was updating the node in either build -- the "unguarded" comparison only looked healthy
+    # because it ran on a freshly restarted daemon. With the freeze fixed the guard cannot starve a
+    # raised limit: sync_native_limit runs unconditionally on the line BEFORE native_unlatch every
+    # loop, so a config change is already applied by the time this is reached.
+    ! _temp_hold || return 0
     if { $freshPlug && _lt_pause_cap; } || _le_resume_cap; then
       [ "$(read_status)" = Charging ] && return 0 || :
       # rc(6.4-rc2): stop=100 ALONE re-arms the Tensor FET only SLOWLY (1-3 min via the
@@ -1518,6 +1605,10 @@ if ! $_INIT; then
     $freshPlug || return 0
     [ ! -f $TMPDIR/.minCapMax ] || return 0
     _lt_pause_cap || return 0
+    # rc22: a fresh plug below the capacity limit is not a reason to charge a pack that is over
+    # max_temp. Without this, re-plugging a hot phone re-arms the switch and the thermal pause has
+    # to fight it back off on the next loop. See _temp_hold.
+    ! _temp_hold || return 0
     online || return 0
     enable_charging
   }
@@ -1997,6 +2088,33 @@ if ! $_INIT; then
       case "${_ccn:-x}" in ''|*[!0-9]*) continue;; esac
       # only lift a node that is BELOW its recorded default; never lower one
       [ "$_ccn" -lt "$_ccd" ] 2>/dev/null || continue
+      # ...and only one ACC could plausibly have ZEROED itself. "Below the recorded default" is
+      # not the same as "a leftover ACC cap": during an HVDCP/QC ramp the charger driver holds
+      # these nodes at real intermediate values on the way up, and they are legitimately below a
+      # default captured in some earlier session. Lifting those fights the negotiation and it
+      # collapses to the 5V DCP fallback -- field report on a curtana (Redmi Note 9S), where this
+      # block overwrote usb/current_max 2450000->2600000, main/current_max 1600000->3000000,
+      # main/input_current_settled 1850000->2600000 and pc_port/current_max 2150000->2600000 in
+      # one pass, and the phone charged at 1.5A/5V afterwards with no fast charge. Upstream ACC
+      # has no such restore, which is why it was unaffected.
+      #
+      # A cap ACC wrote for a cut reads 0, or a token value like 10000 on a current-cap switch.
+      # Anything at or under 100mA is that; anything above is the driver mid-negotiation and is
+      # none of our business. This keeps the bug the block exists for (ACC left a node at 0) and
+      # drops the case where it was overwriting live values.
+      [ "$_ccn" -le 100000 ] 2>/dev/null || continue
+      # rc22: lift it HIGH, not back to the captured number. That number is only whatever the node
+      # read when ACC first identified it, and if that happened on a weak source it is 500000 --
+      # so "restoring" it caps the phone at 500mA on a 2A charger, over and over, every time the
+      # driver zeroes the node. Device-proven on a Mi A3 on a HVDCP-3 charger: this block wrote
+      # 500000 to input_current_settled, pc_port/current_max and usb/current_max within one second,
+      # with the ledger reason "no current limit configured", and the phone sat at 5V/500mA.
+      # The driver clamps a too-high value to what the charger can actually deliver, which is the
+      # correct answer and the one the uninstaller already writes for these same nodes. Only INPUT
+      # nodes get this; a battery-side charge current keeps its recorded default.
+      case "$_ccf" in
+        */current_max|*/input_current|*/input_current_limit|*/input_current_settled) _ccd=5000000;;
+      esac
       echo "$_ccd" > "$_ccf" 2>/dev/null || :
       command -v _wlog >/dev/null 2>&1 \
         && _wlog "init restore $_ccf <- $_ccd (was $_ccn; no current limit configured)" || :
@@ -2026,8 +2144,14 @@ if ! $_INIT; then
   _icp=${capacity[3]-}
   case "${_icl:-x}" in ''|*[!0-9]*) _icl=;; esac
   case "${_icp:-x}" in ''|*[!0-9]*) _icp=;; esac
+  # rc22: ...and only when no THERMAL pause is in force. "Level below the pause level" says nothing
+  # about temperature, so on a hot pack this swept every cut node permissive and undid a max_temp
+  # pause the main loop then had to re-apply -- the field report's repeated re-enables above
+  # max_temp, logged here as `init release ... (left cut, level N < pause M)`. See _temp_hold: it
+  # blocks only on a positive over-temperature reading, so an unreadable sensor still releases and
+  # the stranded-cut recovery this block exists for is preserved.
   if [ -n "$_icl" ] && [ -n "$_icp" ] && [ "$_icp" -le 100 ] 2>/dev/null \
-     && [ "$_icl" -lt "$_icp" ] 2>/dev/null; then
+     && [ "$_icl" -lt "$_icp" ] 2>/dev/null && ! _temp_hold; then
     ( cd /sys/class/power_supply 2>/dev/null || exit 0
       for _idi in */input_suspend */charge_disable */batt_slate_mode */op_disable_charge */disable_charging; do
         [ -w "$_idi" ] || continue

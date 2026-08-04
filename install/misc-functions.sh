@@ -39,7 +39,7 @@ apply_on_plug() {
   local value=
   local default=
   local arg=${1:-value}
-  local _rk= _rv= _rc=
+  local _rk= _rv= _rc= _lv=
 
   for entry in ${applyOnPlug[@]-} ${maxChargingVoltage[@]-} \
     ${maxChargingCurrent[@]:-$([ .$arg != .default ] || cat $TMPDIR/ch-curr-ctrl-files 2>/dev/null || :)}
@@ -69,6 +69,54 @@ apply_on_plug() {
       read -r _rv _rc < "$_rk" 2>/dev/null || { _rv=; _rc=0; }
       case ${_rc:-0} in ''|*[!0-9]*) _rc=0;; esac
       [ "$_rv" = "$value" ] && [ $_rc -ge 5 ] && [ $((_rc % 8)) -ne 0 ] && continue
+    fi
+
+    # rc22: on a RESTORE, never LOWER a live value. The "default" is a snapshot taken whenever the
+    # control files were first identified. Taken on a computer's USB port that snapshot is 500000,
+    # and writing it back later on a wall charger holds the phone at 500mA for the rest of the
+    # session -- the same mistake as the curtana init restore, which accd already bounds for exactly
+    # this reason. The back-off guard above cannot catch it: it is deliberately APPLY-only, so
+    # nothing bounded a restore at all.
+    # An unreadable or non-numeric live value still writes, and so does a non-numeric default:
+    # leaving a node capped is the failure this path exists to prevent, so it fails toward writing.
+    if [ "$arg" = default ]; then
+      case "$file" in
+        */current_max|*/input_current|*/input_current_limit|*/input_current_settled)
+          # rc22: these are INPUT nodes, owned by charger negotiation. Two rules, both measured.
+          #
+          # 1. Only touch one ACC could plausibly have capped. Anything above ~100mA is the driver
+          #    mid-negotiation and is none of our business: writing it re-triggers AICL and the
+          #    negotiation settles LOWER. Measured on a Mi A3 -- a restore wrote over a healthy live
+          #    1200000 and the driver came back at 200000. Same rule the init restore already uses.
+          # 2. When it IS ours to lift, lift it HIGH rather than to the recorded default. That
+          #    default is only whatever the node read when ACC first identified it; captured on a
+          #    weak source it is 500000, so "restoring" it caps the phone at 500mA on a 2A charger,
+          #    again every time the driver zeroes the node. Measured on the same A3: five input
+          #    nodes written to 500000, phone left at 4836mV/500mA. Writing high lets the driver
+          #    clamp to what the charger can really deliver -- 0 -> 1.9A on that phone, device-proven
+          #    -- and it is what the uninstaller already writes for these same nodes.
+          _lv=; { read -r _lv < "$file"; } 2>/dev/null || _lv=
+          case "${_lv:-x}" in
+            ''|*[!0-9]*) : ;;
+            *) [ "$_lv" -le 100000 ] 2>/dev/null || continue;;
+          esac
+          default=5000000
+          ;;
+        *)
+          # Everything else: never LOWER a live value on a restore. The recorded default is still a
+          # snapshot, and the back-off guard above is deliberately APPLY-only, so nothing bounded a
+          # restore at all. An unreadable live value or a non-numeric default still writes -- leaving
+          # a node capped is the failure this path exists to prevent, so it fails toward writing.
+          _lv=; { read -r _lv < "$file"; } 2>/dev/null || _lv=
+          case "${_lv:-x}" in
+            ''|*[!0-9]*) : ;;
+            *) case "${default:-x}" in
+                 ''|*[!0-9]*) : ;;
+                 *) [ "$_lv" -lt "$default" ] 2>/dev/null || continue;;
+               esac;;
+          esac
+          ;;
+      esac
     fi
 
     set +e
@@ -535,6 +583,34 @@ _rekick_due() {
 }
 
 
+rekick_usb() {
+  # rc22: the ONE place a USB re-kick happens. apsd_rerun/rerun_aicl make the charger re-run input
+  # detection. That is what recovers a stalled charger, and also what renegotiates a live QC/PD
+  # contract down to 5V -- and a PD contract does not come back on its own, only a physical replug
+  # restores it, which is why the field workaround was always "unplug and plug it back in".
+  #
+  # set_ch_curr's clear path fired it raw, from two places. Neither honoured `acc -sk off` -- the
+  # switch whose own help text says "turn it off if it disturbs fast charging on your phone" -- and
+  # neither wrote a ledger line, so a re-kick left no trace in any diagnostic bundle. In the curtana
+  # bundle the clear's own current writes are recorded at 13:26:38 with no re-kick beside them.
+  local _reason=${1:-unspecified} _rn=
+  if [ -f "${dataDir:-/data/adb/vr25/acc-data}/.rekick-off" ]; then
+    command -v _wlog >/dev/null 2>&1 && _wlog "rekick skipped ($_reason): acc -sk off" || :
+    return 1
+  fi
+  if ! _rekick_due; then
+    command -v _wlog >/dev/null 2>&1 && _wlog "rekick skipped ($_reason): too soon" || :
+    return 1
+  fi
+  for _rn in */apsd_rerun */rerun_aicl; do
+    [ -w "$_rn" ] || continue
+    command -v _wlog >/dev/null 2>&1 && _wlog "rekick $_rn <- 1 ($_reason)" || :
+    echo 1 > "$_rn" 2>/dev/null || :
+  done
+  return 0
+}
+
+
 enable_charging() {
 
     # Same unplug-blip guard as below: restore the saved switch config, but only
@@ -833,8 +909,34 @@ resetbs() {
 
 
 sdp() {
+  # rc22: count a polarity CHANGE here, not only where the coulomb counter proves one.
+  # .dpol_unstable is what stops accd's re-latch loop on mode-dependent-sign hardware, but the only
+  # thing that used to set it was the arbitration in idle_discharging, which needs a fresh window
+  # AND a >=150 uAh move. A pack holding at taper moves less than that, and taper is exactly when
+  # the current sign oscillates around zero and the re-latch fires hardest. So the guard could
+  # never arm in the case it exists for. Measured on a Mi A3 holding at 74%: charge_counter flat
+  # over 31s, current swinging +34mA to -13mA, 15 latches recorded and 0 flips counted.
+  if [ -n "${_DPOL-}" ] && [ "${_DPOL}" != "$1" ]; then
+    _dfl=$(cat $TMPDIR/.dpol_flips 2>/dev/null || echo 0)
+    case "$_dfl" in ''|*[!0-9]*) _dfl=0;; esac
+    _dfl=$((_dfl + 1))
+    echo $_dfl > $TMPDIR/.dpol_flips 2>/dev/null || :
+    [ $_dfl -lt 2 ] || touch $TMPDIR/.dpol_unstable 2>/dev/null || :
+  fi
   _DPOL=$1
-  echo _DPOL=$1 >> $TMPDIR/.batt-interface.sh
+  # rc22: REPLACE the cached polarity instead of appending one more line. Appending left the file
+  # holding every latch this boot -- the A3 above had 15 _DPOL= lines, two of them contradicting the
+  # rest -- and since the daemon SOURCES this file, whichever line happened to be written last
+  # silently won. Written to a temp and moved into place: the file must never be observed
+  # half-written by a daemon sourcing it, which is why the original appended rather than truncating.
+  _dpt=$TMPDIR/.batt-interface.sh.$$
+  if { grep -v '^_DPOL=' $TMPDIR/.batt-interface.sh 2>/dev/null; echo "_DPOL=$1"; } > $_dpt 2>/dev/null \
+     && [ -s $_dpt ]; then
+    mv -f $_dpt $TMPDIR/.batt-interface.sh 2>/dev/null || rm -f $_dpt 2>/dev/null
+  else
+    rm -f $_dpt 2>/dev/null
+    echo _DPOL=$1 >> $TMPDIR/.batt-interface.sh   # last resort: the old behaviour beats no record
+  fi
 }
 
 

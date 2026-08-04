@@ -22,14 +22,24 @@ idle_discharging() {
   # arbitrates; a flat counter (idle hold, or too slow to tell) leaves the sign verdict alone,
   # so bypass/idle behavior is unchanged. When the counter contradicts the sign twice, the
   # polarity is provably mode-dependent -> drop a marker so set_dp stops re-latch churn.
-  local _cc=$(cc_now) _ccp= _ccts= _ccnow=$(date +%s 2>/dev/null) _ccd= _sv=$_status
+  local _cc=$(cc_now) _ccp= _ccts= _ccnow=$(date +%s 2>/dev/null) _ccd= _ccraw= _sv=$_status
   if [ "${_cc:-0}" -gt 0 ] 2>/dev/null && [ -n "$_ccnow" ]; then
     [ ! -f $TMPDIR/.cc_then ] || read -r _ccp _ccts < $TMPDIR/.cc_then 2>/dev/null || :
     if [ "${_ccp:-0}" -gt 0 ] 2>/dev/null && [ $(( _ccnow - ${_ccts:-0} )) -ge 3 ] 2>/dev/null \
       && [ $(( _ccnow - ${_ccts:-0} )) -le 90 ] 2>/dev/null; then
-      _ccd=$(( _cc - _ccp ))
-      if [ $_ccd -ge 150 ]; then _status=Charging
-      elif [ $_ccd -le -150 ]; then _status=Discharging; fi
+      # rc22: _ccd is set ONLY when the counter actually ruled. It used to be assigned the raw
+      # delta unconditionally, including 0, and the kernel tie-break below stands down whenever
+      # _ccd is non-empty -- it reads "the counter already decided this". A flat counter set
+      # _ccd=0, which is not a verdict, and that silently disabled the tie-break.
+      # On a gauge too coarse to move in the sample window the delta is ALWAYS 0, so both
+      # arbitrators stood down together and an unchallenged (possibly wrong) current sign decided
+      # everything. Device-proven on a Mi A3: charge_counter flat across 120s, _DPOL latched to the
+      # wrong sign, `acc -i` reporting Discharging with the kernel saying Charging, and therefore
+      # is_charging false and EVERY limit skipped -- pack at 32C against max_temp 30 and charging
+      # not cut. Same signature as the sweet field report at 41C against max_temp 40.
+      _ccraw=$(( _cc - _ccp ))
+      if [ $_ccraw -ge 150 ]; then _status=Charging; _ccd=$_ccraw
+      elif [ $_ccraw -le -150 ]; then _status=Discharging; _ccd=$_ccraw; fi
       [ "$_sv" = "$_status" ] || {
         local _fl=$(cat $TMPDIR/.dpol_flips 2>/dev/null || echo 0)
         case "$_fl" in ''|*[!0-9]*) _fl=0;; esac
@@ -38,6 +48,47 @@ idle_discharging() {
       }
     fi
     echo "$_cc $_ccnow" > $TMPDIR/.cc_then 2>/dev/null || :
+  fi
+
+  # rc21 SIGN-VS-KERNEL TIE-BREAK. The coulomb block above is the good arbiter, but it only
+  # rules when it has a fresh 3-90s window AND a >=150uAh delta. Outside that -- first loop
+  # after a start, a window stretched past 90s by deep sleep, a slow charge -- whatever the
+  # sign said stands unchallenged. On a phone whose current reads NEGATIVE while charging that
+  # verdict is "Discharging" with the cable in, and every charging limit then goes blind:
+  # max_temp and pause_capacity are only evaluated while ACC believes it is charging. Field
+  # report on a sweet (Redmi Note 10 Pro): battery/status=Charging, charge_type=Fast,
+  # USB_HVDCP_3 online, current_now=-2410000, and `acc -i` said Discharging at 41C with
+  # max_temp=40 -- charging never paused.
+  #
+  # So when the counter could not rule, fall back to the node the kernel itself publishes.
+  # Deliberately ONE-WAY: only Discharging -> Charging. Believing "discharging" while the pack
+  # fills is the dangerous error (limits blind, overcharge); believing "charging" while it
+  # drains is harmless (ACC pauses something that is not happening). battStatusWorkaround
+  # exists because some kernels lie about status, so this never overrides toward Discharging
+  # and never touches an Idle verdict -- it only refuses to ignore a kernel that is actively
+  # claiming Charging while we guessed the opposite.
+  if [ "$_status" = Discharging ] && [ "${_kstatus-}" = Charging ] && [ -z "${_ccd-}" ]; then
+    _status=Charging
+  fi
+
+  # rc22 PHYSICAL GATE, and it is last on purpose: nothing above may leave "Charging" standing on a
+  # phone with no cable attached. Every arbiter above is an inference -- a current sign read through
+  # a cached polarity, a coulomb window that needs the pack to move, a status node that some kernels
+  # lie about. This one is a fact, and it needs none of them.
+  #
+  # Measured on BOTH test phones, unplugged, with OPPOSITE current signs and OPPOSITE cached
+  # polarities, and both said Charging: a Mi A3 draining 400-980mA reading POSITIVE with _DPOL=-,
+  # and a Pixel 6a draining 450mA reading NEGATIVE with _DPOL=+. The Pixel got it right on exactly
+  # the samples where charge_counter moved enough to rule and wrong on the rest; the A3's counter
+  # never moved at all, so it was wrong every time. The tie-break above cannot help here -- it is
+  # deliberately one-way, Discharging to Charging, so a wrong "Charging" has nothing to correct it.
+  #
+  # present() is the right primitive rather than online(): an input-cut switch (input_suspend,
+  # current_max 0) drives */online to 0 while the cable is still attached, and gating on online
+  # would then declare a paused-but-plugged phone unplugged. present stays 1 there, so ACC's own
+  # pause is untouched and only a genuinely detached cable trips this.
+  if [ "$_status" = Charging ] && ! present 2>/dev/null; then
+    _status=Discharging
   fi
 }
 
@@ -206,6 +257,10 @@ status() {
   case ${curNow#-} in ''|*[!0-9]*) curNow=0;; esac
 
   _status=$(read_status)
+  # Keep the kernel's own verdict. idle_discharging() below replaces _status with a verdict
+  # derived from the CURRENT SIGN, and when that sign is misread there is nothing left to
+  # compare against. Stashing it costs one variable and gives the arbitration a third opinion.
+  _kstatus=$_status
 
   if [ -n "${battStatusOverride-}" ]; then
     [[ .${chargingSwitch[2]-} != */* ]] || csw2="$(cat ${chargingSwitch[2]})"
