@@ -74,7 +74,23 @@ looping(){
   done
   return 1
 }
-restart(){ acc -D restart >/dev/null 2>&1 & sleep 38; }
+restart(){
+  # Wait for the daemon to actually be back, do not sleep a guess at how long that takes. A fixed 38s
+  # was enough on the Pixel and not on the A3, so the cache-heal check passed on one phone and failed
+  # on the other for a reason that had nothing to do with ACC -- and it read as a product bug twice.
+  # Ready means the lock names a live process AND the cache it publishes at init is back.
+  acc -D restart >/dev/null 2>&1 &
+  _w=0
+  while [ $_w -lt 150 ]; do
+    sleep 4; _w=$((_w + 4))
+    _q=$(rd $TD/acc.lock)
+    if [ -n "$_q" ] && [ -d "/proc/$_q" ] && [ -s $IF ]; then
+      sleep 2
+      return 0
+    fi
+  done
+  return 1
+}
 setdpol(){ { grep -v '^_DPOL=' $IF 2>/dev/null; echo "_DPOL=$1"; } > $IF.t && mv -f $IF.t $IF; }
 want(){ [ "$WANT" = all ] || [ "$WANT" = "$1" ]; }
 
