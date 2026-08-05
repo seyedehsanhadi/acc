@@ -91,7 +91,20 @@ apply_on_plug() {
     # leaving a node capped is the failure this path exists to prevent, so it fails toward writing.
     if [ "$arg" = default ]; then
       case "$file" in
-        */current_max|*/input_current|*/input_current_limit|*/input_current_settled)
+        */current_max|*/input_current|*/input_current_limit|*/input_current_settled|*/restrict_cur)
+          # restrict_cur belongs here too, and it was missed because the pattern above is written
+          # around node NAMES under power_supply and this one lives in /sys/class/qcom-battery.
+          #
+          # Measured on a Mi A3 on a QC3 charger: ACC's recorded default for it was 1000000, because
+          # that is simply what the node read when ACC first identified it - with the vendor's
+          # restricted-charging mode already engaged. Restoring that "default" holds the phone at 1 A.
+          # Lifting it (restrict_chg 0, restrict_cur 5000000, the values ACC's OWN uninstaller writes)
+          # took the same phone from 4.64 V / 1.51 A to 5.97 V / 3.03 A, and the level climbed 63% to
+          # 70% in three minutes. It had been charging at half speed.
+          #
+          # That is the curtana complaint on Qualcomm hardware: "fast charge is gone". The node is an
+          # input-current ceiling like the others, so it gets the same rule - release high and let the
+          # driver clamp to what the charger can really deliver.
           # rc22: these are INPUT nodes, owned by charger negotiation. Two rules, both measured.
           #
           # 1. Only touch one ACC could plausibly have capped. Anything above ~100mA is the driver
