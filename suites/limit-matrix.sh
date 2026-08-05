@@ -405,17 +405,24 @@ run_case(){   # $1 = flags  $2 = human label
   # Level goes in every row. It moves during a run, it is what the capacity margins are sized
   # against, and near taper the free rate falls on its own - so a reader can tell a real throttle
   # from a full battery without having to trust that nothing drifted.
-  log "      switch=$(rd "$SWN") kernel=$(kst) acc=$_as  |I|=$(mAmag)mA  ${_t}C  level=$(lvl)%  charge=${_d}mA/${WIN}s"
+  _win=$WIN; $USE_CC && _win=$CCWIN
+  log "      switch=$(rd "$SWN") kernel=$(kst) acc=$_as  |I|=$(mAmag)mA  ${_t}C  level=$(lvl)%  charge=${_d}mA/${_win}s"
 
   case "$_f" in
     *C*|*T*)
       # A binary limit must dominate every throttle. This is the precedence claim.
       if [ "$_st" = PAUSED ]; then
         ok "$_lbl -> PAUSED, as a capacity/temperature limit must (${_d} mA)"
-      elif [ "$_st" = BLOCKED ]; then
-        no "$_lbl -> not filling, but the switch is still ON: the pause was not applied, a throttle just happens to be stopping it"
+      elif [ "$_st" = BLOCKED ] || [ "$_st" = DRAINING ]; then
+        # Not filling, and the switch was never cut. The binary limit did not act; a throttle is
+        # holding the charge down instead. DRAINING is the same finding as BLOCKED, just further
+        # along: the cap held input below what the phone consumes, so the pack went net negative,
+        # ACC concluded it is not charging, and the whole `if is_charging` block - which is where
+        # both pauses live - was skipped. Reporting that as "still charging" was simply wrong; the
+        # pack is going backwards.
+        no "$_lbl -> the pause was NOT applied (switch still ON), a throttle is stopping the charge instead: ${_d}mA"
       else
-        no "$_lbl -> still charging at ${_d}mA/${WIN}s (free ${FREE}) with a binary limit active"
+        no "$_lbl -> still charging at ${_d}mA (free ${FREE}) with a binary limit active"
       fi
       ;;
     *V*|*A*)

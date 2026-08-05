@@ -598,7 +598,13 @@ _rekick_due() {
   # single functions from this file) would get an empty interval, the arithmetic test would
   # error, and the gate would answer "not due" forever -- silently disabling the recovery
   # re-kick rather than rate limiting it. Self-contained means it cannot fail that way.
-  local _now= _then= _min=${_rekickMinInterval:-30}
+  # 300s, not 30s. This is now the ONLY re-kick interval: accd's stall path used to keep a second
+  # 300s counter in a different file, so the two could not see each other and the effective gap
+  # collapsed to whichever fired last. The protective value wins because it is the one with a
+  # hardware reason behind it - repeated input re-detection drops a QC/HVDCP contract to 5V. A
+  # genuine stall still recovers on the FIRST kick with no delay; only repeats inside the window
+  # are dropped.
+  local _now= _then= _min=${_rekickMinInterval:-300}
   _now=$(date +%s 2>/dev/null) || return 0
   case ${_now:-x} in ''|*[!0-9]*) return 0;; esac
   _then=$(cat "$TMPDIR/.rekick" 2>/dev/null || echo 0)

@@ -1233,7 +1233,7 @@ if ! $_INIT; then
           else
             # charging is healthy again -> drop the re-kick stamp too, so the NEXT genuine stall
             # gets its first kick immediately instead of waiting out a stale window.
-            rm $TMPDIR/.resumefail $TMPDIR/.resumewarned $TMPDIR/.rekick-at 2>/dev/null || :
+            rm $TMPDIR/.resumefail $TMPDIR/.resumewarned $TMPDIR/.rekick 2>/dev/null || :
           fi
         fi
 
@@ -1518,30 +1518,21 @@ if ! $_INIT; then
 
 
   rekick_charger() {
-    # rc21: RATE-LIMIT the stall re-kick. apsd_rerun/rerun_aicl force the charger to re-run input
-    # detection. Firing it on every pass (measured 10x in 10 minutes on an oplus curtana) can
-    # collapse a QC/HVDCP handshake back to 5V and leave the input settled around 1.8A, which the
-    # owner sees as "my 9V charger only does 5V/2A". The FIRST kick still fires with no delay, so a
-    # genuine stall recovers exactly as fast as before; only the repeats inside the window are
-    # dropped. The .resumefail escalation counter is deliberately NOT touched, so the
-    # warn/blacklist/reselect timing is unchanged. Stamp lives in tmpfs -> clears every boot.
-    # Off switch, persistent (dataDir, not tmpfs) so it survives a reboot. The re-kick is what
-    # recovers a stalled charger, but on a phone whose stall check misfires it is also what
-    # collapses a fast-charge handshake, and the owner needs to be able to stop it without
-    # editing scripts. `acc -sk off` writes this; `acc -sk on` removes it.
-    [ ! -f $dataDir/.rekick-off ] || return 1
-    local _now= _last= _gap=${REKICK_MIN_GAP:-300} _rn=
-    _now=$(date +%s 2>/dev/null); case "${_now:-}" in ''|*[!0-9]*) _now=0;; esac
-    _last=$(cat $TMPDIR/.rekick-at 2>/dev/null); case "${_last:-}" in ''|*[!0-9]*) _last=0;; esac
-    if [ "$_now" -ne 0 ] && [ "$_last" -ne 0 ] && [ $(( _now - _last )) -lt "$_gap" ]; then
-      _wlog "rekick suppressed ($(( _now - _last ))s since last, min ${_gap}s)"
-      return 1
-    fi
-    for _rn in */apsd_rerun */rerun_aicl; do
-      [ -w "$_rn" ] && { _wlog "rekick $_rn <- 1"; echo 1 > "$_rn" 2>/dev/null; } || :
-    done
-    [ "$_now" = 0 ] || echo "$_now" > $TMPDIR/.rekick-at 2>/dev/null || :
-    return 0
+    # The stall re-kick. This used to be a SECOND implementation of the gate in misc-functions.sh,
+    # keeping its own timestamp file and its own interval (300s, against that one's 30s). Neither
+    # updated the other's file, so neither could see the other's firings: one path logged
+    # "rekick suppressed (181s since last, min 300s)" while the other fired 15 seconds later.
+    # Measured on a Mi A3 with no limit configured at all - apsd_rerun going off every 15 to 62
+    # seconds, the charger renegotiating each time, and the charge never establishing.
+    #
+    # That is exactly the failure the 300s gap exists to prevent, described in the comment this
+    # replaces: repeated input re-detection collapses a QC/HVDCP handshake back to 5V and the owner
+    # sees "my 9V charger only does 5V/2A". The curtana report.
+    #
+    # So there is one gate now. rekick_usb() owns `acc -sk off`, the interval, the timestamp and the
+    # ledger line; this is the stall caller of it. A rate limit split across two counters that
+    # cannot see each other is not a rate limit.
+    rekick_usb stall
   }
 
 

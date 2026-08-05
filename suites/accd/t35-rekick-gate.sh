@@ -11,8 +11,19 @@
 # at 13:26:38 with no re-kick recorded beside them, then 4.83V/5.84W until a replug restored
 # 8.66V/15.3W.
 #
-# The requirement is that every site is GATED, not that every site calls the same function. The
-# daemon's stall path (rekick_charger) already carries its own off switch, a 300s window and its own
+# rc22 UPDATE: "every site is GATED, not necessarily through the same function" turned out to be
+# wrong, and this test enforced the wrong thing. The stall path did carry its own off switch, its own
+# 300s window and its own ledger line - but in a SEPARATE timestamp file from the other gate. Neither
+# could see the other's firings, so one logged "rekick suppressed (181s since last, min 300s)" while
+# the other fired 15 seconds later. Measured on a Mi A3 with no limit configured: apsd_rerun every
+# 15 to 62 seconds, the charger renegotiating each time, the charge never establishing - which is
+# the very collapse the 300s window exists to prevent.
+#
+# A rate limit split across two counters that cannot see each other is not a rate limit. So the
+# requirement is now stronger: every site goes through ONE gate. These checks follow the structure
+# rather than asserting the old one.
+#
+# The historical note below describes what the stall path used to carry on its own.
 # stamp; folding it into the shared 30s helper would change a working path's behaviour for nothing.
 
 ID=t35
@@ -63,14 +74,27 @@ else
   no "could not locate the definition or the source line"
 fi
 
-# ---- the daemon's stall path keeps its own gate ----------------------------------------------------
+# ---- the daemon's stall path goes through the SAME gate --------------------------------------------
 _r=$(sed -n '/rekick_charger() {/,/^  }/p' "$AD")
-printf '%s' "$_r" | grep -q 'rekick-off' \
-  && ok "the stall path honours acc -sk off" || no "the stall path ignores the off switch"
-printf '%s' "$_r" | grep -q 'REKICK_MIN_GAP' \
-  && ok "the stall path keeps its own 300s window" || no "the stall path lost its rate limit"
-printf '%s' "$_r" | grep -q '_wlog' \
-  && ok "the stall path logs" || no "the stall path is silent"
+printf '%s' "$_r" | grep -q 'rekick_usb' \
+  && ok "the stall path routes through rekick_usb, the single gate" \
+  || no "the stall path does not call rekick_usb - it is a second implementation again"
+
+# Comments in that function NAME the nodes while explaining the bug, so match code only. A grep that
+# cannot tell a comment from a statement will fail on its own documentation - which this one did.
+printf '%s' "$_r" | grep -v '^[[:space:]]*#' | grep -qE 'apsd_rerun|rerun_aicl' \
+  && no "the stall path still writes the re-kick nodes itself, bypassing the gate" \
+  || ok "the stall path writes no re-kick node directly"
+
+printf '%s' "$_r" | grep -q 'rekick-at' \
+  && no "a second timestamp file is back - two counters cannot rate limit each other" \
+  || ok "the stall path keeps no timestamp of its own"
+
+# ---- the shared interval is the protective one ------------------------------------------------------
+_d=$(sed -n '/^_rekick_due() {/,/^}/p' "$MF")
+printf '%s' "$_d" | grep -q '_rekickMinInterval:-300' \
+  && ok "the shared interval is the protective 300s, not the old 30s" \
+  || no "the shared interval is not 300s - repeats can collapse a QC handshake"
 
 # ---- behavioural: reproduce the gate's decision -----------------------------------------------------
 _min=30
