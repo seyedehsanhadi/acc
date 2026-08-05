@@ -66,6 +66,8 @@ IFACE=$TD/.batt-interface.sh
 P=0; F=0; SKIP=0
 SETTLE=40
 WIN=20
+CCWIN=180        # counter window, used only when the current sign cannot be trusted
+USE_CC=false
 
 log(){ echo "$*" >> "$OUT"; }
 say(){ echo "$*"; log "$*"; }
@@ -218,8 +220,28 @@ rate(){
   esac
   [ "$AMPF" = 1000 ] && echo "$_s" || echo $(( _s / 1000 ))
 }
+# Counter-based rate. The charge counter has no sign convention to get wrong, so this is the only
+# honest instrument on a phone whose current sign moves. It needs a long window: the counter is
+# quantised (a Mi A3 steps 28600 uAh at a time, roughly once a minute), so a short window reads
+# either zero or one whole quantum and nothing in between.
+measure_cc(){
+  _ca=$(cc); _ta=$(date +%s)
+  _i=0
+  while [ $_i -lt $CCWIN ]; do _i=$((_i + 10)); sleep 10; done
+  _cb=$(cc); _tb=$(date +%s)
+  _dt=$(( _tb - _ta )); [ "$_dt" -gt 0 ] 2>/dev/null || _dt=$CCWIN
+  case "${_ca:-x}${_cb:-x}" in *x*) echo ""; return;; esac
+  echo $(( (_cb - _ca) * 3600 / _dt / 1000 ))
+}
+
 # median-ish of several samples, so one blip cannot decide a case
 measure(){
+  # On a phone where the current sign is not stable, the signed-current path below is measuring a
+  # convention that changed underneath it. POL is calibrated ONCE at baseline, so a flip mid-run
+  # inverts every case after it -- which is how a phone charging at full rate reported PAUSED, and
+  # an unlimited control case reported THROTTLED. ACC arms .dpol_unstable when it sees the sign
+  # flip, so that marker is the signal to switch instruments rather than a guess of our own.
+  $USE_CC && { measure_cc; return; }
   _lo=; _hi=; _tot=0; _cnt=0; _i=0
   while [ $_i -lt $WIN ]; do
     _r=$(rate)
@@ -285,6 +307,14 @@ if ! calibrate; then
   exit 0
 fi
 ok "baseline: charge direction established (charging reads '${POL}')"
+# Pick the instrument before the baseline rate is taken. ACC arms .dpol_unstable after it has seen
+# the current sign flip more than once; on such a phone every signed-current reading here is suspect,
+# so switch to the counter, which has no sign convention. It costs a much longer window per case.
+if [ -e /dev/.vr25/acc/.dpol_unstable ]; then
+  USE_CC=true
+  say "  this phone's current sign is not stable (ACC has flagged it), so every rate below is"
+  say "  measured from the charge counter instead, over ${CCWIN}s per case. The run takes longer."
+fi
 FREE=$(measure)
 if [ -z "$FREE" ] || [ "$FREE" -lt 150 ]; then
   no "baseline: only ${FREE}mA flowing with every limit lifted"
