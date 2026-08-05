@@ -245,9 +245,18 @@ elif [ "$_pol0" = "$_pol1" ]; then
 else
   no "polarity changed across the rebuild: '$_pol0' -> '$_pol1'"
 fi
-[ "$(accst)" = Charging ] \
-  && ok "still reports Charging after the rebuild, on a live charger" \
-  || no "reports '$(accst)' after the rebuild while plugged and charging"
+# Re-check the SUPPLY before judging the verdict. Preflight established a live charge minutes ago;
+# it is not a standing guarantee. On an A3 whose input collapsed to icl=0 mid-section, ACC correctly
+# reported Discharging and this scored it a failure - the assertion assumed a precondition it never
+# re-tested. A verdict can only be wrong relative to what the hardware is actually doing.
+_still=$(rate90)
+if ! isnum "${_still#-}" || [ "${_still:-0}" -le 150 ] 2>/dev/null; then
+  sk "post-rebuild verdict -- the supply stopped delivering (${_still:-?} mA), nothing to check against"
+elif [ "$(accst)" = Charging ]; then
+  ok "still reports Charging after the rebuild, with the pack provably filling (${_still} mA)"
+else
+  no "reports '$(accst)' after the rebuild while the pack is filling at ${_still} mA"
+fi
 fi
 
 # =================================================================================================
