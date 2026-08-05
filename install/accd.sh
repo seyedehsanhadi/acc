@@ -626,6 +626,16 @@ if ! $_INIT; then
   # the user to share. Pure logging, fully guarded (|| :), can NEVER affect charging. Trims itself to
   # ~1500 lines. Fields: epoch,cap,cur_raw,status,online,present,cutByAcc,tag
   flight_rec(){
+    # The cheap check, every loop: is the published cache there at all? `[ -s ]` is a shell builtin,
+    # so this costs no fork and can run at loop rate -- unlike the grep-based full check, which
+    # cannot (rc19 removed the per-loop stat calls because they cost 26% of a core at idle).
+    #
+    # It has to be at loop rate. The thorough check rides the 40-loop trim tick, and unplugged the
+    # loop naps 120s, so that tick is roughly 80 MINUTES apart -- uselessly slow for the common case
+    # of the file being gone outright, and slowest exactly when the phone is idle and a front end is
+    # most likely to be the only thing asking.
+    [ -s $TMPDIR/.batt-interface.sh ] \
+      || { command -v _cache_republish >/dev/null 2>&1 && _cache_republish >/dev/null 2>&1; } || :
     { printf '%s,%s,%s,%s,%s,%s,%s,%s\n' "$(date +%s 2>/dev/null)" "$(batt_cap 2>/dev/null)" \
         "$(cat "$currFile" 2>/dev/null)" "$(read_status 2>/dev/null)" \
         "$(online 2>/dev/null && echo 1 || echo 0)" "$(present 2>/dev/null && echo 1 || echo 0)" \
@@ -634,13 +644,9 @@ if ! $_INIT; then
     if [ "$_frc" -ge 40 ] 2>/dev/null; then
       _frc=0
       tail -n 1500 "$dataDir/logs/flight.log" > "$dataDir/logs/flight.log.t" 2>/dev/null         && mv -f "$dataDir/logs/flight.log.t" "$dataDir/logs/flight.log" 2>/dev/null || :
-      # Republish the interface cache if it has gone missing. The daemon sources it once at init and
-      # then runs from its own memory, so it survives losing the file and never noticed -- but the
-      # file is what `acc`, AccA and acc-switch-scan read, and on both phones a truncated cache with
-      # the daemon left running stayed empty indefinitely. Rides the trim tick deliberately: rc19
-      # removed the per-loop stat calls because they cost 26% of a core at idle, and this is the same
-      # kind of cost. One stat per 40 loops is roughly one every six minutes, which is far inside the
-      # window that matters and free in battery terms.
+      # The thorough check, for a cache that exists but is INCOMPLETE -- the shape sdp() leaves when
+      # it appends _DPOL to a file that was truncated, giving a non-empty cache with no gauge and no
+      # current node. Detecting that needs greps, so it rides the trim tick rather than every loop.
       command -v _cache_republish >/dev/null 2>&1 && _cache_republish >/dev/null 2>&1 || :
     fi
   }
