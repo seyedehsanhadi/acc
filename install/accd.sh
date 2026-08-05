@@ -624,7 +624,14 @@ if ! $_INIT; then
   # the loop the daemon ALREADY runs every ~9s (no new wakeup, no extra battery drain) so it captures
   # the full charge-control timeline -- including an overnight overcharge -- for acc-diag to bundle and
   # the user to share. Pure logging, fully guarded (|| :), can NEVER affect charging. Trims itself to
-  # ~1500 lines. Fields: epoch,cap,cur_raw,status,online,present,cutByAcc,tag
+  # ~1500 lines. Fields: epoch,cap,cur_raw,status,online,present,cutByAcc,tag,vbus,icl,supply
+  #
+  # rc22: vbus, icl and the supply type were added because a field report could not be settled
+  # without them. A curtana owner reported fast charge gone - 4.83V/5.84W until a physical replug
+  # restored 8.66V/15.3W - which is a negotiated contract collapsing to 5V. The diagnostic bundle
+  # could not show when it collapsed or what ACC did around it, so the cause stayed a hypothesis.
+  # These three fields make the next such report answerable from the log alone: the moment vbus
+  # drops from 9V to 5V is visible, and every ACC write is timestamped in the ledger beside it.
   flight_rec(){
     # The cheap check, every loop: is the published cache there at all? `[ -s ]` is a shell builtin,
     # so this costs no fork and can run at loop rate -- unlike the grep-based full check, which
@@ -640,6 +647,34 @@ if ! $_INIT; then
         "$(cat "$currFile" 2>/dev/null)" "$(read_status 2>/dev/null)" \
         "$(online 2>/dev/null && echo 1 || echo 0)" "$(present 2>/dev/null && echo 1 || echo 0)" \
         "${chDisabledByAcc:-?}" "${1:-loop}" >> "$dataDir/logs/flight.log"; } 2>/dev/null || :
+    # rc22: name a collapsed fast-charge contract when it happens.
+    #
+    # The curtana report is a charger that advertises HVDCP or PD sitting at 5V, delivering ~5.8W
+    # where a replug restores 15.3W. That is a negotiated contract that dropped and did not come
+    # back. It is invisible in every diagnostic today: the phone still says Charging, the switch is
+    # untouched, and the only symptom is a number the owner has to notice themselves.
+    #
+    # This REPORTS, it does not act. The obvious response - re-run source detection - is the very
+    # thing that can collapse an HVDCP handshake, which is how bug 20 kept a phone at 0 mA for
+    # minutes. Acting here would risk causing the failure it is meant to catch. So it writes one
+    # line, once per collapse, and leaves recovery to the user's replug.
+    #
+    # Requires TEN consecutive loops. A contract legitimately sits at 5V during negotiation, on a
+    # weak source, and while the pack is nearly full, so a single sample means nothing.
+    case "${_ft:-}" in
+      *HVDCP*|*PD*|*QC*)
+        if [ -n "${_fv:-}" ] && [ "${_fv:-0}" -lt 5500000 ] 2>/dev/null            && [ "$(read_status 2>/dev/null)" = Charging ]; then
+          _lowV=$(( ${_lowV:-0} + 1 ))
+          if [ "$_lowV" -eq 10 ]; then
+            _wlog "contract collapsed: $_ft advertised, vbus $(( ${_fv:-0} / 1000 ))mV for 10 loops. A replug usually restores it. ACC is NOT re-negotiating: forcing detection is what collapses these."
+          fi
+        else
+          _lowV=0
+        fi
+        ;;
+      *) _lowV=0;;
+    esac
+
     _frc=$(( ${_frc:-0} + 1 ))
     if [ "$_frc" -ge 40 ] 2>/dev/null; then
       _frc=0
@@ -2053,6 +2088,24 @@ if ! $_INIT; then
   # One dumpsys per daemon start is free; from here the marker keeps the loop silent.
   dsys_batt reset >/dev/null 2>&1 || :
   rm -f $TMPDIR/.dsys-override $TMPDIR/.mask-on $TMPDIR/.mask-last $TMPDIR/.mask-n 2>/dev/null || :
+
+  # Resolve the supply-contract nodes ONCE. The flight recorder reads them every loop, so they must
+  # be plain paths by then: a glob or a probe per loop is exactly the per-loop fork cost rc19 removed.
+  # Pick the online supply that reports a voltage, skipping the gauges - the same rule used elsewhere
+  # for choosing a real supply rather than the battery itself.
+  _psVolt=; _psIcl=; _psType=
+  for _pd in /sys/class/power_supply/*; do
+    case "${_pd##*/}" in battery|bms|maxfg|*fuelgauge*) continue;; esac
+    [ -f "$_pd/voltage_now" ] || continue
+    _psVolt=$_pd/voltage_now
+    [ -f "$_pd/current_max" ] && _psIcl=$_pd/current_max
+    for _tn in real_type usb_type type; do
+      [ -f "$_pd/$_tn" ] && { _psType=$_pd/$_tn; break; }
+    done
+    # usb is the one that carries the negotiated contract on every phone seen so far; prefer it but
+    # accept whatever else exists rather than logging nothing.
+    case "${_pd##*/}" in usb) break;; esac
+  done
 
   hasWakeFifo=false
   [ -p $TMPDIR/.wake ] || mkfifo $TMPDIR/.wake 2>/dev/null || :
