@@ -57,7 +57,11 @@ tmp(){ _t=$(rd $G/temp); isnum "${_t#-}" && echo $(( _t / 10 )) || echo ""; }
 cc(){ rd $G/charge_counter; }
 accst(){ timeout 20 acc -i 2>/dev/null </dev/null | sed -n 's/^status //p' | head -1; }
 alive(){ _p=$(rd $TD/acc.lock); [ -n "$_p" ] && [ -d "/proc/$_p" ]; }
-wl(){ wc -l < $WL 2>/dev/null || echo 0; }
+wl(){ _n=$(wc -l < $WL 2>/dev/null); case "${_n:-x}" in ''|*[!0-9]*) echo 0;; *) echo "$_n";; esac; }
+
+# grep -c prints its count AND exits 1 when the count is zero, so `grep -c ... || echo 0` emits TWO
+# lines and every later numeric test on it is a syntax error. Count without that trap.
+cnt(){ _c=$(grep -c "$1" 2>/dev/null); case "${_c:-x}" in ''|*[!0-9]*) echo 0;; *) echo "$_c";; esac; }
 
 # Rate from the counter. Sign-convention-free, which matters: the current sensor's sign is per-device
 # and on some phones flips with the charge path, and ACC arms .dpol_unstable when it sees that. The
@@ -268,7 +272,7 @@ sleep 10
 _w2=$(wl)
 sleep 45
 _w3=$(wl)
-_recap=$(tail -n +$(( _w2 + 1 )) $WL 2>/dev/null | grep -c '<- 500000' 2>/dev/null || echo 0)
+_recap=$(tail -n +$(( _w2 + 1 )) $WL 2>/dev/null | cnt '<- 500000')
 [ "${_recap:-0}" -eq 0 ] \
   && ok "the cap was not re-applied after the release (bug 10)" \
   || no "the daemon re-applied the 500 mA cap $_recap times after the clear (bug 10)"
@@ -290,8 +294,8 @@ sleep 3
 _w0=$(wl)
 acc -s max_charging_current=600 >/dev/null 2>&1; sleep 20
 acc -s max_charging_current= >/dev/null 2>&1; sleep 25
-_k=$(tail -n +$(( _w0 + 1 )) $WL 2>/dev/null | grep -c '^.*rekick .*<- 1' 2>/dev/null || echo 0)
-_s=$(tail -n +$(( _w0 + 1 )) $WL 2>/dev/null | grep -c 'rekick skipped' 2>/dev/null || echo 0)
+_k=$(tail -n +$(( _w0 + 1 )) $WL 2>/dev/null | cnt '^.*rekick .*<- 1')
+_s=$(tail -n +$(( _w0 + 1 )) $WL 2>/dev/null | cnt 'rekick skipped')
 log "      with re-kick OFF: $_k fired, $_s skipped-and-logged"
 [ "${_k:-0}" -eq 0 ] \
   && ok "no re-kick fired while disabled (bug 13)" \
@@ -398,7 +402,7 @@ if [ -n "$_vb" ]; then
       && ok "the input current limit was not left suppressed ($(( _i1 / 1000 )) mA)" \
       || no "input current left at $(( _i1 / 1000 )) mA, down from $(( _i0 / 1000 )) (bug 9)"
   fi
-  _snap=$(tail -40 $WL 2>/dev/null | grep -c '<- 500000' 2>/dev/null || echo 0)
+  _snap=$(tail -40 $WL 2>/dev/null | cnt '<- 500000')
   [ "${_snap:-0}" -eq 0 ] \
     && ok "no 500000 probe-time snapshot was written back (bug 9)" \
     || no "a 500 mA snapshot was written back $_snap times (bug 9)"

@@ -4,9 +4,9 @@ Everything found, fixed, or still open. Baseline is rc21 `1406274`, current buil
 
 ## A. Fixed (18)
 
-Bugs 1-15, 17 and 18 are hardware-verified on the A3, the Pixel, or both. **16 is source-only** and
-flagged as such in the table. Current build `202505306`; both phones pass the full unplugged suite
-56/56 with no failures and no skips.
+Bugs 1-15 and 17-20 are hardware-verified on the A3, the Pixel, or both. **16 is source-only** and
+flagged as such in the table. Current build `202505309`. Pixel: unplugged 56/56, plugged harness 56 pass / 0 fail / 8 skip (the
+skips are the voltage subsets this phone genuinely cannot do). A3 grid on a QC charger: 19/2.
 
 | # | Bug | Where | Proof |
 |---|---|---|---|
@@ -25,6 +25,8 @@ flagged as such in the table. Current build `202505306`; both phones pass the fu
 | 13 | Two USB re-kick sites bypassed `acc -sk off`, the rate limit, and the ledger | `set-ch-curr.sh` | t35 16/0; `rekick skipped` now visible in production |
 | 14 | An unusable cache healed only at daemon init. A looping daemon never noticed, and `acc -i` sourced an empty file, left every node path unset, and **blocked on stdin** instead of answering — AccA hangs | `batt-interface.sh` | t41 11/0; A/B on both phones, daemon pid unchanged: A blind/blocked, B healed |
 | 15 | `temp_now` coerced an unreadable sensor to 250 (25 °C), so the thermal limit silently stopped being enforced with nothing anywhere saying so | `accd.sh` | t42 9/0; sandbox: 2 log lines across 4 failing reads + recovery; on both phones since 202505304 |
+| 20 | **Two USB re-kick gates with independent timestamps and intervals** (accd 300 s, misc-functions 30 s). Neither saw the other's firings, so the protective gap collapsed: `apsd_rerun` fired every 15-62 s, renegotiating the charger continuously, and the charge never established | `accd.sh`, `misc-functions.sh` | t35 17/0; A3 with no limit set: storm before, **0 fired in 6 min** after; one gated kick then recovered it from 400 mA ICL to 1144 mA |
+| 19 | A voltage limit was stored on a phone with no voltage control node, so AccA showed a limit nothing could apply | `set-ch-volt.sh` | Pixel A/B: `(3900)` -> `()`; the grid now honestly SKIPS the 8 voltage subsets instead of failing them |
 | 18 | **Current caps silently did nothing.** The rc22 apply-side marker guard refuses to write a current node while `.mcc-custom` is absent, but `set_ch_curr` created that marker AFTER the apply, so the first apply was always skipped. Config, node list, marker and `acc -i` all reported a limit that was never written | `set-ch-curr.sh` | t43 7/0; Pixel A/B, 500 mA cap on 2.2 A: A wrote **zero** nodes, rate 1440 mA; B wrote 6 nodes, rate 576 mA. Grid confirms: current-cap row went FAIL to PASS |
 | 17 | The daemon never republished its own interface cache. It sources the file once at init and runs from memory, so losing the file cost it nothing and it never noticed — but that file is what `acc`, AccA and switch-scan read | `accd.sh`, `batt-interface.sh` | A/B both phones, daemon pid unchanged: A 480 s at 0 bytes, B healed in 20 s with polarity preserved (`+` A3, `-` Pixel) |
 | 16 | `.testingsw` was an empty marker, so a scan killed by SIGKILL was indistinguishable from one in progress | `misc-functions.sh`, `acc.sh` | source only. **NOT yet on a phone** |
@@ -35,8 +37,8 @@ flagged as such in the table. Current build `202505306`; both phones pass the fu
 
 | # | Bug | Severity | Why not yet |
 |---|---|---|---|
-| O1 | Two throttles tight enough to stop the charge suppress the binary pause. ACC stops believing it is charging, so capacity/temperature never assert. Nothing is charging so nothing is harmed, but the hold depends on the throttle | low | needs a main-loop restructure; not safe unsoaked |
-| O6 | On a phone with no voltage control node, `max_charging_voltage` prints "No voltage control file found", then prints a success tick and **persists the value anyway**. AccA reads config, not the CLI, so it shows an enforced-looking limit that nothing applies. Pixel 6a: `ch-volt-ctrl-files` absent | low | not safe to fix late in a stabilisation pass: a missing ctrl-file means either "unsupported" or "not resolved yet, phone has not charged since boot", and the current path persists intent deliberately so the daemon can apply at the next charging tick. Needs the two cases separated, then a soak |
+| O1 | Two throttles tight enough to stop the charge suppress the binary pause. **Reproduced on the A3 grid** (`CTA-`: level 71 >= pause 71 and 34 C > max 32 C, both pauses skipped because the 381 mA cap made the pack net-negative and `is_charging` went false). Did NOT reproduce on the Pixel. ACC stops believing it is charging, so capacity/temperature never assert. Nothing is charging so nothing is harmed, but the hold depends on the throttle | low | needs a main-loop restructure; not safe unsoaked |
+| ~~O6~~ FIXED as bug 19 | On a phone with no voltage control node, `max_charging_voltage` prints "No voltage control file found", then prints a success tick and **persists the value anyway**. AccA reads config, not the CLI, so it shows an enforced-looking limit that nothing applies. Pixel 6a: `ch-volt-ctrl-files` absent | low | not safe to fix late in a stabilisation pass: a missing ctrl-file means either "unsupported" or "not resolved yet, phone has not charged since boot", and the current path persists intent deliberately so the daemon can apply at the next charging tick. Needs the two cases separated, then a soak |
 | O5 | Resume latency in the slow condition: after an input-suspend cut, raising the limit took ~4 min to resume where the fast condition took seconds | **unknown** | not yet measured properly — could be a nap, config propagation, or the recovery path |
 
 ## C. Open — reported, unconfirmed on the reporter's device
@@ -130,3 +132,17 @@ counted against it. Its binary-limit rows, which need far less headroom, still p
 
 **The A3 needs a different cable and charger before its grid means anything.** The Pixel, on a 9 V PD
 contract, is the trustworthy instrument for throttle behaviour and reports 20/1.
+
+## I. The re-kick storm changes the A3 story
+
+Section D concluded the A3's charger collapse was ~500 mOhm of cable resistance, on the strength of it
+reproducing with ACC uninstalled. That is still true, but it was not the whole cause.
+
+With no limit configured at all, ACC was firing `apsd_rerun` every 15-62 seconds (bug 20). Each one
+re-runs USB source detection. Measured consequence: the pack sat at 0 mA for five minutes with the
+cable in, level drifting 67% down to 65%, and the input settled at 400 mA. After the fix, six minutes
+produced zero re-kicks, and a single gated kick took it from 400 mA back to 1144 mA.
+
+So the resistance is real and the storm made it much worse, and prevented recovery. Both were needed
+to produce what the tester saw. The lesson is narrower than "it is the cable": a hardware weakness and
+a software defect can produce one symptom together, and proving one does not clear the other.
