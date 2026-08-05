@@ -1,8 +1,8 @@
 # ACC bug register — rc21 → rc22
 
-Everything found, fixed, or still open. Baseline is rc21 `1406274`. Six commits on top.
+Everything found, fixed, or still open. Baseline is rc21 `1406274`, current build `202505304`.
 
-## A. Fixed and hardware-verified (13)
+## A. Fixed and hardware-verified (16)
 
 | # | Bug | Where | Proof |
 |---|---|---|---|
@@ -19,9 +19,9 @@ Everything found, fixed, or still open. Baseline is rc21 `1406274`. Six commits 
 | 11 | Cooldown cycle and main resume re-enabled charging on a pre-sleep temperature reading | `accd.sh` | t33 27/0 |
 | 12 | Interface cache rebuilt only when *absent*, not when unusable — an empty file left the daemon blind permanently | `accd.sh` | t40 8/0; truncate → restart → rebuilt |
 | 13 | Two USB re-kick sites bypassed `acc -sk off`, the rate limit, and the ledger | `set-ch-curr.sh` | t35 16/0; `rekick skipped` now visible in production |
+| 14 | An unusable cache healed only at daemon init. A looping daemon never noticed, and `acc -i` sourced an empty file, left every node path unset, and **blocked on stdin** instead of answering — AccA hangs | `batt-interface.sh` | t41 11/0; A/B on both phones, daemon pid unchanged: A blind/blocked, B healed |
 | 15 | `temp_now` coerced an unreadable sensor to 250 (25 °C), so the thermal limit silently stopped being enforced with nothing anywhere saying so | `accd.sh` | t42 9/0; outage and recovery both in the flight log, once per transition |
 | 16 | `.testingsw` was an empty marker, so a scan killed by SIGKILL was indistinguishable from one in progress | `misc-functions.sh`, `acc.sh` | now carries the scanning pid; `-f` consumers unaffected |
-| 14 | An unusable cache healed only at daemon init. A looping daemon never noticed, and `acc -i` sourced an empty file, left every node path unset, and **blocked on stdin** instead of answering — AccA hangs | `batt-interface.sh` | t41 11/0; A/B on both phones, daemon pid unchanged: A blind/blocked, B healed |
 
 **Silent ones** (no user could have reported): 4, 5, 6, 12, 14, 15.
 
