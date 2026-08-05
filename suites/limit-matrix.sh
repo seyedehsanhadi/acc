@@ -66,7 +66,8 @@ IFACE=$TD/.batt-interface.sh
 P=0; F=0; SKIP=0
 SETTLE=40
 WIN=20
-CCWIN=180        # counter window, used only when the current sign cannot be trusted
+CCWIN=150        # CEILING for the counter window, not a fixed cost: measure_cc returns as soon
+                 # as the answer is unambiguous, which is usually within 10-25s
 USE_CC=false
 
 log(){ echo "$*" >> "$OUT"; }
@@ -225,13 +226,28 @@ rate(){
 # quantised (a Mi A3 steps 28600 uAh at a time, roughly once a minute), so a short window reads
 # either zero or one whole quantum and nothing in between.
 measure_cc(){
-  _ca=$(cc); _ta=$(date +%s)
-  _i=0
-  while [ $_i -lt $CCWIN ]; do _i=$((_i + 10)); sleep 10; done
-  _cb=$(cc); _tb=$(date +%s)
-  _dt=$(( _tb - _ta )); [ "$_dt" -gt 0 ] 2>/dev/null || _dt=$CCWIN
-  case "${_ca:-x}${_cb:-x}" in *x*) echo ""; return;; esac
-  echo $(( (_cb - _ca) * 3600 / _dt / 1000 ))
+  # Adaptive, not a flat window. The counter is quantised (a Mi A3 steps 28600 uAh at a time), so the
+  # old fixed 180s was sized for the worst case and paid it on every row - an hour for 16 cases.
+  # Poll instead, and stop the moment the answer is unambiguous:
+  #   - the counter has moved at all          -> the sign is settled, return the rate
+  #   - nothing has moved AND |I| is tiny     -> not filling; that IS the answer, return 0
+  # Only a slow, genuinely ambiguous case pays the full ceiling.
+  _ca=$(cc); _ta=$(date +%s); _el=0
+  while [ $_el -lt $CCWIN ]; do
+    sleep 5; _el=$(( _el + 5 ))
+    _cb=$(cc)
+    case "${_ca:-x}${_cb:-x}" in *x*) echo ""; return;; esac
+    _d=$(( _cb - _ca ))
+    if [ "$_d" -ne 0 ]; then
+      _tb=$(date +%s); _dt=$(( _tb - _ta )); [ "$_dt" -gt 0 ] 2>/dev/null || _dt=$_el
+      echo $(( _d * 3600 / _dt / 1000 ))
+      return
+    fi
+    # Counter still. If the current sensor also reads near zero, nothing is flowing either way and
+    # waiting longer cannot change that. Needs a few seconds of agreement, not one sample.
+    if [ $_el -ge 20 ] && [ "$(mAmag)" -lt "$NOISE" ] 2>/dev/null; then echo 0; return; fi
+  done
+  echo 0
 }
 
 # median-ish of several samples, so one blip cannot decide a case
@@ -249,6 +265,20 @@ measure(){
     _i=$((_i + 4)); sleep 4
   done
   [ "$_cnt" -gt 0 ] && echo $(( _tot / _cnt )) || echo ""
+}
+
+# A quick counter sample, for reporting a row whose verdict is already settled by the switch state.
+# Not a precise rate and not used as one: classify() has already decided PAUSED before this is read.
+measure_short(){
+  _sa=$(cc); _st0=$(date +%s); _sel=0
+  while [ $_sel -lt 25 ]; do
+    sleep 5; _sel=$(( _sel + 5 ))
+    _sb=$(cc)
+    case "${_sa:-x}${_sb:-x}" in *x*) echo ""; return;; esac
+    [ "$(( _sb - _sa ))" -ne 0 ] && break
+  done
+  _st1=$(date +%s); _sdt=$(( _st1 - _st0 )); [ "$_sdt" -gt 0 ] 2>/dev/null || _sdt=$_sel
+  echo $(( (_sb - _sa) * 3600 / _sdt / 1000 ))
 }
 
 # classify: $1 = mean charging rate in mA -> PAUSED | BLOCKED | THROTTLED | FULL | DRAINING | UNKNOWN
@@ -394,9 +424,41 @@ run_case(){   # $1 = flags  $2 = human label
     *A*|*V*) $THROTTLE_OK || { skip "$_lbl -- the supply is only ${FREE}mA, below the ${ACAP}mA floor a cap could act on. Use a wall charger."; return; };;
   esac
   apply "$_f"
-  sleep $SETTLE
+  # Wait for ACC to act rather than sleeping a flat SETTLE. Its loop is ~9s while charging, so the
+  # switch usually settles inside 15s; the old fixed 40s paid the worst case on all 16 rows. Poll for
+  # the switch to reach the state this combination implies, then give it one short beat to stabilise.
+  case "$_f" in
+    *C*|*T*)
+      # A binary limit changes the switch, so poll for exactly that. This is where the time was:
+      # these are the majority of rows and they settle in a loop or two.
+      _sl=0
+      while [ $_sl -lt $SETTLE ]; do sleep 3; _sl=$(( _sl + 3 )); paused && break; done
+      sleep 4
+      ;;
+    *)
+      # A throttle NEVER moves the switch, so polling `paused` here breaks on the first iteration and
+      # gives the row ~7s. That is not enough for ACC to write the nodes and the supply to re-settle,
+      # and it produced a false "the cap did NOT act" on a row whose sibling passed with the same cap.
+      # Poll for the thing that actually changes - the cap marker - then let the input re-negotiate.
+      _sl=0
+      while [ $_sl -lt 20 ]; do
+        sleep 2; _sl=$(( _sl + 2 ))
+        [ -f "$TD/.mcc-custom" ] && break
+        case "$_f" in *V*) [ -f "$TD/.volt-custom" ] && break;; esac
+      done
+      sleep 18
+      ;;
+  esac
   _cfg="cap=$(cfgC 3)/$(cfgC 4) temp=$(cfgT 1)/$(cfgT 2)/$(cfgT 3) A=$(cfg1 maxChargingCurrent) V=$(cfg1 maxChargingVoltage)"
-  _d=$(measure)
+  # A cut switch already answers the question. classify() checks `paused` before it looks at the
+  # rate anyway, so measuring one first is pure waiting - and it is the majority of rows: every case
+  # containing a capacity or temperature limit ends paused. Take a short sample for the report and
+  # move on. Only a row that is actually PASSING CURRENT needs the slow counter measurement.
+  if paused; then
+    _d=$(measure_short)
+  else
+    _d=$(measure)
+  fi
   _st=$(classify "$_d")
   _as=$(accstat)
   _t=$(tempC)

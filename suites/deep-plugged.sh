@@ -68,13 +68,27 @@ cnt(){ _c=$(grep -c "$1" 2>/dev/null); case "${_c:-x}" in ''|*[!0-9]*) echo 0;; 
 # counter is quantised though (a Mi A3 steps 28600 uAh at a time), so short windows read 0 or one
 # whole quantum. 90s is enough here because every check below only asks "filling or not", never for a
 # precise rate.
+# Adaptive, with a ceiling. A flat 90s was paid on every call regardless of how obvious the answer
+# was, and this suite calls it a dozen times. Stop as soon as the counter moves (the sign is then
+# settled) or as soon as counter-still and near-zero current agree that nothing is flowing.
 rate90(){
-  _a=$(cc); _t0=$(date +%s)
-  _w=0; while [ $_w -lt 90 ]; do sleep 10; _w=$((_w + 10)); done
-  _b=$(cc); _t1=$(date +%s)
-  _dt=$(( _t1 - _t0 )); [ "$_dt" -gt 0 ] 2>/dev/null || _dt=90
-  case "${_a:-x}${_b:-x}" in *x*) echo ""; return;; esac
-  echo $(( (_b - _a) * 3600 / _dt / 1000 ))
+  _a=$(cc); _t0=$(date +%s); _el=0
+  while [ $_el -lt 100 ]; do
+    sleep 5; _el=$(( _el + 5 ))
+    _b=$(cc)
+    case "${_a:-x}${_b:-x}" in *x*) echo ""; return;; esac
+    _dd=$(( _b - _a ))
+    if [ "$_dd" -ne 0 ]; then
+      _t1=$(date +%s); _dt=$(( _t1 - _t0 )); [ "$_dt" -gt 0 ] 2>/dev/null || _dt=$_el
+      echo $(( _dd * 3600 / _dt / 1000 ))
+      return
+    fi
+    if [ $_el -ge 20 ]; then
+      _im=$(rd $G/current_now); _im=${_im#-}
+      case "${_im:-x}" in ''|*[!0-9]*) :;; *) [ "$_im" -lt 120000 ] && { echo 0; return; };; esac
+    fi
+  done
+  echo 0
 }
 
 # Wait for a condition instead of sleeping a guess at how long a phone takes. Every fixed sleep in
