@@ -2,11 +2,11 @@
 
 Everything found, fixed, or still open. Baseline is rc21 `1406274`, current build `202505304`.
 
-## A. Fixed (16)
+## A. Fixed (17)
 
-Bugs 1-14 are hardware-verified on the A3, the Pixel, or both. **15 and 16 are not yet on either
-phone** - they are source- and sandbox-verified only, and are flagged as such in the table. They go
-on both phones with the next flash.
+Bugs 1-15 and 17 are hardware-verified on the A3, the Pixel, or both. **16 is source-only** and
+flagged as such in the table. Current build `202505306`; both phones pass the full unplugged suite
+56/56 with no failures and no skips.
 
 | # | Bug | Where | Proof |
 |---|---|---|---|
@@ -24,7 +24,8 @@ on both phones with the next flash.
 | 12 | Interface cache rebuilt only when *absent*, not when unusable — an empty file left the daemon blind permanently | `accd.sh` | t40 8/0; truncate → restart → rebuilt |
 | 13 | Two USB re-kick sites bypassed `acc -sk off`, the rate limit, and the ledger | `set-ch-curr.sh` | t35 16/0; `rekick skipped` now visible in production |
 | 14 | An unusable cache healed only at daemon init. A looping daemon never noticed, and `acc -i` sourced an empty file, left every node path unset, and **blocked on stdin** instead of answering — AccA hangs | `batt-interface.sh` | t41 11/0; A/B on both phones, daemon pid unchanged: A blind/blocked, B healed |
-| 15 | `temp_now` coerced an unreadable sensor to 250 (25 °C), so the thermal limit silently stopped being enforced with nothing anywhere saying so | `accd.sh` | t42 9/0; sandbox: 2 log lines across 4 failing reads + recovery. **NOT yet on a phone** |
+| 15 | `temp_now` coerced an unreadable sensor to 250 (25 °C), so the thermal limit silently stopped being enforced with nothing anywhere saying so | `accd.sh` | t42 9/0; sandbox: 2 log lines across 4 failing reads + recovery; on both phones since 202505304 |
+| 17 | The daemon never republished its own interface cache. It sources the file once at init and runs from memory, so losing the file cost it nothing and it never noticed — but that file is what `acc`, AccA and switch-scan read | `accd.sh`, `batt-interface.sh` | A/B both phones, daemon pid unchanged: A 480 s at 0 bytes, B healed in 20 s with polarity preserved (`+` A3, `-` Pixel) |
 | 16 | `.testingsw` was an empty marker, so a scan killed by SIGKILL was indistinguishable from one in progress | `misc-functions.sh`, `acc.sh` | source only. **NOT yet on a phone** |
 
 **Silent ones** (no user could have reported): 4, 5, 6, 12, 14, 15.
@@ -57,7 +58,7 @@ on both phones with the next flash.
 
 ## E. The common cause
 
-Eleven of the sixteen fixes are the same mistake in different clothes.
+Twelve of the seventeen fixes are the same mistake in different clothes.
 
 **ACC learns per-device facts and then trusts them absolutely.** Which nodes are the gauge, what unit the current is in, which sign means charging, what the "default" for a node was. Each is a guess that was right once. Nothing tracks confidence, nothing re-validates, and when one is wrong the failure is always silent and always total — `is_charging` goes false and all four limits stop being evaluated together.
 
@@ -83,3 +84,29 @@ Two rules from that:
   fix is a `_cache_usable()` in the file all four already source, not a fifth copy of the condition.
 - A pass on one device and a fail on another is not flakiness to average out. It is two different
   states, and the passing one is usually passing for a reason that has nothing to do with the fix.
+
+## G. The suite was wrong more often than ACC was
+
+Seven false results came out of the harness today, and every one had the same shape: **a fixed
+timing assumption standing in for waiting on a condition.**
+
+| what it measured | what it actually measured |
+|---|---|
+| 22 s sample for loop liveness | ACC's deliberate 120 s idle nap, reported as "nothing is being enforced" |
+| CPU delta across 60 s | a daemon restart resetting the counter; -52 ticks scored a PASS |
+| `restart()` sleeping 38 s | enough on the Pixel, not on the slower A3 — the same check passed on one phone and failed on the other |
+| "cache healed" = non-empty | 8 bytes of `_DPOL=+` from `sdp()`, with no gauge and no current node |
+| "still correct" = not `Charging` | an empty answer, scored as correct |
+| drain labelled "idle" | drain with the suite itself keeping the CPU awake |
+| L4 grid | a stub that skipped, in the pass the grid was the point of |
+
+The cost was real: the `restart()` one alone reported a product bug twice, the second time *after* a
+targeted A/B had proven that same phone healed in 20 s. A suite that cries wolf on a correct build is
+worse than no suite, because the next real failure is the one you argue with.
+
+The rule that came out of it: **never sleep a guess at how long a phone takes.** Poll for the
+condition, with a ceiling. Every wait in the harness now does that.
+
+And the corollary, from bug 14: **a pass on one device and a fail on another is not flakiness to
+average out.** It is two different states, and the passing one is usually passing for a reason that
+has nothing to do with what is being tested.
