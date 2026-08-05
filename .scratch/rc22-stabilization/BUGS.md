@@ -2,9 +2,9 @@
 
 Everything found, fixed, or still open. Baseline is rc21 `1406274`, current build `202505304`.
 
-## A. Fixed (17)
+## A. Fixed (18)
 
-Bugs 1-15 and 17 are hardware-verified on the A3, the Pixel, or both. **16 is source-only** and
+Bugs 1-15, 17 and 18 are hardware-verified on the A3, the Pixel, or both. **16 is source-only** and
 flagged as such in the table. Current build `202505306`; both phones pass the full unplugged suite
 56/56 with no failures and no skips.
 
@@ -25,6 +25,7 @@ flagged as such in the table. Current build `202505306`; both phones pass the fu
 | 13 | Two USB re-kick sites bypassed `acc -sk off`, the rate limit, and the ledger | `set-ch-curr.sh` | t35 16/0; `rekick skipped` now visible in production |
 | 14 | An unusable cache healed only at daemon init. A looping daemon never noticed, and `acc -i` sourced an empty file, left every node path unset, and **blocked on stdin** instead of answering — AccA hangs | `batt-interface.sh` | t41 11/0; A/B on both phones, daemon pid unchanged: A blind/blocked, B healed |
 | 15 | `temp_now` coerced an unreadable sensor to 250 (25 °C), so the thermal limit silently stopped being enforced with nothing anywhere saying so | `accd.sh` | t42 9/0; sandbox: 2 log lines across 4 failing reads + recovery; on both phones since 202505304 |
+| 18 | **Current caps silently did nothing.** The rc22 apply-side marker guard refuses to write a current node while `.mcc-custom` is absent, but `set_ch_curr` created that marker AFTER the apply, so the first apply was always skipped. Config, node list, marker and `acc -i` all reported a limit that was never written | `set-ch-curr.sh` | t43 7/0; Pixel A/B, 500 mA cap on 2.2 A: A wrote **zero** nodes, rate 1440 mA; B wrote 6 nodes, rate 576 mA. Grid confirms: current-cap row went FAIL to PASS |
 | 17 | The daemon never republished its own interface cache. It sources the file once at init and runs from memory, so losing the file cost it nothing and it never noticed — but that file is what `acc`, AccA and switch-scan read | `accd.sh`, `batt-interface.sh` | A/B both phones, daemon pid unchanged: A 480 s at 0 bytes, B healed in 20 s with polarity preserved (`+` A3, `-` Pixel) |
 | 16 | `.testingsw` was an empty marker, so a scan killed by SIGKILL was indistinguishable from one in progress | `misc-functions.sh`, `acc.sh` | source only. **NOT yet on a phone** |
 
@@ -35,6 +36,7 @@ flagged as such in the table. Current build `202505306`; both phones pass the fu
 | # | Bug | Severity | Why not yet |
 |---|---|---|---|
 | O1 | Two throttles tight enough to stop the charge suppress the binary pause. ACC stops believing it is charging, so capacity/temperature never assert. Nothing is charging so nothing is harmed, but the hold depends on the throttle | low | needs a main-loop restructure; not safe unsoaked |
+| O6 | On a phone with no voltage control node, `max_charging_voltage` prints "No voltage control file found", then prints a success tick and **persists the value anyway**. AccA reads config, not the CLI, so it shows an enforced-looking limit that nothing applies. Pixel 6a: `ch-volt-ctrl-files` absent | low | not safe to fix late in a stabilisation pass: a missing ctrl-file means either "unsupported" or "not resolved yet, phone has not charged since boot", and the current path persists intent deliberately so the daemon can apply at the next charging tick. Needs the two cases separated, then a soak |
 | O5 | Resume latency in the slow condition: after an input-suspend cut, raising the limit took ~4 min to resume where the fast condition took seconds | **unknown** | not yet measured properly — could be a nap, config propagation, or the recovery path |
 
 ## C. Open — reported, unconfirmed on the reporter's device
@@ -58,7 +60,7 @@ flagged as such in the table. Current build `202505306`; both phones pass the fu
 
 ## E. The common cause
 
-Twelve of the seventeen fixes are the same mistake in different clothes.
+Twelve of the eighteen fixes are the same mistake in different clothes. Bug 18 is a different one, and worse: a guard added in this campaign to fix bug 10 broke the thing it was guarding.
 
 **ACC learns per-device facts and then trusts them absolutely.** Which nodes are the gauge, what unit the current is in, which sign means charging, what the "default" for a node was. Each is a guess that was right once. Nothing tracks confidence, nothing re-validates, and when one is wrong the failure is always silent and always total — `is_charging` goes false and all four limits stop being evaluated together.
 
@@ -110,3 +112,21 @@ condition, with a ceiling. Every wait in the harness now does that.
 And the corollary, from bug 14: **a pass on one device and a fail on another is not flakiness to
 average out.** It is two different states, and the passing one is usually passing for a reason that
 has nothing to do with what is being tested.
+
+## H. The A3's charger is no longer a valid instrument
+
+The A3's grid reports six failures. Its own no-limits control row is one of them:
+
+    FAIL  none: no limit set -> nothing is set, yet the pack measured THROTTLED (105 mA vs free 524)
+
+With nothing configured, ACC cannot be the cause. The supply degraded across the session -
+`Fast` 2.0 A, then `Taper` 1.75 A, then 0.56 A drawn at 4.53 V - and the measured free rate fell from
+1503 mA (noise floor 187 mA) to 524 mA (noise floor 65 mA). `.dpol_unstable` armed during the run,
+which is ACC correctly detecting the current polarity flipping as the charge path changed under it.
+
+This matches the ~500 mΩ series resistance measured earlier in the campaign and reproduced with ACC
+uninstalled and never executed. The A3's throttle rows are not measurements of ACC and are not
+counted against it. Its binary-limit rows, which need far less headroom, still pass.
+
+**The A3 needs a different cable and charger before its grid means anything.** The Pixel, on a 9 V PD
+contract, is the trustworthy instrument for throttle behaviour and reports 20/1.
