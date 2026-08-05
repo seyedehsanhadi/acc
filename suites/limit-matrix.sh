@@ -288,7 +288,7 @@ say "Running the 15-combination matrix. About 20 minutes. Keep it plugged in and
 say "Settings are saved and restored, even if you stop it early."
 say ""
 TOUCHED=true
-acc -s resume_capacity=$((L + 5)) pause_capacity=$((L + 10)) >/dev/null 2>&1
+acc -s resume_capacity=99 pause_capacity=100 >/dev/null 2>&1
 acc -s cooldown_temp=58 max_temp=60 resume_temp=55 >/dev/null 2>&1
 acc -s max_charging_current= >/dev/null 2>&1
 acc -s max_charging_voltage= >/dev/null 2>&1
@@ -344,7 +344,7 @@ VCAP=$(( PACKV - 80 ))
 THROTTLE_OK=true
 [ "$FREE" -ge $(( ACAP * 4 / 3 )) ] || THROTTLE_OK=false
 say "  when active: current cap ${ACAP}mA, voltage cap ${VCAP}mV, temperature cap $((PACKT - 2))C,"
-say "               capacity cap $((L - 1))% against level ${L}%"
+say "               capacity cap tracks the live level (it moves during a run); no-capacity cases pin pause at 100%"
 $THROTTLE_OK || say "  NOTE: at ${FREE}mA this supply has no headroom for a ${ACAP}mA cap to act on."
 $THROTTLE_OK || say "        Current and voltage cases will be skipped. Re-run on a wall charger to cover them."
 say ""
@@ -352,8 +352,21 @@ say ""
 # ---- apply a combination --------------------------------------------------------------------------------
 apply(){   # $1 = CTAV flags string, e.g. "C--V"
   _f=$1
-  case "$_f" in *C*) acc -s resume_capacity=$((L - 3)) pause_capacity=$((L - 1)) >/dev/null 2>&1;;
-                  *) acc -s resume_capacity=$((L + 5)) pause_capacity=$((L + 10)) >/dev/null 2>&1;; esac
+  # Read the level FRESH for every case. It moves a lot during a run: fast charging raises it, and a
+  # capacity pause lowers it again while the pack runs the phone. Sizing both margins off a level
+  # captured once at the start is what made the no-limits control row fail on a QC charger - the pack
+  # climbed from 55% to the L+10 "capacity must not act" threshold within four cases, so ACC paused,
+  # correctly, on a limit the grid intended to be inert. The margin was sized for a slow supply and
+  # 20s windows; at 2A with a 180s counter window the level moves about 3% per case.
+  _L=$(lvl)
+  isnum "$_L" || _L=$L
+  case "$_f" in
+    # Capacity MUST act: pause just below where the pack is right now.
+    *C*) acc -s resume_capacity=$((_L - 3)) pause_capacity=$((_L - 1)) >/dev/null 2>&1;;
+    # Capacity must NOT act: put the pause where the level cannot reach it during a case. A relative
+    # margin is a race against the charger; 100 is not, because the level cannot exceed it.
+    *) acc -s resume_capacity=99 pause_capacity=100 >/dev/null 2>&1;;
+  esac
   case "$_f" in
     *T*) _pt=$(tempC); _mt=$((_pt - 2)); _ct=$((_mt - 2)); _rt=$((_mt - 5))
          [ "$_rt" -ge 15 ] || { _rt=15; _ct=17; _mt=19; }
@@ -389,7 +402,10 @@ run_case(){   # $1 = flags  $2 = human label
   _t=$(tempC)
   log "  $_lbl [$_f]"
   log "      config landed: $_cfg"
-  log "      switch=$(rd "$SWN") kernel=$(kst) acc=$_as  |I|=$(mAmag)mA  ${_t}C  charge=${_d}mA/${WIN}s"
+  # Level goes in every row. It moves during a run, it is what the capacity margins are sized
+  # against, and near taper the free rate falls on its own - so a reader can tell a real throttle
+  # from a full battery without having to trust that nothing drifted.
+  log "      switch=$(rd "$SWN") kernel=$(kst) acc=$_as  |I|=$(mAmag)mA  ${_t}C  level=$(lvl)%  charge=${_d}mA/${WIN}s"
 
   case "$_f" in
     *C*|*T*)
