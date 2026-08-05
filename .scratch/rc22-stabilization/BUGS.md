@@ -2,7 +2,11 @@
 
 Everything found, fixed, or still open. Baseline is rc21 `1406274`, current build `202505304`.
 
-## A. Fixed and hardware-verified (16)
+## A. Fixed (16)
+
+Bugs 1-14 are hardware-verified on the A3, the Pixel, or both. **15 and 16 are not yet on either
+phone** - they are source- and sandbox-verified only, and are flagged as such in the table. They go
+on both phones with the next flash.
 
 | # | Bug | Where | Proof |
 |---|---|---|---|
@@ -20,8 +24,8 @@ Everything found, fixed, or still open. Baseline is rc21 `1406274`, current buil
 | 12 | Interface cache rebuilt only when *absent*, not when unusable — an empty file left the daemon blind permanently | `accd.sh` | t40 8/0; truncate → restart → rebuilt |
 | 13 | Two USB re-kick sites bypassed `acc -sk off`, the rate limit, and the ledger | `set-ch-curr.sh` | t35 16/0; `rekick skipped` now visible in production |
 | 14 | An unusable cache healed only at daemon init. A looping daemon never noticed, and `acc -i` sourced an empty file, left every node path unset, and **blocked on stdin** instead of answering — AccA hangs | `batt-interface.sh` | t41 11/0; A/B on both phones, daemon pid unchanged: A blind/blocked, B healed |
-| 15 | `temp_now` coerced an unreadable sensor to 250 (25 °C), so the thermal limit silently stopped being enforced with nothing anywhere saying so | `accd.sh` | t42 9/0; outage and recovery both in the flight log, once per transition |
-| 16 | `.testingsw` was an empty marker, so a scan killed by SIGKILL was indistinguishable from one in progress | `misc-functions.sh`, `acc.sh` | now carries the scanning pid; `-f` consumers unaffected |
+| 15 | `temp_now` coerced an unreadable sensor to 250 (25 °C), so the thermal limit silently stopped being enforced with nothing anywhere saying so | `accd.sh` | t42 9/0; sandbox: 2 log lines across 4 failing reads + recovery. **NOT yet on a phone** |
+| 16 | `.testingsw` was an empty marker, so a scan killed by SIGKILL was indistinguishable from one in progress | `misc-functions.sh`, `acc.sh` | source only. **NOT yet on a phone** |
 
 **Silent ones** (no user could have reported): 4, 5, 6, 12, 14, 15.
 
