@@ -48,19 +48,39 @@ wl(){ _n=$(wc -l < $TD/.write-ledger 2>/dev/null); isnum "$_n" && echo "$_n" || 
 
 # Counter-based and adaptive: the current sensor's sign is per-device and flips on some phones, and
 # the counter is quantised, so wait for it to actually move rather than dividing by a fixed window.
+# Rate, with the instrument named. Two sources, because neither is reliable alone:
+#
+#   charge_counter  sign-convention-free, but QUANTISED (a Mi A3 steps 28600 uAh) and it can stop
+#                   updating entirely - observed frozen at one value for 270s on the A3 while the
+#                   level climbed 1%. Every "0 mA" this suite reported on that phone came from that.
+#   current_now     fine-grained and live, but its SIGN is per-device and can flip with the charge
+#                   path, which is what ACC's .dpol_unstable records.
+#
+# So: prefer the counter when it actually moves, fall back to the signed current when it does not,
+# and print which one answered. A rate whose source is unknown is not evidence.
+RATE_SRC=""
 rate(){
   _a=$(cc); _t0=$(date +%s); _el=0
-  while [ $_el -lt 120 ]; do
+  while [ $_el -lt 90 ]; do
     sleep 5; _el=$(( _el + 5 )); _b=$(cc)
-    case "${_a:-x}${_b:-x}" in *x*) echo ""; return;; esac
-    [ "$(( _b - _a ))" -ne 0 ] && { _t1=$(date +%s); _dt=$(( _t1 - _t0 ))
-      [ "$_dt" -gt 0 ] 2>/dev/null || _dt=$_el; echo $(( (_b - _a) * 3600 / _dt / 1000 )); return; }
-    if [ $_el -ge 25 ]; then
-      _im=$(rd $G/current_now); _im=${_im#-}
-      isnum "$_im" && [ "$_im" -lt 120000 ] && { echo 0; return; }
+    if [ -n "${_a:-}" ] && [ -n "${_b:-}" ] && [ "$(( _b - _a ))" -ne 0 ]; then
+      _t1=$(date +%s); _dt=$(( _t1 - _t0 )); [ "$_dt" -gt 0 ] 2>/dev/null || _dt=$_el
+      RATE_SRC="counter/${_dt}s"
+      echo $(( (_b - _a) * 3600 / _dt / 1000 )); return
     fi
   done
-  echo 0
+  # Counter never moved. Fall back to the current sensor, signed by the polarity ACC has learned.
+  _i=$(rd $G/current_now)
+  case "${_i:-x}" in ''|*[!0-9-]*) RATE_SRC="none"; echo ""; return;; esac
+  _p=$(sed -n 's/^_DPOL=//p' $TD/.batt-interface.sh 2>/dev/null)
+  # _DPOL names the sign the pack reads while DISCHARGING, so charging is the opposite of it.
+  case "$_p" in
+    '-') _sig=$_i;;                                   # discharge reads '-', so + is charging
+    '+') case "$_i" in -*) _sig=${_i#-};; *) _sig=-$_i;; esac;;   # discharge reads '+', so - is charging
+    *)   _sig=$_i;;
+  esac
+  RATE_SRC="current/frozen-counter"
+  echo $(( _sig / 1000 ))
 }
 vbus(){ _m=0; for _d in /sys/class/power_supply/*; do
     case "${_d##*/}" in battery|bms|maxfg|*fuelgauge*) continue;; esac
@@ -117,7 +137,7 @@ log ""
 _on=no; for _f in /sys/class/power_supply/*/online; do [ "$(rd "$_f")" = 1 ] && _on=yes; done
 [ "$_on" = yes ] || { log "NOT PLUGGED. Every scenario needs a charger. Nothing changed."; exit 0; }
 FREE=$(rate)
-log "free rate: ${FREE:-?} mA"
+log "free rate: ${FREE:-?} mA   (source: ${RATE_SRC:-?})"
 log ""
 
 # =================================================================================================
@@ -258,6 +278,7 @@ else
     _lv0=$(lvl)
     log "  throttle applied: pack $(( _pv / 1000 )) mV, voltage cap 3700 mV, current cap 300 mA"
     log "  screen during this scenario: $(scr)   (a lit panel is a legitimate way to force the state)"
+    log "  rate under the load: $(rate) mA (source: ${RATE_SRC:-?})"
     log "  ACC's verdict under the load: '${_as:-?}' (needs to be NOT Charging for O1 to arise)"
     if [ "$_as" = Charging ]; then
       log "  INCONCLUSIVE - the load was not enough to stop the charge, so is_charging stays true and"
