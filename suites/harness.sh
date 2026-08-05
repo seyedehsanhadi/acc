@@ -282,12 +282,26 @@ log "      ledger grew $_wrote lines in ${W_LEDGER}s unplugged"
 # --- L3.3 drain rate, measured properly ----------------------------------------------------------
 # A phone that drains fast overnight is the single most common "ACC broke my phone" report, and it
 # is almost never ACC. Measure it so the number exists rather than being argued about.
+# The charge counter is QUANTISED - a Pixel 6a steps about 20000 uAh at a time, a Mi A3 about 28600.
+# A window shorter than a couple of steps cannot express a rate: it reports one whole quantum divided
+# by the window, which is why a 90s sample read 800 mA on a phone that a 300s sample read at 216 mA.
+# Both saw exactly one step. So measure until at least TWO steps have landed, and if the ceiling
+# arrives first, say the resolution was insufficient rather than publishing an artifact.
 _l0=$(rd $G/capacity); _t0=$(date +%s); _cc0=$(rd $G/charge_counter)
-sleep $W_DRAIN
+_steps=0; _prev=$_cc0; _el=0; _lim=$(( W_DRAIN * 3 ))
+while [ $_el -lt $_lim ]; do
+  sleep 10; _el=$(( _el + 10 ))
+  _cur=$(rd $G/charge_counter)
+  isnum "${_cur#-}" || continue
+  [ "$_cur" != "$_prev" ] && { _steps=$(( _steps + 1 )); _prev=$_cur; }
+  [ $_steps -ge 2 ] && [ $_el -ge $W_DRAIN ] && break
+done
 _l1=$(rd $G/capacity); _t1=$(date +%s); _cc1=$(rd $G/charge_counter)
 _dt=$(( _t1 - _t0 ))
 log "      over ${_dt}s: level $_l0% -> $_l1%   counter ${_cc0:-?} -> ${_cc1:-?}"
-if isnum "$_cc0" && isnum "$_cc1"; then
+if [ "$_steps" -lt 2 ]; then
+  sk "drain rate -- the counter moved $_steps time(s) in ${_dt}s; too coarse here to express a rate" L3-drain
+elif isnum "$_cc0" && isnum "$_cc1"; then
   _duah=$(( _cc0 - _cc1 ))
   _mah_h=$(( _duah * 3600 / _dt / 1000 ))
   log "      drain: ${_duah} uAh in ${_dt}s = about ${_mah_h} mA average"
