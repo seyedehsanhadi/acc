@@ -122,6 +122,31 @@ for _c in /sys/class/power_supply/*/capacity; do
   [ -n "$(rd "$_c")" ] && [ -n "$(rd "$_d/status")" ] && { G=$_d; break; }
 done
 
+# Screen state. It is not a detail: the panel draws 200-500 mA, which on a 500 mA supply is the
+# entire budget, so a phone with the screen on can be net-negative with NO limit set at all. Every
+# rate below is meaningless without it, and it is the difference between "the cap starved the phone"
+# and "the screen did". Read once per call rather than per sample - dumpsys forks.
+scr(){
+  # mScreenState from `dumpsys display` is the one signal that reads correctly on both test phones.
+  # Checked against the alternatives: `Display Power: state=` does not exist on Android 16, and the
+  # A3's backlight actual_brightness reads 0 while the screen is genuinely on. mWakefulness is the
+  # fallback, but it describes the DEVICE not the panel - a wakelock keeps it Awake with the screen
+  # off - so it is only consulted when mScreenState is unavailable.
+  _w=$(dumpsys display 2>/dev/null | grep -o 'mScreenState=[A-Z_]*' | head -1 | cut -d= -f2)
+  case "${_w:-}" in ON) echo on; return;; OFF|DOZE*) echo off; return;; esac
+  _w=$(dumpsys power 2>/dev/null | grep -o 'mWakefulness=[A-Za-z]*' | head -1 | cut -d= -f2)
+  case "${_w:-}" in
+    Awake) echo on;;
+    Asleep|Dozing) echo off;;
+    *) for _b in /sys/class/backlight/*/actual_brightness /sys/class/backlight/*/brightness; do
+         [ -f "$_b" ] || continue
+         _v=$(rd "$_b"); case "${_v:-x}" in ''|*[!0-9]*) continue;; esac
+         [ "$_v" -gt 0 ] && { echo on; return; } || { echo off; return; }
+       done
+       echo unknown;;
+  esac
+}
+
 # ---- save / restore ----------------------------------------------------------------------------
 S_C=$(sed -n 's/^capacity=(//p' $DD/config.txt | tr -d ')')
 S_T=$(sed -n 's/^temperature=(//p' $DD/config.txt | tr -d ')')
@@ -180,6 +205,7 @@ elif [ "$_online" = no ] || [ "$_icl" -eq 0 ]; then COND=dead-cable
 elif [ "$_icl" -ge 1500000 ]; then COND=fast
 else COND=slow; fi
 log "condition : $COND  (cable=$_cable online=$_online icl=$_icl)"
+log "screen    : $(scr)   (a lit panel draws 200-500 mA and skews every rate below)"
 : > "$TSV"
 
 alive && ok "daemon is running" L0-daemon || no "daemon is NOT running" L0-daemon

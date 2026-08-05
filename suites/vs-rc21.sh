@@ -68,6 +68,31 @@ vbus(){ _m=0; for _d in /sys/class/power_supply/*; do
     _v=$(rd $_d/voltage_now); isnum "$_v" && [ "$_v" -gt "$_m" ] && _m=$_v
   done; echo "$_m"; }
 
+# Screen state. It is not a detail: the panel draws 200-500 mA, which on a 500 mA supply is the
+# entire budget, so a phone with the screen on can be net-negative with NO limit set at all. Every
+# rate below is meaningless without it, and it is the difference between "the cap starved the phone"
+# and "the screen did". Read once per call rather than per sample - dumpsys forks.
+scr(){
+  # mScreenState from `dumpsys display` is the one signal that reads correctly on both test phones.
+  # Checked against the alternatives: `Display Power: state=` does not exist on Android 16, and the
+  # A3's backlight actual_brightness reads 0 while the screen is genuinely on. mWakefulness is the
+  # fallback, but it describes the DEVICE not the panel - a wakelock keeps it Awake with the screen
+  # off - so it is only consulted when mScreenState is unavailable.
+  _w=$(dumpsys display 2>/dev/null | grep -o 'mScreenState=[A-Z_]*' | head -1 | cut -d= -f2)
+  case "${_w:-}" in ON) echo on; return;; OFF|DOZE*) echo off; return;; esac
+  _w=$(dumpsys power 2>/dev/null | grep -o 'mWakefulness=[A-Za-z]*' | head -1 | cut -d= -f2)
+  case "${_w:-}" in
+    Awake) echo on;;
+    Asleep|Dozing) echo off;;
+    *) for _b in /sys/class/backlight/*/actual_brightness /sys/class/backlight/*/brightness; do
+         [ -f "$_b" ] || continue
+         _v=$(rd "$_b"); case "${_v:-x}" in ''|*[!0-9]*) continue;; esac
+         [ "$_v" -gt 0 ] && { echo on; return; } || { echo off; return; }
+       done
+       echo unknown;;
+  esac
+}
+
 S_C=$(sed -n 's/^capacity=(//p' $DD/config.txt | tr -d ')')
 S_T=$(sed -n 's/^temperature=(//p' $DD/config.txt | tr -d ')')
 S_R=$(echo $S_C|cut -d' ' -f3); S_P=$(echo $S_C|cut -d' ' -f4)
@@ -85,6 +110,8 @@ log "build   : $BUILD"
 log "device  : $(getprop ro.product.device)"
 log "level   : $(lvl)%   temp $(tmpC)C"
 log "supply  : online=$(rd $U/online) icl=$(rd $U/current_max) vbus=$(vbus) type=$(rd $U/real_type)"
+SCR=$(scr)
+log "screen  : $SCR   (the panel draws 200-500 mA; on a slow supply that is the whole budget)"
 log ""
 
 _on=no; for _f in /sys/class/power_supply/*/online; do [ "$(rd "$_f")" = 1 ] && _on=yes; done
@@ -197,7 +224,14 @@ if want S5; then
 log "S5. O1: does a binary limit still hold when a throttle has starved the charge?"
 # Needs a SLOW supply. The cap has to be tight enough that the phone consumes more than it draws,
 # which is what makes is_charging false and hides both binary limits from the charging branch.
-if [ "${FREE:-0}" -gt 900 ] 2>/dev/null; then
+if [ "$(scr)" = on ]; then
+  # With the screen on, the PANEL starves the phone, not the cap. The switch might still be held
+  # correctly, but the scenario would not have demonstrated what it claims to: O1 is specifically
+  # about a THROTTLE hiding the limit from the charging branch.
+  log "  skip - the screen is ON. It draws 200-500 mA, so it would be the thing starving the"
+  log "         phone rather than the 300 mA cap, and the verdict would not mean what it says."
+  log "         Turn the screen off and re-run: sh vs-rc21.sh S5"
+elif [ "${FREE:-0}" -gt 900 ] 2>/dev/null; then
   log "  skip - this supply gives ${FREE} mA. Use the SLOW charger (laptop USB-A);"
   log "         on a strong supply a cap cannot starve the phone and O1 cannot arise."
 else
