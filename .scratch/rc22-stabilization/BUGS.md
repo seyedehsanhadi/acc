@@ -1,12 +1,18 @@
 # ACC bug register — rc21 → rc22
 
-Everything found, fixed, or still open. Baseline is rc21 `1406274`, current build `202505304`.
+Everything found, fixed, or still open. Baseline is rc21 `1406274`, current build `202505310`.
 
-## A. Fixed (18)
+## A. Fixed (21)
 
-Bugs 1-15 and 17-20 are hardware-verified on the A3, the Pixel, or both. **16 is source-only** and
-flagged as such in the table. Current build `202505309`. Pixel: unplugged 56/56, plugged harness 56 pass / 0 fail / 8 skip (the
-skips are the voltage subsets this phone genuinely cannot do). A3 grid on a QC charger: 19/2.
+All hardware-verified on the A3, the Pixel, or both, except **16**, which is source-only and flagged
+as such in the table.
+
+Coverage at `202505310`, both switch classes and all three supply conditions:
+
+| | unplugged | slow (500 mA) | fast |
+|---|---|---|---|
+| A3 (generic `input_suspend`) | 53 / 0 | O5: 6 trials, all <= 15 s | 20 / 21 (its charger drops out) |
+| Pixel 6a (native `charge_stop_level`) | 56 / 0 | 53 / 0 | 56 / 0 |
 
 | # | Bug | Where | Proof |
 |---|---|---|---|
@@ -29,6 +35,7 @@ skips are the voltage subsets this phone genuinely cannot do). A3 grid on a QC c
 | 19 | A voltage limit was stored on a phone with no voltage control node, so AccA showed a limit nothing could apply | `set-ch-volt.sh` | Pixel A/B: `(3900)` -> `()`; the grid now honestly SKIPS the 8 voltage subsets instead of failing them |
 | 18 | **Current caps silently did nothing.** The rc22 apply-side marker guard refuses to write a current node while `.mcc-custom` is absent, but `set_ch_curr` created that marker AFTER the apply, so the first apply was always skipped. Config, node list, marker and `acc -i` all reported a limit that was never written | `set-ch-curr.sh` | t43 7/0; Pixel A/B, 500 mA cap on 2.2 A: A wrote **zero** nodes, rate 1440 mA; B wrote 6 nodes, rate 576 mA. Grid confirms: current-cap row went FAIL to PASS |
 | 17 | The daemon never republished its own interface cache. It sources the file once at init and runs from memory, so losing the file cost it nothing and it never noticed — but that file is what `acc`, AccA and switch-scan read | `accd.sh`, `batt-interface.sh` | A/B both phones, daemon pid unchanged: A 480 s at 0 bytes, B healed in 20 s with polarity preserved (`+` A3, `-` Pixel) |
+| 21 | The learned charge polarity was lost whenever the cache was republished: `_cache_republish` wrote `_DPOL` from a variable the daemon's main shell does not always hold, so ACC had to re-derive direction from scratch | `misc-functions.sh`, `batt-interface.sh` | A3: `.dpol='+'` seeded, polarity survived a live rebuild. Sandbox covers all 4 states; the `|| :` guard prevents a `set -eu` abort |
 | 16 | `.testingsw` was an empty marker, so a scan killed by SIGKILL was indistinguishable from one in progress | `misc-functions.sh`, `acc.sh` | source only. **NOT yet on a phone** |
 
 **Silent ones** (no user could have reported): 4, 5, 6, 12, 14, 15.
