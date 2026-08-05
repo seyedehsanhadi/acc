@@ -222,38 +222,56 @@ fi
 # =================================================================================================
 if want S5; then
 log "S5. O1: does a binary limit still hold when a throttle has starved the charge?"
-# Needs a SLOW supply. The cap has to be tight enough that the phone consumes more than it draws,
-# which is what makes is_charging false and hides both binary limits from the charging branch.
+# Two things this has to get right, and the first version got both wrong.
+#
+# FORCING the condition. O1 needs is_charging to be FALSE while plugged, because a throttle stopped
+# the charge. A 300 mA current cap does not achieve that on a phone drawing ~200 mA - it keeps
+# charging slowly, is_charging stays true, and the ordinary pause path handles everything. A VOLTAGE
+# cap below the pack voltage stops the charge outright, which is the reliable way in.
+#
+# ATTRIBUTING the result. The switch being cut proves nothing on its own: the ordinary path cuts it
+# too, and that is what the first version measured - it reported the limit held while the O1 guard
+# had never run. The guard logs a line of its own, so the ledger is the only honest evidence.
 if [ "$(scr)" = on ]; then
-  # With the screen on, the PANEL starves the phone, not the cap. The switch might still be held
-  # correctly, but the scenario would not have demonstrated what it claims to: O1 is specifically
-  # about a THROTTLE hiding the limit from the charging branch.
-  log "  skip - the screen is ON. It draws 200-500 mA, so it would be the thing starving the"
-  log "         phone rather than the 300 mA cap, and the verdict would not mean what it says."
-  log "         Turn the screen off and re-run: sh vs-rc21.sh S5"
-elif [ "${FREE:-0}" -gt 900 ] 2>/dev/null; then
-  log "  skip - this supply gives ${FREE} mA. Use the SLOW charger (laptop USB-A);"
-  log "         on a strong supply a cap cannot starve the phone and O1 cannot arise."
+  log "  skip - the screen is ON; it would be the thing starving the phone, not the throttle."
 else
-  _L=$(lvl)
-  acc -s resume_capacity=$(( _L - 3 )) pause_capacity=$(( _L - 1 )) >/dev/null 2>&1
-  acc -s max_charging_current=300 >/dev/null 2>&1
-  sleep 60
-  SW=$(sed -n 's/^chargingSwitch=//p' $DD/config.txt | tr -d '()')
-  SWN=$(echo $SW | cut -d' ' -f1); SWOFF=$(echo $SW | cut -d' ' -f3)
-  _node=$(rd "$SWN"); _r=$(rate)
-  _held=no
-  [ "$_node" = "$SWOFF" ] && _held=yes
-  case "$SWOFF" in pcap) _l=$(lvl); isnum "$_node" && [ "$_node" -le "$_l" ] 2>/dev/null && _held=yes;; esac
-  log "  level $(lvl)% vs pause $(( _L - 1 ))%, cap 300 mA, rate ${_r:-?} mA"
-  log "  switch node $SWN = '$_node' (off value '$SWOFF') -> limit held: $_held"
-  if [ "$_held" = yes ]; then
-    vd "S5 LIMIT HELD by the pause even though a throttle stopped the charge"
+  _pv=$(rd $G/voltage_now)
+  if ! isnum "$_pv" || [ "${_pv:-0}" -lt 3600000 ]; then
+    log "  skip - pack voltage unreadable or already very low; cannot place a cap under it."
   else
-    vd "S5 LIMIT NOT HELD - the switch is ON, only the throttle is stopping the charge (O1)"
+    _w0=$(wl)
+    # Well under the pack, so the charge stops rather than merely slowing.
+    acc -s max_charging_voltage=3700 >/dev/null 2>&1
+    acc -s max_charging_current=300 >/dev/null 2>&1
+    sleep 50
+    _r0=$(rate)
+    log "  throttle applied: pack $(( _pv / 1000 )) mV, voltage cap 3700 mV, current cap 300 mA"
+    log "  rate under the throttle: ${_r0:-?} mA (needs to be at or below zero for O1 to arise)"
+    if [ "${_r0:-1}" -gt 60 ] 2>/dev/null; then
+      log "  skip - the throttle did not stop the charge (${_r0} mA), so is_charging stays true and"
+      log "         the ordinary pause path handles it. O1 cannot arise here."
+    else
+      # Now reach a binary limit while the charge is already stopped.
+      _L=$(lvl)
+      acc -s resume_capacity=$(( _L - 3 )) pause_capacity=$(( _L - 1 )) >/dev/null 2>&1
+      sleep 45
+      _fired=$(tail -n +$(( _w0 + 1 )) $TD/.write-ledger 2>/dev/null | grep -c 'O1 guard' 2>/dev/null || :)
+      case "${_fired:-x}" in ''|*[!0-9]*) _fired=0;; esac
+      SW=$(sed -n 's/^chargingSwitch=//p' $DD/config.txt | tr -d '()')
+      SWN=$(echo $SW | cut -d' ' -f1); SWOFF=$(echo $SW | cut -d' ' -f3)
+      _node=$(rd "$SWN")
+      log "  level $(lvl)% vs pause $(( _L - 1 ))%, switch $SWN='$_node' (off='$SWOFF')"
+      log "  O1 guard entries in the ledger: $_fired"
+      if [ "$_fired" -gt 0 ]; then
+        vd "S5 O1 GUARD FIRED and asserted the pause - the limit no longer depends on the throttle"
+      else
+        vd "S5 O1 GUARD DID NOT FIRE - the limit is held only by the throttle, if at all (O1)"
+      fi
+    fi
+    acc -s max_charging_voltage= >/dev/null 2>&1
+    acc -s max_charging_current= >/dev/null 2>&1
+    acc -s resume_capacity=$S_R pause_capacity=$S_P >/dev/null 2>&1
   fi
-  acc -s max_charging_current= >/dev/null 2>&1
-  acc -s resume_capacity=$S_R pause_capacity=$S_P >/dev/null 2>&1
 fi
 log ""
 fi
