@@ -313,8 +313,42 @@ fi
 if [ "$COND" = fast ] || [ "$COND" = slow ]; then
 if want all || want grid; then
 sec "L4. THE FOUR-LIMIT GRID - every subset of capacity/temperature/current/voltage"
-log "      (populated when charging; see LIMITS.md for the expected outcome of each row)"
-sk "grid -- runs in the charging pass, not this one" L4-grid
+
+# The grid is limit-matrix.sh, not a copy of it. It already knows the things that are easy to get
+# wrong here: that a native firmware limit has no off value so "node != off" is meaningless, that
+# PAUSED and BLOCKED look identical on a current meter, and that charge direction has to come from a
+# counter window rather than a current sign. Reimplementing that inline is how this suite ended up
+# as a pile of one-off scripts in the first place. It prints PASS/FAIL/skip in the same shape, so
+# its verdicts fold straight into this run's totals and TSV.
+MX=
+for _m in "$(dirname "$0")/limit-matrix.sh" /data/local/tmp/limit-matrix.sh           $DL/acc-limit-matrix.sh /data/adb/vr25/acc/suites/limit-matrix.sh; do
+  [ -f "$_m" ] && { MX=$_m; break; }
+done
+
+if [ -z "$MX" ]; then
+  sk "grid -- limit-matrix.sh not found on this phone" L4-grid
+elif [ "$COND" = unplugged ] || [ "$COND" = dead-cable ]; then
+  # Not a failure and not silence: every row needs a live charge to observe, so say what was not run.
+  sk "grid -- needs a charging phone, this run is $COND (15 subsets not covered)" L4-grid
+else
+  log "      running the 15-subset grid from $MX"
+  _mxout=$DL/acc-harness-grid-$$.txt
+  sh "$MX" > "$_mxout" 2>&1 || :
+  _gp=0; _gf=0; _gs=0
+  while IFS= read -r _line; do
+    case "$_line" in
+      "  PASS  "*) _gp=$((_gp+1)); ok "grid: ${_line#  PASS  }" L4-grid;;
+      "  FAIL  "*) _gf=$((_gf+1)); no "grid: ${_line#  FAIL  }" L4-grid;;
+      "  skip  "*) _gs=$((_gs+1)); sk "grid: ${_line#  skip  }" L4-grid;;
+    esac
+  done < "$_mxout"
+  if [ $((_gp + _gf + _gs)) -eq 0 ]; then
+    # A grid that produced no verdicts at all has not passed; it has failed to run.
+    no "grid produced no verdicts - it did not run. Output kept at $_mxout" L4-grid
+  else
+    log "      grid: $_gp passed, $_gf failed, $_gs skipped (full output: $_mxout)"
+  fi
+fi
 fi
 fi
 
