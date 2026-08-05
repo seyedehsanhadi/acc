@@ -39,7 +39,6 @@ skips are the voltage subsets this phone genuinely cannot do). A3 grid on a QC c
 |---|---|---|---|
 | O1 | Two throttles tight enough to stop the charge suppress the binary pause. **Reproduced on the A3 grid** (`CTA-`: level 71 >= pause 71 and 34 C > max 32 C, both pauses skipped because the 381 mA cap made the pack net-negative and `is_charging` went false). Did NOT reproduce on the Pixel. ACC stops believing it is charging, so capacity/temperature never assert. Nothing is charging so nothing is harmed, but the hold depends on the throttle | low | needs a main-loop restructure; not safe unsoaked |
 | ~~O6~~ FIXED as bug 19 | On a phone with no voltage control node, `max_charging_voltage` prints "No voltage control file found", then prints a success tick and **persists the value anyway**. AccA reads config, not the CLI, so it shows an enforced-looking limit that nothing applies. Pixel 6a: `ch-volt-ctrl-files` absent | low | not safe to fix late in a stabilisation pass: a missing ctrl-file means either "unsupported" or "not resolved yet, phone has not charged since boot", and the current path persists intent deliberately so the daemon can apply at the next charging tick. Needs the two cases separated, then a soak |
-| O5 | Resume latency in the slow condition: after an input-suspend cut, raising the limit took ~4 min to resume where the fast condition took seconds | **unknown** | not yet measured properly — could be a nap, config propagation, or the recovery path |
 
 ## C. Open — reported, unconfirmed on the reporter's device
 
@@ -146,3 +145,24 @@ produced zero re-kicks, and a single gated kick took it from 400 mA back to 1144
 So the resistance is real and the storm made it much worse, and prevented recovery. Both were needed
 to produce what the tester saw. The lesson is narrower than "it is the cable": a hardware weakness and
 a software defect can produce one symptom together, and proving one does not clear the other.
+
+## J. O5 closed: it does not reproduce, and bug 20 probably caused it
+
+O5 was "after an input-suspend cut, raising the limit took ~4 min to resume on a slow supply".
+Measured on the A3 on a real 500 mA source, on the generic `input_suspend` switch the report was
+about, with the input confirmed cut on every trial:
+
+| trigger | paused after | resumed after |
+|---|---|---|
+| capacity, 3 runs | 2 s, 4 s, 4 s | 15 s, 6 s, 7 s |
+| temperature, 3 runs | 2 s, 2 s, 4 s | 15 s, 15 s, 6 s |
+
+Worst case 15 s. Both pause paths were timed separately because capacity and temperature are
+different terms in the daemon, and three runs each because one measurement is an anecdote.
+
+The likely original cause is bug 20. Before it was fixed, ACC fired `apsd_rerun` every 15-62 seconds
+regardless of the rate limit, and on a slow supply that re-negotiates the input from nothing each
+time. A charge that has to survive a re-detection every half minute on a 500 mA source is exactly
+how a resume takes minutes instead of seconds. The Pixel's native firmware limit never drops the
+input at all, which is why its 6 s result could not answer this - different switch class, different
+failure mode.
