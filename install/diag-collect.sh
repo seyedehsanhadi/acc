@@ -265,6 +265,19 @@ cpf crash/acca-breadcrumbs.txt "AccA breadcrumbs (recent app events, flushed on 
 cpf acc-logs/flight.log     "acc flight log (charge decisions; 100% unique)" "$DD/logs/flight.log"
 cpf acc-logs/write.log      "acc write.log (panic-write ledger; reboot cause)" "$DD/logs/write.log"
 cpf acc-logs/warnings.log   "acc warnings" "$DD/logs/warnings.log"
+# rc22: THE artifact for "my phone turned itself off". accd's shutdown() records the level,
+# temperature, status and the whole config immediately before powering the device off, and syncs it
+# so it survives. It also records a REFUSED shutdown (offline charging mode). Powering a phone off
+# is the most drastic thing this module does, and this file is the only place that says whether it
+# did -- yet the collector never gathered it, so a report of an overnight power-off arrived with no
+# way to answer the question either way. Found chasing exactly such a report on a fleur.
+cpf acc-logs/shutdown-trace.log "acc shutdown trace (WAS IT ACC? every power-off and refusal, with the state at that moment)" "$DD/logs/shutdown-trace.log"
+# Kernel-side forensics for the same question: if ACC did NOT do it, these say who did.
+cpf kernel/last_kmsg.txt    "previous boot's kernel log (power-off / panic cause)" /proc/last_kmsg
+for _ps in /sys/fs/pstore/console-ramoops-0 /sys/fs/pstore/console-ramoops /sys/fs/pstore/dmesg-ramoops-0; do
+  [ -f "$_ps" ] && cpf "kernel/pstore-${_ps##*/}.txt" "pstore from the previous boot" "$_ps"
+done
+grab kernel/bootreason.txt "why the device last booted" sh -c "getprop | grep -iE 'bootreason|boot.reason|last.reboot' 2>/dev/null"
 cpf acc-logs/early-cap.log  "acc early-cap (boot-time charge guard)" "$DD/logs/early-cap.log"
 tailcpf acc-logs/init-tail.log    "acc init (recent)"    "$DD/logs/init.log" 800
 tailcpf acc-logs/install-tail.log "acc install (recent)" "$DD/logs/install.log" 800
