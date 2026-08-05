@@ -58,20 +58,19 @@ wl(){ _n=$(wc -l < $TD/.write-ledger 2>/dev/null); isnum "$_n" && echo "$_n" || 
 #
 # So: prefer the counter when it actually moves, fall back to the signed current when it does not,
 # and print which one answered. A rate whose source is unknown is not evidence.
-RATE_SRC=""
 rate(){
   _a=$(cc); _t0=$(date +%s); _el=0
   while [ $_el -lt 90 ]; do
     sleep 5; _el=$(( _el + 5 )); _b=$(cc)
     if [ -n "${_a:-}" ] && [ -n "${_b:-}" ] && [ "$(( _b - _a ))" -ne 0 ]; then
       _t1=$(date +%s); _dt=$(( _t1 - _t0 )); [ "$_dt" -gt 0 ] 2>/dev/null || _dt=$_el
-      RATE_SRC="counter/${_dt}s"
+      echo "counter/${_dt}s" > $TD/.ratesrc 2>/dev/null || :
       echo $(( (_b - _a) * 3600 / _dt / 1000 )); return
     fi
   done
   # Counter never moved. Fall back to the current sensor, signed by the polarity ACC has learned.
   _i=$(rd $G/current_now)
-  case "${_i:-x}" in ''|*[!0-9-]*) RATE_SRC="none"; echo ""; return;; esac
+  case "${_i:-x}" in ''|*[!0-9-]*) echo "none" > $TD/.ratesrc 2>/dev/null || :; echo ""; return;; esac
   _p=$(sed -n 's/^_DPOL=//p' $TD/.batt-interface.sh 2>/dev/null)
   # _DPOL names the sign the pack reads while DISCHARGING, so charging is the opposite of it.
   case "$_p" in
@@ -79,7 +78,7 @@ rate(){
     '+') case "$_i" in -*) _sig=${_i#-};; *) _sig=-$_i;; esac;;   # discharge reads '+', so - is charging
     *)   _sig=$_i;;
   esac
-  RATE_SRC="current/frozen-counter"
+  echo "current/frozen-counter" > $TD/.ratesrc 2>/dev/null || :
   echo $(( _sig / 1000 ))
 }
 vbus(){ _m=0; for _d in /sys/class/power_supply/*; do
@@ -137,7 +136,7 @@ log ""
 _on=no; for _f in /sys/class/power_supply/*/online; do [ "$(rd "$_f")" = 1 ] && _on=yes; done
 [ "$_on" = yes ] || { log "NOT PLUGGED. Every scenario needs a charger. Nothing changed."; exit 0; }
 FREE=$(rate)
-log "free rate: ${FREE:-?} mA   (source: ${RATE_SRC:-?})"
+log "free rate: ${FREE:-?} mA   (source: $(cat $TD/.ratesrc 2>/dev/null || echo ?))"
 log ""
 
 # =================================================================================================
@@ -278,7 +277,7 @@ else
     _lv0=$(lvl)
     log "  throttle applied: pack $(( _pv / 1000 )) mV, voltage cap 3700 mV, current cap 300 mA"
     log "  screen during this scenario: $(scr)   (a lit panel is a legitimate way to force the state)"
-    log "  rate under the load: $(rate) mA (source: ${RATE_SRC:-?})"
+    log "  rate under the load: $(rate) mA (source: $(cat $TD/.ratesrc 2>/dev/null || echo ?))"
     log "  ACC's verdict under the load: '${_as:-?}' (needs to be NOT Charging for O1 to arise)"
     if [ "$_as" = Charging ]; then
       log "  INCONCLUSIVE - the load was not enough to stop the charge, so is_charging stays true and"

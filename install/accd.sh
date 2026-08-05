@@ -1062,6 +1062,21 @@ if ! $_INIT; then
 
         # O1: assert a binary limit that the charging branch could not see.
         #
+        # STATUS, honestly: this guard has NEVER been observed to fire on hardware, and the condition
+        # it exists for has never been demonstrated. It is kept as a cheap backstop, not as a fix for
+        # a proven defect, and it should not be described as one.
+        #
+        # What was actually tried, on a Mi A3 on a 500 mA laptop port: a 300 mA current cap, a 3700 mV
+        # voltage cap under a 3928 mV pack, the screen on, and eight busy cores. That drove `acc -i`
+        # to report Discharging - but the DAEMON's own is_charging stayed true throughout (every
+        # flight.log line tagged Charging), so the ordinary pause path ran and cut input_suspend
+        # correctly. An unconditional debug line placed here logged ZERO times across the whole run:
+        # this branch was never entered.
+        #
+        # The original O1 evidence was one grid row sampled 40s after applying limits, which is the
+        # same measurement-timing class that produced several false findings in this campaign. The
+        # CLI and the daemon can disagree simply because they sample at different moments.
+        #
         # Both binary limits live inside `if is_charging`, which is right for the normal case - a
         # pause is a response to current flowing. But a current or voltage cap tight enough to stop
         # the charge makes the pack net-negative, is_charging goes false, and the branch above never

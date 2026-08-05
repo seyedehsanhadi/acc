@@ -44,7 +44,7 @@ Coverage at `202505310`, both switch classes and all three supply conditions:
 
 | # | Bug | Severity | Why not yet |
 |---|---|---|---|
-| O1 | Two throttles tight enough to stop the charge suppress the binary pause. **Reproduced on the A3 grid** (`CTA-`: level 71 >= pause 71 and 34 C > max 32 C, both pauses skipped because the 381 mA cap made the pack net-negative and `is_charging` went false). Did NOT reproduce on the Pixel. ACC stops believing it is charging, so capacity/temperature never assert. Nothing is charging so nothing is harmed, but the hold depends on the throttle | low | needs a main-loop restructure; not safe unsoaked |
+| ~~O1~~ NOT REPRODUCIBLE | Two throttles tight enough to stop the charge suppress the binary pause. **Reproduced on the A3 grid** (`CTA-`: level 71 >= pause 71 and 34 C > max 32 C, both pauses skipped because the 381 mA cap made the pack net-negative and `is_charging` went false). Did NOT reproduce on the Pixel. ACC stops believing it is charging, so capacity/temperature never assert. Nothing is charging so nothing is harmed, but the hold depends on the throttle | low | needs a main-loop restructure; not safe unsoaked |
 | ~~O6~~ FIXED as bug 19 | On a phone with no voltage control node, `max_charging_voltage` prints "No voltage control file found", then prints a success tick and **persists the value anyway**. AccA reads config, not the CLI, so it shows an enforced-looking limit that nothing applies. Pixel 6a: `ch-volt-ctrl-files` absent | low | not safe to fix late in a stabilisation pass: a missing ctrl-file means either "unsupported" or "not resolved yet, phone has not charged since boot", and the current path persists intent deliberately so the daemon can apply at the next charging tick. Needs the two cases separated, then a soak |
 
 ## C. Open — reported, unconfirmed on the reporter's device
@@ -173,3 +173,31 @@ time. A charge that has to survive a re-detection every half minute on a 500 mA 
 how a resume takes minutes instead of seconds. The Pixel's native firmware limit never drops the
 input at all, which is why its 6 s result could not answer this - different switch class, different
 failure mode.
+
+## K. O1 could not be reproduced, and the guard has never fired
+
+O1 was accepted on the strength of one A3 grid row: `CTA-`, level 71 against pause 71, 34 C against
+max_temp 32, switch reading ON. Deliberate attempts to reproduce it, all on hardware:
+
+| attempt | result |
+|---|---|
+| 300 mA cap, laptop USB-A (500 mA), screen off | ACC reports Charging - throttle never starved it |
+| + 3700 mV voltage cap under a 3928 mV pack | still Charging |
+| + screen on | still Charging |
+| laptop USB-C (1.2 A), same caps + screen | still Charging, level climbed 54% to 59% |
+| USB-A + caps + screen + **8 busy cores** | `acc -i` reports Discharging - condition looked reached |
+
+The last one was the closest, and it is what settled it. An unconditional debug line at the top of
+the guard's branch logged **zero** times across that entire run. The daemon never entered it: every
+flight.log line was tagged `Charging`, and the ledger shows it cutting `input_suspend` and releasing
+it again through the ORDINARY path. `acc -i` and the daemon disagreed only because they sample at
+different moments.
+
+So the premise - that the daemon stops believing it is charging while plugged with a limit reached -
+was never demonstrated. The original row was sampled 40 s after applying limits, which is the same
+measurement-timing class that produced several false findings in this campaign.
+
+**The guard stays**, because it costs one condition per loop in a branch that is already rare, and if
+the state ever does arise the limit will hold. It is a backstop, not a fix for a proven defect, and
+the code says so. Twelve of these findings were verified by A/B on hardware; this one was not, and it
+is not counted among them.
