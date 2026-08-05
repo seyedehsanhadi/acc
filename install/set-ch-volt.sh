@@ -37,6 +37,24 @@ set_ch_volt() {
     # A numeric SET needs the resolved control files to know which nodes to write.
     grep -q / $TMPDIR/ch-volt-ctrl-files 2>/dev/null || {
       $isAccd || print_no_ctrl_file v
+      # Telling the CLI caller is not enough. write-config persists whatever the CLI parsed,
+      # independently of this function, so the value lands in config anyway - and AccA reads config,
+      # not the CLI. A Pixel 6a showed "No voltage control file found" followed by a success tick,
+      # then displayed an active 3900 mV limit that nothing could ever apply.
+      #
+      # Absent control files mean one of two things, and they need different handling:
+      #   probe has run, found none  -> this device has no voltage node. Drop the value; keeping it
+      #                                 shows a limit that can never act.
+      #   probe has not run yet      -> keep it as intent, exactly as the current path does, so the
+      #                                 daemon applies it at the next charging tick.
+      # The probe resolves current and voltage in one pass, so its current-side output existing is
+      # what says the pass completed. On a phone with no current control either, neither file exists
+      # and this falls through to keeping the value, which is the safe direction.
+      if [ -s $TMPDIR/ch-curr-ctrl-files ] || [ -s $TMPDIR/ch-switches ]; then
+        max_charging_voltage=
+        maxChargingVoltage=()
+        unset mcv
+      fi
       return 0
     }
 
