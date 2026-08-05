@@ -77,8 +77,37 @@ if ! $_INIT; then
   }
 
 
-  temp_now() {  # D10: coerce an empty/garbage temp read to a benign 250 (25.0C) so a transient sensor
-    local _t=; { read -r _t < "$temp"; } 2>/dev/null || :; case "$_t" in ''|*[!0-9-]*) _t=250;; esac; echo "$_t"   # blip can't make a [ $(temp_now) -lt N ] test a syntax error -> set -eu abort -> exxit. Mirrors volt_now/batt_cap. rc19: builtin read, no cat spawn.
+  temp_now() {
+    # D10: an empty or garbage read is coerced to 250 (25.0C) so that a transient sensor blip cannot
+    # turn `[ $(temp_now) -lt N ]` into a syntax error, which under set -eu kills the daemon. The
+    # benign value is deliberate and stays: a high one would fabricate a permanent thermal pause out
+    # of a dead sensor, which is the more dangerous direction. rc19: builtin read, no cat spawn.
+    #
+    # rc22: but 250 is a FABRICATED 25.0C, and while it is in force the temperature limit is not
+    # being enforced at all -- every max_temp test passes and nothing anywhere says so. That is the
+    # one property this had in common with the cache bug: a fail-safe default that is indistinguish-
+    # able from a real reading. The value is unchanged; the outage is now on the record. Logged on
+    # the transition only, so a permanently dead sensor costs one line rather than one per loop, and
+    # written straight to the flight log rather than through flight_rec() to keep temp_now free of
+    # any call that could lead back into it.
+    local _t=
+    { read -r _t < "$temp"; } 2>/dev/null || :
+    case "$_t" in
+      ''|*[!0-9-]*)
+        _t=250
+        if [ ! -f $TMPDIR/.temp-blind ]; then
+          : > $TMPDIR/.temp-blind 2>/dev/null || :
+          echo "$(date +%s 2>/dev/null),,,,,,,temp-sensor-unreadable-limit-not-enforced"             >> "$dataDir/logs/flight.log" 2>/dev/null || :
+        fi
+        ;;
+      *)
+        if [ -f $TMPDIR/.temp-blind ]; then
+          rm -f $TMPDIR/.temp-blind 2>/dev/null || :
+          echo "$(date +%s 2>/dev/null),,,,,,,temp-sensor-readable-again"             >> "$dataDir/logs/flight.log" 2>/dev/null || :
+        fi
+        ;;
+    esac
+    echo "$_t"
   }
 
 

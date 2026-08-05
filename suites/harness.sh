@@ -59,9 +59,12 @@ looping(){
   # stall -- which is how a 22s window reported "nothing is being enforced" on a perfectly healthy
   # phone. Wait past the longest legitimate nap. The naps are interruptible on a config change, so
   # nudge one first: a live daemon then answers in seconds and only a genuinely stuck one costs the
-  # full wait.
+  # full wait. The nudge is a touch on config.txt, because the nap tick breaks on
+  # `[ ! $config -nt $TMPDIR/.nap-ref ]` and the content is unchanged, so it re-reads the same
+  # values. NOT a write to the .wake fifo: `: >` writes no data and wakes nothing, and when the
+  # daemon is dead there is no holder on that fifo, so a real write would block here forever -- in
+  # precisely the case this function exists to detect.
   _a=$(wc -l < $FL 2>/dev/null)
-  : > $TD/.wake 2>/dev/null || :
   touch $DD/config.txt 2>/dev/null || :
   _w=0
   while [ $_w -lt 150 ]; do
@@ -183,6 +186,9 @@ chk L1-13 misc-functions.sh 'rekick_usb() {'                 "every USB re-kick 
 chk L1-13b set-ch-curr.sh 'rekick_usb clear'                 "the clear path re-kicks through that gate"
 chk L1-10 set-ch-curr.sh 'rm \$f 2>/dev/null || :'           "the marker is dropped before the release (clear race)"
 chk L1-14 diag-collect.sh 'shutdown-trace.log'               "the shutdown trace is collected"
+chk L1-15 batt-interface.sh '! _cache_usable; then'          "an unusable cache heals for every caller, not just at init"
+chk L1-15b batt-interface.sh 'mv -f \$TMPDIR/.batt-interface.sh' "the cache write is atomic"
+chk L1-16 accd.sh 'temp-sensor-unreadable'                   "a dead temperature sensor is recorded, not silent"
 fi
 
 # =================================================================================================
