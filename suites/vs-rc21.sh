@@ -232,8 +232,13 @@ log "S5. O1: does a binary limit still hold when a throttle has starved the char
 # ATTRIBUTING the result. The switch being cut proves nothing on its own: the ordinary path cuts it
 # too, and that is what the first version measured - it reported the limit held while the O1 guard
 # had never run. The guard logs a line of its own, so the ledger is the only honest evidence.
-if [ "$(scr)" = on ]; then
-  log "  skip - the screen is ON; it would be the thing starving the phone, not the throttle."
+# The screen is NOT disqualifying here, and the earlier version was wrong to skip on it.
+# The guard's contract is: plugged + a binary limit reached + not charging -> assert the pause. It
+# does not care WHY the charge stopped, and it should not: a throttle, a lit panel and a weak charger
+# all produce the same state, and the limit has to hold in all of them. What matters is recording
+# which one it was, so the result can be read honestly. On a 500 mA supply the panel is often the
+# only load big enough to force the condition at all.
+if false; then :
 else
   _pv=$(rd $G/voltage_now)
   if ! isnum "$_pv" || [ "${_pv:-0}" -lt 3600000 ]; then
@@ -244,12 +249,21 @@ else
     acc -s max_charging_voltage=3700 >/dev/null 2>&1
     acc -s max_charging_current=300 >/dev/null 2>&1
     sleep 50
-    _r0=$(rate)
+    # Ask ACC, do not measure. O1 is defined by is_charging being false, and `acc -i` reports exactly
+    # that arbitrated verdict - so it is the same signal the daemon branches on, not a second opinion.
+    # The counter cannot answer this: the A3 steps 28600 uAh at a time, so a short window reads 0 mA
+    # on a phone that is charging perfectly well. That false negative is what made the previous run
+    # claim the throttle had starved the phone while its level climbed 53% to 54%.
+    _as=$(timeout 20 acc -i 2>/dev/null </dev/null | sed -n 's/^status //p' | head -1)
+    _lv0=$(lvl)
     log "  throttle applied: pack $(( _pv / 1000 )) mV, voltage cap 3700 mV, current cap 300 mA"
-    log "  rate under the throttle: ${_r0:-?} mA (needs to be at or below zero for O1 to arise)"
-    if [ "${_r0:-1}" -gt 60 ] 2>/dev/null; then
-      log "  skip - the throttle did not stop the charge (${_r0} mA), so is_charging stays true and"
-      log "         the ordinary pause path handles it. O1 cannot arise here."
+    log "  screen during this scenario: $(scr)   (a lit panel is a legitimate way to force the state)"
+    log "  ACC's verdict under the load: '${_as:-?}' (needs to be NOT Charging for O1 to arise)"
+    if [ "$_as" = Charging ]; then
+      log "  INCONCLUSIVE - the load was not enough to stop the charge, so is_charging stays true and"
+      log "         the ordinary pause path handles it. O1 cannot arise in this state."
+      log "         To force it on this supply: turn the SCREEN ON (it draws 200-500 mA) and re-run"
+      log "         'sh vs-rc21.sh S5'. The guard must hold the limit whatever stopped the charge."
     else
       # Now reach a binary limit while the charge is already stopped.
       _L=$(lvl)
@@ -257,6 +271,7 @@ else
       sleep 45
       _fired=$(tail -n +$(( _w0 + 1 )) $TD/.write-ledger 2>/dev/null | grep -c 'O1 guard' 2>/dev/null || :)
       case "${_fired:-x}" in ''|*[!0-9]*) _fired=0;; esac
+      log "  level $_lv0% -> $(lvl)% across the window (a rise means it was charging after all)"
       SW=$(sed -n 's/^chargingSwitch=//p' $DD/config.txt | tr -d '()')
       SWN=$(echo $SW | cut -d' ' -f1); SWOFF=$(echo $SW | cut -d' ' -f3)
       _node=$(rd "$SWN")
