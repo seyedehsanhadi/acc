@@ -213,7 +213,10 @@ cycle_switches() {
   local strict=${3:-false}
   local _cc= _cbase= _thr= _mag= _bs= _cs= _rej= _chg_n= _chg_last= _this= _s=
 
-  touch $TMPDIR/.testingsw
+  # The scanning pid, not an empty file: a scan killed with SIGKILL skips its restore trap and
+  # leaves this behind, and a bare marker cannot be told apart from a scan still in progress.
+  # Consumers testing -f are unaffected; one that wants the truth checks /proc for the pid.
+  echo $$ > $TMPDIR/.testingsw 2>/dev/null || touch $TMPDIR/.testingsw
 
   # rc21 (field report: OnePlus SM8250 / KernelSU, probe-crash into EDL): a global stop.
   # journal_check blacklists ONE node per crash-boot, so a device whose charge driver wedges

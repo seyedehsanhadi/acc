@@ -19,17 +19,17 @@ Everything found, fixed, or still open. Baseline is rc21 `1406274`. Six commits 
 | 11 | Cooldown cycle and main resume re-enabled charging on a pre-sleep temperature reading | `accd.sh` | t33 27/0 |
 | 12 | Interface cache rebuilt only when *absent*, not when unusable — an empty file left the daemon blind permanently | `accd.sh` | t40 8/0; truncate → restart → rebuilt |
 | 13 | Two USB re-kick sites bypassed `acc -sk off`, the rate limit, and the ledger | `set-ch-curr.sh` | t35 16/0; `rekick skipped` now visible in production |
+| 15 | `temp_now` coerced an unreadable sensor to 250 (25 °C), so the thermal limit silently stopped being enforced with nothing anywhere saying so | `accd.sh` | t42 9/0; outage and recovery both in the flight log, once per transition |
+| 16 | `.testingsw` was an empty marker, so a scan killed by SIGKILL was indistinguishable from one in progress | `misc-functions.sh`, `acc.sh` | now carries the scanning pid; `-f` consumers unaffected |
 | 14 | An unusable cache healed only at daemon init. A looping daemon never noticed, and `acc -i` sourced an empty file, left every node path unset, and **blocked on stdin** instead of answering — AccA hangs | `batt-interface.sh` | t41 11/0; A/B on both phones, daemon pid unchanged: A blind/blocked, B healed |
 
-**Silent ones** (no user could have reported): 4, 5, 6, 12, 14.
+**Silent ones** (no user could have reported): 4, 5, 6, 12, 14, 15.
 
 ## B. Open — confirmed, not fixed
 
 | # | Bug | Severity | Why not yet |
 |---|---|---|---|
 | O1 | Two throttles tight enough to stop the charge suppress the binary pause. ACC stops believing it is charging, so capacity/temperature never assert. Nothing is charging so nothing is harmed, but the hold depends on the throttle | low | needs a main-loop restructure; not safe unsoaked |
-| O2 | `temp_now` coerces an unreadable sensor to 250 (25 °C) so the thermal limit silently stops being enforced. `volt_now` coerces to 9999, a fail-safe *high*. Voltage fails safe, temperature fails open, nothing warns | **medium** | the coercion prevents a `set -eu` daemon abort; needs a warning path, not a different default |
-| O4 | `.testingsw` can go stale after a killed scan. Nothing in ACC reads it, so charging is unaffected, but external consumers treat it as "scan running" | low | cosmetic to charging |
 | O5 | Resume latency in the slow condition: after an input-suspend cut, raising the limit took ~4 min to resume where the fast condition took seconds | **unknown** | not yet measured properly — could be a nap, config propagation, or the recovery path |
 
 ## C. Open — reported, unconfirmed on the reporter's device
@@ -53,13 +53,13 @@ Everything found, fixed, or still open. Baseline is rc21 `1406274`. Six commits 
 
 ## E. The common cause
 
-Ten of the fourteen fixes are the same mistake in different clothes.
+Eleven of the sixteen fixes are the same mistake in different clothes.
 
 **ACC learns per-device facts and then trusts them absolutely.** Which nodes are the gauge, what unit the current is in, which sign means charging, what the "default" for a node was. Each is a guess that was right once. Nothing tracks confidence, nothing re-validates, and when one is wrong the failure is always silent and always total — `is_charging` goes false and all four limits stop being evaluated together.
 
 Three recurring shapes:
 
-1. **An inference treated as a fact.** `_DPOL`, `_ccd=0` counted as a verdict, `[ -f cache ]` meaning "usable", a probe-time snapshot called a "default". Bugs 1, 2, 3, 9, 12, 14.
+1. **An inference treated as a fact.** `_DPOL`, `_ccd=0` counted as a verdict, `[ -f cache ]` meaning "usable", a probe-time snapshot called a "default", a coerced 25 °C indistinguishable from a measured one. Bugs 1, 2, 3, 9, 12, 14, 15.
 2. **A guard whose condition can never be met.** `.dpol_unstable` armed only by a path that cannot run on a tapering pack; the thermal clamp that only holds above `start`. Bugs 3, 6.
 3. **A decision taken before a sleep and acted on after it.** Cooldown re-enable, main resume. Bug 11.
 

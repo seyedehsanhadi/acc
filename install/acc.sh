@@ -882,7 +882,7 @@ case "${1-}" in
     }
 
     set +e
-    touch $TMPDIR/.testingsw
+    echo $$ > $TMPDIR/.testingsw 2>/dev/null || touch $TMPDIR/.testingsw
     trap exxit EXIT INT TERM HUP
     not_charging && enable_charging > /dev/null
 
