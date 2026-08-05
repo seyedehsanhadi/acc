@@ -36,6 +36,20 @@ FL=$DD/logs/flight.log
 LOCK=$TD/.harness-lock
 WANT=${1:-all}
 
+# QUICK profile. Same checks, shorter windows - nothing is skipped and nothing is scored differently.
+# A shorter sample is less evidence, not different evidence: 12 consecutive honest verdicts is weaker
+# than 40 but it is not a softer test, and every threshold below is a rate or a count that scales
+# with its window. Use the full profile before believing a clean sheet; use this to iterate.
+#   sh harness.sh quick        the quick profile, every layer the condition permits
+#   sh harness.sh quick D3     ... not supported; pass a layer name alone for the full profile
+QUICK=false
+[ "$WANT" = quick ] && { QUICK=true; WANT=all; }
+if $QUICK; then
+  N_VERDICT=12; W_LEDGER=40; W_DRAIN=90; W_CPU=30; W_LOOP=45; N_CHURN=4; INJECTS="ampFactor_=abc battCapacity="
+else
+  N_VERDICT=40; W_LEDGER=120; W_DRAIN=300; W_CPU=60; W_LOOP=150; N_CHURN=10; INJECTS="ampFactor_=0 ampFactor_=abc idleThreshold=999999999 battCapacity="
+fi
+
 DL=/sdcard/Download
 [ -d "$DL" ] && [ -w "$DL" ] || DL=/data/local/tmp
 OUT=$DL/acc-harness-$(date +%Y%m%d-%H%M%S).txt
@@ -67,8 +81,8 @@ looping(){
   _a=$(wc -l < $FL 2>/dev/null)
   touch $DD/config.txt 2>/dev/null || :
   _w=0
-  while [ $_w -lt 150 ]; do
-    sleep 10; _w=$((_w + 10))
+  while [ $_w -lt ${W_LOOP:-150} ]; do
+    sleep 5; _w=$((_w + 5))
     _b=$(wc -l < $FL 2>/dev/null)
     [ "${_b:-0}" -gt "${_a:-0}" ] && return 0
   done
@@ -257,10 +271,10 @@ case "$_seen" in *Discharging*|*Idle*) ok "the verdict is a real value, not empt
 
 # --- L3.2 ACC must not touch the charging switch while unplugged ---------------------------------
 _lg0=$(wc -l < $TD/.write-ledger 2>/dev/null); isnum "$_lg0" || _lg0=0
-sleep 120
+sleep $W_LEDGER
 _lg1=$(wc -l < $TD/.write-ledger 2>/dev/null); isnum "$_lg1" || _lg1=$_lg0
 _wrote=$(( _lg1 - _lg0 ))
-log "      ledger grew $_wrote lines in 120s unplugged"
+log "      ledger grew $_wrote lines in ${W_LEDGER}s unplugged"
 [ "$_wrote" -eq 0 ] && ok "ACC wrote nothing at all while unplugged" L3-quiet \
   || { sed -n "$(( _lg0 + 1 )),${_lg1}p" $TD/.write-ledger 2>/dev/null | sed 's/^/        /' | tee -a "$OUT"
        no "ACC made $_wrote writes while unplugged" L3-quiet; }
@@ -269,7 +283,7 @@ log "      ledger grew $_wrote lines in 120s unplugged"
 # A phone that drains fast overnight is the single most common "ACC broke my phone" report, and it
 # is almost never ACC. Measure it so the number exists rather than being argued about.
 _l0=$(rd $G/capacity); _t0=$(date +%s); _cc0=$(rd $G/charge_counter)
-sleep 300
+sleep $W_DRAIN
 _l1=$(rd $G/capacity); _t1=$(date +%s); _cc1=$(rd $G/charge_counter)
 _dt=$(( _t1 - _t0 ))
 log "      over ${_dt}s: level $_l0% -> $_l1%   counter ${_cc0:-?} -> ${_cc1:-?}"
@@ -293,7 +307,7 @@ fi
 _p=$(rd $TD/acc.lock)
 if [ -n "$_p" ] && [ -d "/proc/$_p" ]; then
   _u0=$(awk '{print $14+$15}' /proc/$_p/stat 2>/dev/null)
-  sleep 60
+  sleep $W_CPU
   _p2=$(rd $TD/acc.lock)
   _u1=$(awk '{print $14+$15}' /proc/${_p2:-0}/stat 2>/dev/null)
   if [ "$_p" != "$_p2" ]; then
@@ -385,7 +399,7 @@ fi
 if want all; then
 sec "L5. STRESS - churn and fault injection"
 # --- cache abuse ---------------------------------------------------------------------------------
-for inject in "ampFactor_=0" "ampFactor_=abc" "idleThreshold=999999999" "battCapacity="; do
+for inject in $INJECTS; do
   cp -a $BK/if $IF; echo "$inject" >> $IF; restart
   alive && ok "survived $inject" "L5-${inject%%=*}" || no "DIED on $inject" "L5-${inject%%=*}"
 done
@@ -398,7 +412,7 @@ looping && ok "loop still turning after the abuse" L5-loop || no "loop stopped a
 
 # --- config churn --------------------------------------------------------------------------------
 _i=0
-while [ $_i -lt 10 ]; do
+while [ $_i -lt $N_CHURN ]; do
   acc -s max_charging_current=$(( 700 + _i * 60 )) >/dev/null 2>&1; sleep 3
   acc -s max_charging_current= >/dev/null 2>&1; sleep 3
   _i=$((_i+1))
