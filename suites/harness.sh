@@ -335,8 +335,17 @@ elif isnum "$_cc0" && isnum "$_cc1"; then
   # an upper bound on idle drain, not a measurement of it, so the threshold is generous and the
   # label says which one it is. The A3 read 686 mA here; that number describes the test, not the
   # phone. A real idle figure needs a quiet phone and no suite attached to it.
-  [ "$_mah_h" -lt 700 ] && ok "drain ${_mah_h} mA while the suite runs (upper bound, not true idle)" L3-drain \
-                        || no "drain ${_mah_h} mA even as an upper bound -- something is awake" L3-drain
+  # This check answers one question: is ACC leaving an idle phone alone? A lit panel draws 200-500
+  # mA and dominates the number, so with the screen on it measures the display instead. Report it
+  # and skip rather than failing a phone for having its screen on - which is exactly what a 741 mA
+  # 'failure' on a healthy Pixel was.
+  if [ "$(scr)" = on ]; then
+    sk "drain ${_mah_h} mA -- screen is ON, so this measures the panel, not ACC" L3-drain
+  elif [ "$_mah_h" -lt 700 ]; then
+    ok "drain ${_mah_h} mA while the suite runs (upper bound, not true idle)" L3-drain
+  else
+    no "drain ${_mah_h} mA screen-off -- something is awake" L3-drain
+  fi
 else
   sk "drain rate -- no charge counter on this phone" L3-drain
 fi
