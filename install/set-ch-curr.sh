@@ -134,12 +134,23 @@ set_ch_curr() {
     # not-charging path above: a non-numeric mcc that slipped through write-config's scalar gate
     # would make "[ abc -ge 0 ]" error out every daemon tick.
     if [ "$1" -ge 0 ] 2>/dev/null && [ "$1" -le 9999 ] 2>/dev/null; then
-      apply_current $1 || return 1
+      # The marker goes up BEFORE the write, not after. apply_on_plug refuses to apply a current cap
+      # while the marker is absent -- that guard exists so a daemon holding a config it read before
+      # the user cleared it cannot put the cap back a second after the release. Creating the marker
+      # afterwards meant the very first apply ran with it still missing, so every current node was
+      # skipped: the cap landed in config, the marker appeared, and nothing was ever written. The
+      # phone reported a limit it was not enforcing, which is the shape of the reports about caps
+      # that do nothing.
+      #
+      # The marker means "a cap is configured", and it is configured the moment this branch is
+      # entered. On a failed apply it comes straight back down, so a failure cannot leave the guard
+      # believing in a cap that was never applied.
+      touch $f
+      apply_current $1 || { rm -f $f 2>/dev/null; return 1; }
     else
       $isAccd || echo "[0-9999]$(print_mA; print_only)"
       return 11
     fi
-    touch $f
 
   else
     # print current value
