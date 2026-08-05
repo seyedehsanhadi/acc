@@ -385,6 +385,7 @@ for _d in /sys/class/power_supply/*; do
     _vb="$_d/voltage_now"; _ic="$_d/current_max"; break; }
 done
 if [ -n "$_vb" ]; then
+  _wl7=$(wl)
   _v0=$(rd $_vb); _i0=$(rd $_ic)
   log "      contract before: $(( ${_v0:-0} / 1000 )) mV, $(( ${_i0:-0} / 1000 )) mA"
   acc -s max_charging_current=800 >/dev/null 2>&1; sleep 35
@@ -402,7 +403,9 @@ if [ -n "$_vb" ]; then
       && ok "the input current limit was not left suppressed ($(( _i1 / 1000 )) mA)" \
       || no "input current left at $(( _i1 / 1000 )) mA, down from $(( _i0 / 1000 )) (bug 9)"
   fi
-  _snap=$(tail -40 $WL 2>/dev/null | cnt '<- 500000')
+  # Only this section's writes. Reading the tail of the ledger picked up D3's legitimate 500 mA cap
+  # from earlier in the same run and reported it as a probe-time snapshot: 24 of them.
+  _snap=$(tail -n +$(( _wl7 + 1 )) $WL 2>/dev/null | cnt '<- 500000')
   [ "${_snap:-0}" -eq 0 ] \
     && ok "no 500000 probe-time snapshot was written back (bug 9)" \
     || no "a 500 mA snapshot was written back $_snap times (bug 9)"

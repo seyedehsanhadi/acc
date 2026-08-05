@@ -318,7 +318,14 @@ idleThreshold=${idleThreshold:-10}
 _STI=\${_STI:-35}
 temp=$temp
 voltNow=$voltNow"
-    [ -z "${_DPOL-}" ] || echo "_DPOL=$_DPOL"; } > $TMPDIR/.batt-interface.sh.$$ 2>/dev/null     && mv -f $TMPDIR/.batt-interface.sh.$$ $TMPDIR/.batt-interface.sh 2>/dev/null     || rm -f $TMPDIR/.batt-interface.sh.$$ 2>/dev/null
+    # Fall back to the file sdp() keeps. The daemon's main shell does not always hold _DPOL, so a
+    # republish relying on the variable alone silently dropped the learned polarity - and a wrong
+    # direction verdict is the failure that blinds all four limits at once.
+    # The `|| :` is load-bearing. accd runs under set -eu, and an assignment takes the exit status
+    # of its command substitution: with no .dpol file and _DPOL unset, a bare cat fails and the
+    # daemon aborts at init. Caught in a sandbox before this reached a phone.
+    _dp=${_DPOL:-$(cat $TMPDIR/.dpol 2>/dev/null || :)}
+    [ -z "${_dp:-}" ] || echo "_DPOL=$_dp"; } > $TMPDIR/.batt-interface.sh.$$ 2>/dev/null     && mv -f $TMPDIR/.batt-interface.sh.$$ $TMPDIR/.batt-interface.sh 2>/dev/null     || rm -f $TMPDIR/.batt-interface.sh.$$ 2>/dev/null
 }
 
 _cache_republish(){

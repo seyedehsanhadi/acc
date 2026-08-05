@@ -956,6 +956,10 @@ sdp() {
     [ $_dfl -lt 2 ] || touch $TMPDIR/.dpol_unstable 2>/dev/null || :
   fi
   _DPOL=$1
+  # Keep the value in its own file too, the way the flip counter already is. The daemon's main
+  # shell does not always hold _DPOL, so a cache republished from the variable alone dropped the
+  # learned polarity and forced a re-derivation. Measured on a Pixel: '-' before, empty after.
+  echo "$1" > $TMPDIR/.dpol 2>/dev/null || :
   # rc22: REPLACE the cached polarity instead of appending one more line. Appending left the file
   # holding every latch this boot -- the A3 above had 15 _DPOL= lines, two of them contradicting the
   # rest -- and since the daemon SOURCES this file, whichever line happened to be written last
