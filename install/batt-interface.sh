@@ -303,7 +303,16 @@ volt_now() {
 }
 
 
-if ${_INIT:-false}; then
+_cache_usable(){
+  [ -s $TMPDIR/.batt-interface.sh ]     && grep -q '^battCapacity=' $TMPDIR/.batt-interface.sh 2>/dev/null     && grep -q '^currFile=' $TMPDIR/.batt-interface.sh 2>/dev/null
+}
+
+# Build on a real init, and ALSO whenever the cache is unusable. The else branch used to `touch`
+# and source, and touch CREATES an empty file: every learned fact came back unset and the caller
+# carried on with no gauge, no current node and no temperature. That is what an empty `acc -i` was.
+# Only accd rebuilt itself, and only at startup, so a daemon already looping never noticed and
+# neither did AccA, which reads through the CLI.
+if ${_INIT:-false} || ! _cache_usable; then
 
 
   # Nexus 10 (manta)
@@ -373,7 +382,9 @@ if ${_INIT:-false}; then
   fi
 
   curThen=$TMPDIR/.mcc
-  rm $curThen 2>/dev/null || :
+  # Only on a genuine init. A self-heal rebuild is repairing the cache, not restarting the daemon,
+  # and dropping the applied-current record there would make it re-apply a cap it already holds.
+  if ${_INIT:-false}; then rm $curThen 2>/dev/null || :; fi
 
 
   echo "ampFactor_=$ampFactor_
@@ -385,20 +396,17 @@ curThen=$curThen
 idleThreshold=${idleThreshold:-10}
 _STI=\${_STI:-35}
 temp=$temp
-voltNow=$voltNow" > $TMPDIR/.batt-interface.sh
-# This is the only TRUNCATING write of the cache; sdp() and amp_recheck() only
-# append to it. All three are reached from inside accd alone - _INIT is set
-# nowhere but accd.sh, and sdp/amp_recheck are daemon-loop calls - so they are
-# one process and cannot race each other. The one window where two writers exist
-# is a daemon restart, where the outgoing daemon can still append while the
-# incoming one truncates; the cost there is a lost _DPOL or ampFactor_ line in a
-# cache that is re-derived on the next pass, so it is not worth a rename.
+voltNow=$voltNow" > $TMPDIR/.batt-interface.sh.$$   && mv -f $TMPDIR/.batt-interface.sh.$$ $TMPDIR/.batt-interface.sh 2>/dev/null   || rm -f $TMPDIR/.batt-interface.sh.$$ 2>/dev/null
+# Written to a temp file and renamed, so a reader never sees it half-built and two writers cannot
+# interleave. It used to truncate in place, which was argued safe because accd was the only writer;
+# that argument no longer holds now that any caller rebuilds an unusable cache, and a rename is
+# cheaper than re-deriving who may race whom.
 
   _INIT=false
 
 
 else
-  touch $TMPDIR/.batt-interface.sh
+  # Reached only when _cache_usable said yes, so the file exists and has content.
   . $TMPDIR/.batt-interface.sh
 fi
 
