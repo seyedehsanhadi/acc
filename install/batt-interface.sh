@@ -303,6 +303,39 @@ volt_now() {
 }
 
 
+_cache_write(){
+  # The only writer of the cache. Temp file then rename, so a reader never sees it half-built and
+  # two writers cannot interleave. _DPOL is carried across when it is already known: it is appended
+  # later by sdp() rather than being part of this block, and a republish that dropped it would throw
+  # away the learned polarity and make the next reader re-derive it.
+  { echo "ampFactor_=$ampFactor_
+batt=$batt
+battCapacity=$batt/capacity
+battStatus=$battStatus
+currFile=$currFile
+curThen=$curThen
+idleThreshold=${idleThreshold:-10}
+_STI=\${_STI:-35}
+temp=$temp
+voltNow=$voltNow"
+    [ -z "${_DPOL-}" ] || echo "_DPOL=$_DPOL"; } > $TMPDIR/.batt-interface.sh.$$ 2>/dev/null     && mv -f $TMPDIR/.batt-interface.sh.$$ $TMPDIR/.batt-interface.sh 2>/dev/null     || rm -f $TMPDIR/.batt-interface.sh.$$ 2>/dev/null
+}
+
+_cache_republish(){
+  # For a daemon that is already looping. It sources this file once at init and then works from the
+  # variables in its own memory, so losing the FILE costs it nothing and it never noticed -- but the
+  # file is the daemon's published state, and everything else on the phone reads it. Measured on
+  # both phones: truncate the cache with the daemon left running and it stayed empty indefinitely.
+  #
+  # This republishes what the daemon already holds. It does NOT re-probe and does not re-source
+  # anything, so it cannot change a learned fact or disturb the loop; it only writes down what is
+  # already true. Callers rebuild by probing (see the branch below); the daemon has no need to.
+  _cache_usable && return 0
+  [ -n "${batt-}" ] && [ -n "${currFile-}" ] || return 1
+  _cache_write
+  _cache_usable
+}
+
 _cache_usable(){
   [ -s $TMPDIR/.batt-interface.sh ]     && grep -q '^battCapacity=' $TMPDIR/.batt-interface.sh 2>/dev/null     && grep -q '^currFile=' $TMPDIR/.batt-interface.sh 2>/dev/null
 }
@@ -387,16 +420,7 @@ if ${_INIT:-false} || ! _cache_usable; then
   if ${_INIT:-false}; then rm $curThen 2>/dev/null || :; fi
 
 
-  echo "ampFactor_=$ampFactor_
-batt=$batt
-battCapacity=$batt/capacity
-battStatus=$battStatus
-currFile=$currFile
-curThen=$curThen
-idleThreshold=${idleThreshold:-10}
-_STI=\${_STI:-35}
-temp=$temp
-voltNow=$voltNow" > $TMPDIR/.batt-interface.sh.$$   && mv -f $TMPDIR/.batt-interface.sh.$$ $TMPDIR/.batt-interface.sh 2>/dev/null   || rm -f $TMPDIR/.batt-interface.sh.$$ 2>/dev/null
+  _cache_write
 # Written to a temp file and renamed, so a reader never sees it half-built and two writers cannot
 # interleave. It used to truncate in place, which was argued safe because accd was the only writer;
 # that argument no longer holds now that any caller rebuilds an unusable cache, and a rename is

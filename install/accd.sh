@@ -631,7 +631,18 @@ if ! $_INIT; then
         "$(online 2>/dev/null && echo 1 || echo 0)" "$(present 2>/dev/null && echo 1 || echo 0)" \
         "${chDisabledByAcc:-?}" "${1:-loop}" >> "$dataDir/logs/flight.log"; } 2>/dev/null || :
     _frc=$(( ${_frc:-0} + 1 ))
-    [ "$_frc" -ge 40 ] 2>/dev/null && { _frc=0; tail -n 1500 "$dataDir/logs/flight.log" > "$dataDir/logs/flight.log.t" 2>/dev/null && mv -f "$dataDir/logs/flight.log.t" "$dataDir/logs/flight.log" 2>/dev/null; } || :
+    if [ "$_frc" -ge 40 ] 2>/dev/null; then
+      _frc=0
+      tail -n 1500 "$dataDir/logs/flight.log" > "$dataDir/logs/flight.log.t" 2>/dev/null         && mv -f "$dataDir/logs/flight.log.t" "$dataDir/logs/flight.log" 2>/dev/null || :
+      # Republish the interface cache if it has gone missing. The daemon sources it once at init and
+      # then runs from its own memory, so it survives losing the file and never noticed -- but the
+      # file is what `acc`, AccA and acc-switch-scan read, and on both phones a truncated cache with
+      # the daemon left running stayed empty indefinitely. Rides the trim tick deliberately: rc19
+      # removed the per-loop stat calls because they cost 26% of a core at idle, and this is the same
+      # kind of cost. One stat per 40 loops is roughly one every six minutes, which is far inside the
+      # window that matters and free in battery terms.
+      command -v _cache_republish >/dev/null 2>&1 && _cache_republish >/dev/null 2>&1 || :
+    fi
   }
 
   amp_recheck() {
