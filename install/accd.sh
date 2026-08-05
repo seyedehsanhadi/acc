@@ -1060,6 +1060,35 @@ if ! $_INIT; then
 
       else
 
+        # O1: assert a binary limit that the charging branch could not see.
+        #
+        # Both binary limits live inside `if is_charging`, which is right for the normal case - a
+        # pause is a response to current flowing. But a current or voltage cap tight enough to stop
+        # the charge makes the pack net-negative, is_charging goes false, and the branch above never
+        # runs. Reproduced on an A3 grid row: level 71 with pause 71, pack at 34C with max_temp 32,
+        # BOTH limits reached, and the switch left ON because a 381 mA cap had starved the phone.
+        #
+        # Nothing is overcharged while that holds - nothing is charging at all. The defect is that
+        # the hold depends on the throttle instead of on the limit: relax the cap and the pack
+        # charges above the limit until a later loop notices.
+        #
+        # Deliberately a small additive guard, not a re-gating of the block above. That block also
+        # does idle-mode avoidance, switch cycling and force_off, all written assuming current is
+        # flowing; running it dry would be a much larger change than the window it closes.
+        #
+        # Four conditions, each load-bearing:
+        #   present          - a cable is physically attached. NOT online: an input-cut switch reads
+        #                      offline while still plugged. Unplugged must never cut (see bug 2).
+        #   limit reached    - the same two terms the charging branch uses, so no second opinion.
+        #   not already held - chDisabledByAcc means the switch is ours and already off; re-asserting
+        #                      would write a node every loop for no change.
+        #   not_charging     - we are in the else branch, so this is true by construction; asserted
+        #                      anyway because this guard must never fire against a live charge.
+        if present 2>/dev/null && ! ${chDisabledByAcc:-false}            && { mt_reached 2>/dev/null || _ge_pause_cap 2>/dev/null; }; then
+          _wlog "O1 guard: binary limit reached while a throttle held the charge; asserting the pause"
+          disable_charging || :
+        fi
+
         # A cleared max_charging_current must release the current-limit nodes in THIS branch too.
         # AccA's fast path (acca -s) only rewrites the config - it never calls set_ch_curr - and
         # the existing restore call sites all sit in the charging/cooldown paths, so a user who
