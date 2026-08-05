@@ -235,9 +235,16 @@ _p1=$(rd $TD/acc.lock)
   && ok "and it did that WITHOUT restarting (pid $_p0 throughout)" \
   || sk "the daemon restarted ($_p0 -> $_p1), so this measured init, not the republish"
 _pol1=$(sed -n 's/^_DPOL=//p' $IF 2>/dev/null)
-[ "$_pol0" = "$_pol1" ] \
-  && ok "the learned polarity survived the rebuild ('$_pol1')" \
-  || no "polarity changed across the rebuild: '$_pol0' -> '$_pol1'"
+if [ -z "$_pol0" ]; then
+  # Nothing was latched going in, so "it survived" is trivially true and proves nothing. This
+  # reported PASS with both sides empty right after a daemon restart, which is not a test. Some
+  # phones never latch a polarity at all: ACC only calls sdp() when it has to resolve the sign.
+  sk "polarity preservation -- nothing was latched before the rebuild, nothing to preserve"
+elif [ "$_pol0" = "$_pol1" ]; then
+  ok "the learned polarity survived the rebuild ('$_pol1')"
+else
+  no "polarity changed across the rebuild: '$_pol0' -> '$_pol1'"
+fi
 [ "$(accst)" = Charging ] \
   && ok "still reports Charging after the rebuild, on a live charger" \
   || no "reports '$(accst)' after the rebuild while plugged and charging"

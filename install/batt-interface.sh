@@ -439,6 +439,10 @@ if ${_INIT:-false} || ! _cache_usable; then
 else
   # Reached only when _cache_usable said yes, so the file exists and has content.
   . $TMPDIR/.batt-interface.sh
+  # Seed the polarity fallback from what was just sourced. Without this the fallback is only
+  # populated once sdp() next runs, so the FIRST republish after an upgrade still loses a polarity
+  # that was learned before it - measured on an A3 carrying _DPOL=+ in its cache with .dpol empty.
+  [ -z "${_DPOL-}" ] || echo "$_DPOL" > $TMPDIR/.dpol 2>/dev/null || :
 fi
 
 [ -f $curThen ] || echo null > $curThen
