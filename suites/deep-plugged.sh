@@ -412,12 +412,21 @@ if want D7; then
 sec "D7. THE FAST-CHARGE CONTRACT SURVIVES A CAP CYCLE  (the curtana report)"
 # The report: fast charge gone, stuck at 5V. ACC's side was an init restore overwriting live
 # negotiated input nodes, plus a probe-time 500mA snapshot written back over a real charger.
-_vb=""; _ic=""
+# HIGHEST voltage wins, not the first one found. Taking the first match sorted alphabetically to
+# main-charger on a Pixel 6a, and that node mirrors the BATTERY voltage rather than the input - so
+# this section compared 4038 mV before against 4038 mV after and called it a contract held, while
+# the actual PD contract sat at 9000 mV on the tcpm node and was never looked at. A vacuous pass.
+# contract-stress.sh already selects this way; this did not.
+_vb=""; _ic=""; _bestv=0
 for _d in /sys/class/power_supply/*; do
-  [ -f "$_d/voltage_now" ] && [ "$(rd $_d/online)" = 1 ] && {
-    case "${_d##*/}" in battery|bms|maxfg|*fuelgauge*) continue;; esac
-    _vb="$_d/voltage_now"; _ic="$_d/current_max"; break; }
+  case "${_d##*/}" in battery|bms|maxfg|*fuelgauge*) continue;; esac
+  [ -f "$_d/voltage_now" ] || continue
+  [ "$(rd $_d/online)" = 1 ] || continue
+  _dv=$(rd $_d/voltage_now)
+  isnum "$_dv" || continue
+  [ "$_dv" -gt "$_bestv" ] && { _bestv=$_dv; _vb="$_d/voltage_now"; _ic="$_d/current_max"; }
 done
+[ -n "$_vb" ] && log "      measuring the contract on ${_vb%/voltage_now}, the highest-voltage online supply"
 if [ -n "$_vb" ]; then
   _wl7=$(wl)
   _v0=$(rd $_vb); _i0=$(rd $_ic)
