@@ -2,7 +2,7 @@
 
 Everything found, fixed, or still open. Baseline is rc21 `1406274`, current build `202505310`.
 
-## A. Fixed (21)
+## A. Fixed (24)
 
 All hardware-verified on the A3, the Pixel, or both, except **16**, which is source-only and flagged
 as such in the table.
@@ -222,3 +222,25 @@ earlier sessions), and once engaged a restrict_cur of 1000000 bites. Lifting the
 from 4.64V/1.51A to 5.97V/3.03A.
 
 So: real bug, real measurement, wrong description. The fix is unchanged.
+
+## M. Bugs 23-25: switch discovery could slow or stop a healthy charge
+
+Found by an eight-way parallel audit of every path that could reduce charging speed with nothing
+configured. 34 candidates, 4 survived adversarial refutation, and they collapse to three sites - all
+in the DISCOVERY window, none in steady state. That reconciles them with the hardware number: with a
+switch already locked ACC charges 247 mA FASTER than unmanaged, because it releases ceilings the
+vendor left low. No steady-state measurement covers a fresh install or a scan.
+
+| # | Bug | Where | Proof |
+|---|---|---|---|
+| 23 | A **rejected** switch candidate was left latched OFF for the whole session, with no restore anywhere. Values held: `*/current_max 0`, `*/constant_charge_current 0`, `charge_stop_level 5`, `siop_level 0` — the phone could sit at zero current while ACC reported normal | `misc-functions.sh` | t46 15/0; the failure arm ten lines below already had the level check, the reject arm did not. One helper, both callers |
+| 24 | A scan's `restore_all_on` replayed the probe-time **snapshot** over ACC's own HIGH release, because `awk '!seen[$0]++'` puts the snapshot second and the sweep runs top to bottom. Ends a scan with `usb/current_max` at 2.2 A after ACC negotiated 2.8 A | `acc-switch-scan.sh` | t46; negotiation-owned nodes now skipped, binary switches still restored |
+| 25 | Discovery cut a healthy charge at **any** battery level. An empty `chargingSwitch` is the shipped default, so a fresh install stopped a 40% charge to find a switch it would not need until 80% | `accd.sh` | t46; `probe_due` waits until within 5% of the pause level and fails OPEN on every unparseable case |
+
+t46 is mutation-verified at 1/14 against the rc21 baseline.
+
+**Not yet demonstrated on hardware.** All three live in the discovery window, and both test phones
+have a switch locked, so a steady-state run cannot exercise them. Proving them needs the switch
+blanked (`acc -s charging_switch=`) on a live charge, watching whether ACC cuts a healthy charge to
+hunt for a switch it does not need yet. Until that runs, these are source- and sandbox-verified only,
+and the register should not claim more.
