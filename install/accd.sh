@@ -77,6 +77,21 @@ if ! $_INIT; then
   }
 
 
+  probe_due() {
+    # True when the pause point is close enough that ACC will actually need a switch soon, so the
+    # discovery sweep is worth the interruption it costs.
+    #
+    # Fails OPEN - returns true - on an empty, non-numeric or millivolt-domain pause setting, and on
+    # an unreadable gauge. Discovery must never be blocked by a value we cannot read; the worst case
+    # of failing open is the behaviour that shipped before this guard existed.
+    local _c=
+    case "${capacity[3]-}" in ''|*[!0-9]*) return 0;; esac
+    [ "${capacity[3]}" -le 100 ] 2>/dev/null || return 0
+    _c=$(batt_cap 2>/dev/null)
+    case "${_c:-x}" in ''|x|*[!0-9-]*) return 0;; esac
+    [ "$_c" -ge $(( ${capacity[3]} - 5 )) ] 2>/dev/null
+  }
+
   temp_now() {
     # D10: an empty or garbage read is coerced to 250 (25.0C) so that a transient sensor blip cannot
     # turn `[ $(temp_now) -lt N ]` into a syntax error, which under set -eu kills the daemon. The
@@ -420,7 +435,18 @@ if ! $_INIT; then
         fi
       fi
       # [auto mode] set charging switch
-      if [ -z "${chargingSwitch[0]-}" ]; then
+      #
+      # This hunts for a working switch by CUTTING the charge and seeing what stops it. That is the
+      # only way to find one, and it has to happen sometime - but it used to happen the moment the
+      # phone was plugged in, at any battery level, with nothing configured. A fresh install at 40%
+      # with a pause at 80 would stop a healthy charge to discover a switch it has no use for until
+      # 80. It is also the entry point for a candidate being left latched off (see the reject arm in
+      # cycle_switches).
+      #
+      # Wait until a cut is nearly needed. probe_due fails OPEN on anything it cannot parse, so no
+      # device loses discovery - it only stops the sweep landing on a charge that is nowhere near
+      # the limit. The result is persisted, so this still happens exactly once per install.
+      if [ -z "${chargingSwitch[0]-}" ] && probe_due; then
         disable_charging
         enable_charging
       fi

@@ -219,6 +219,32 @@ calc() {
 }
 
 
+# At or above the level the user asked ACC to pause at? Used to decide whether a switch candidate
+# that did not work should be left CUT or handed back.
+#
+# Leaving it cut is right only when a pause is what we are trying to achieve. During discovery on a
+# healthy charge - fresh install, an AccA Automatic reset, .rediscover, an auto-lock blacklist - the
+# phone is nowhere near the limit, and a cut candidate is pure loss: it is not protecting anything,
+# it just stops the charge. The values these candidates hold are hostile: */current_max 0,
+# */constant_charge_current* 0, charge_stop_level 5, siop_level 0.
+#
+# Handles both domains the pause setting can be in, the same way the daemon does: a value <= 100 is
+# a percentage, 3001-5000 is millivolts. Anything unparseable answers "no", so the caller hands the
+# node back rather than latching it - the safe direction when we cannot tell.
+at_or_above_pause() {
+  local _v=
+  case "${capacity[3]-}" in ''|*[!0-9]*) return 1;; esac
+  if [ "${capacity[3]}" -gt 3000 ] 2>/dev/null && [ "${capacity[3]}" -le 5000 ] 2>/dev/null; then
+    _v=$(volt_now 2>/dev/null)
+  elif [ "${capacity[3]}" -le 100 ] 2>/dev/null; then
+    _v=$(batt_cap 2>/dev/null)
+  else
+    return 1
+  fi
+  case "${_v:-x}" in ''|x|*[!0-9-]*) return 1;; esac
+  [ "$_v" -ge "${capacity[3]}" ] 2>/dev/null
+}
+
 cycle_switches() {
 
   local on=
@@ -342,10 +368,16 @@ cycle_switches() {
             # only at the final sample" non-holder is caught by the runtime breach watchdog.
             if [ "$_chg_last" = 1 ] || [ "$_chg_n" -ge 3 ]; then _rej=true; else _rej=false; fi
             if $_rej; then
-              # resumed on its own -> flicker; keep charging OFF (never pulse it
-              # back on while we are trying to pause at/above the limit), then
-              # reject the switch and move it to the end like a failure
-              flip_sw off 2>/dev/null || :
+              # Rejected: it resumed on its own, so it does not hold. Keeping it CUT is correct
+              # only while we are actually trying to pause - at or above the limit. Below it, this
+              # arm used to latch the node OFF for the rest of the session with no restore
+              # anywhere: not here, not in cycle_switches_off's second pass (skipped by the
+              # `not_charging ||` guard precisely when the abandoned node is the thing cutting),
+              # and not in enable_charging, which only touches the ACCEPTED switch. A discovery
+              # probe on a healthy charge could therefore leave */current_max or
+              # */constant_charge_current at 0 for the whole session while ACC reported normal.
+              # Same rule as the failure arm below, which already got this right.
+              at_or_above_pause || flip_sw on 2>/dev/null || :
               if ! ${acc_t:-false}; then
                 sed -i "\|^${chargingSwitch[*]}$|d" $TMPDIR/ch-switches
                 echo "${chargingSwitch[*]}" >> $TMPDIR/ch-switches
@@ -383,23 +415,9 @@ cycle_switches() {
           # switch's "off" write had no protective effect anyway, so leaving the nodes alone
           # is no worse than re-arming them, and the loop body still moves the candidate to
           # the end. Mirrors the daemon's ${capacity[3]} domain check (% if <=100, else mV).
-          _suppress_on=false
-          case "${capacity[3]-}" in
-            ''|*[!0-9]*) : ;;
-            *)
-              if [ "${capacity[3]}" -gt 3000 ] 2>/dev/null && [ "${capacity[3]}" -le 5000 ] 2>/dev/null; then
-                _vn=$(volt_now 2>/dev/null)
-                case "${_vn:-x}" in ''|x|*[!0-9-]*) : ;; *) [ "$_vn" -ge "${capacity[3]}" ] 2>/dev/null && _suppress_on=true ;; esac
-                unset _vn
-              elif [ "${capacity[3]}" -le 100 ] 2>/dev/null; then
-                _bc=$(batt_cap 2>/dev/null)
-                case "${_bc:-x}" in ''|x|*[!0-9-]*) : ;; *) [ "$_bc" -ge "${capacity[3]}" ] 2>/dev/null && _suppress_on=true ;; esac
-                unset _bc
-              fi
-              ;;
-          esac
-          $_suppress_on || flip_sw on 2>/dev/null || :
-          unset _suppress_on
+          # One helper, two callers. This arm and the reject arm above must agree, and when they
+          # were separate copies only this one had the level check.
+          at_or_above_pause || flip_sw on 2>/dev/null || :
           if ! ${acc_t:-false}; then
             sed -i "\|^${chargingSwitch[*]}$|d" $TMPDIR/ch-switches
             echo "${chargingSwitch[*]}" >> $TMPDIR/ch-switches

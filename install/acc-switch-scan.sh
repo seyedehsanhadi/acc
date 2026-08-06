@@ -102,9 +102,26 @@ restore_all_on() {
   # can never leave a charge node pinned off (the "no charge until reboot" report). SW is
   # set by the time any exit happens. SIGKILL still skips this -- the daemon's startup
   # recovery (cycle_switches on) covers that case.
+  #
+  # rc22: but SKIP the input-negotiation nodes. $SW carries two kinds of line for them: the
+  # deliberate HIGH release from ctrl-files.sh (*/current_max 3000000 0) and a probe-time SNAPSHOT
+  # appended by read-ch-curr-ctrl-files-p2.sh (usb/current_max 2200000 0). awk '!seen[$0]++' keeps
+  # first-occurrence order, so the snapshot sits after the high line and this sweep, going top to
+  # bottom, makes the SNAPSHOT the final value. On a Mi A3 that ends a scan with usb/current_max
+  # back at 2.2A after ACC had negotiated it to 2.8A - handing back the entire measured advantage
+  # for the rest of the session, silently, with no re-kick behind it.
+  #
+  # These nodes do not need restoring anyway. They are owned by charger negotiation, and ACC's
+  # standing rule everywhere else is release HIGH and let the driver clamp, never replay a
+  # snapshot - see set-ch-curr.sh, which documents this same hazard and pairs its restore with a
+  # re-kick. A scan that cut one has already had it released by the per-candidate restore_on above;
+  # this belt-and-braces sweep only needs to cover the binary switches.
   [ -f "${SW:-/x}" ] || return 0
   while IFS= read -r _l; do
     case "$_l" in ''|'#'*) continue;; esac
+    case "$_l" in
+      */current_max*|*/input_current*|*/constant_charge_current*|*restrict_cur*) continue;;
+    esac
     restore_on "$_l" 2>/dev/null || :
   done < "$SW"
 }
