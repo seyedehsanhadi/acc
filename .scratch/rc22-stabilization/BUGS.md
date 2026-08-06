@@ -201,3 +201,24 @@ measurement-timing class that produced several false findings in this campaign.
 the state ever does arise the limit will hold. It is a backstop, not a fix for a proven defect, and
 the code says so. Twelve of these findings were verified by A/B on hardware; this one was not, and it
 is not counted among them.
+
+## L. Correction: what bug 22 is and is not
+
+I described bug 22 as ACC restoring "a restriction it had not created". That is not accurate and the
+register should not have said it.
+
+Measured after a clean reboot on the A3, before ACC restored anything:
+
+    qcom-battery/restrict_cur = 1000000     the vendor's own boot value
+    qcom-battery/restrict_chg = 0           restricted mode NOT engaged
+
+So 1000000 is the hardware's own default for that node, not something ACC invented. ACC recorded it
+correctly. What ACC got wrong was writing it back on a RESTORE, because a restore means "ACC is no
+longer capping this" and the right action there is to release the ceiling high and let the driver
+clamp - the same rule already applied to usb/current_max and the other input nodes.
+
+It still matters, because restrict_chg is engaged by the vendor at runtime (it read 1 during the
+earlier sessions), and once engaged a restrict_cur of 1000000 bites. Lifting the pair took that phone
+from 4.64V/1.51A to 5.97V/3.03A.
+
+So: real bug, real measurement, wrong description. The fix is unchanged.

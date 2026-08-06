@@ -93,6 +93,13 @@ if [ "$MODE" = watch ]; then
   exit 0
 fi
 
+# Judge POWER, not voltage. QC3 and PD both renegotiate between operating points, and a step from
+# 7V/2.0A to 5.4V/3.0A is MORE power, not a collapse - but a voltage threshold calls it one. The
+# report itself is stated in watts: 5.84W where a replug gave 15.3W. Measured here: rc21 went
+# 18.5W -> 2.0W (11% retained) while rc22 went 14.2W -> 11.9W (84%), and a voltage rule would have
+# failed both.
+I0=$(icl)
+P0=$(( (V0 / 1000) * (${I0:-0} / 1000) / 1000 ))
 W0=$(wl)
 LOW=0; MIN=$V0
 log "stressing: 6 cycles of cap-on / cap-off, sampling vbus throughout"
@@ -120,15 +127,23 @@ S=$(tail -n +$(( W0 + 1 )) $TD/.write-ledger 2>/dev/null | grep -c 'rekick skipp
 case "${S:-x}" in ''|*[!0-9]*) S=0;; esac
 
 log ""
-log "start   : $(( V0 / 1000 )) mV"
-log "lowest  : $(( MIN / 1000 )) mV   ($LOW samples under 5.5V)"
-log "final   : $(( ${V1:-0} / 1000 )) mV   icl $(( $(icl) / 1000 )) mA   batt $(rd $G/current_now) uA"
+I1=$(icl)
+P1=$(( (${V1:-0} / 1000) * (${I1:-0} / 1000) / 1000 ))
+[ "$P0" -gt 0 ] 2>/dev/null && PCT=$(( P1 * 100 / P0 )) || PCT=0
+log "start   : $(( V0 / 1000 )) mV x $(( ${I0:-0} / 1000 )) mA = ${P0} W"
+log "final   : $(( ${V1:-0} / 1000 )) mV x $(( ${I1:-0} / 1000 )) mA = ${P1} W   (${PCT}% of start)"
+log "lowest v: $(( MIN / 1000 )) mV   ($LOW samples under 5.5V)"
+log "battery : $(rd $G/current_now) uA"
 log "re-kicks: $K fired, $S skipped-and-logged"
 log ""
-if [ "${V1:-0}" -ge 5500000 ]; then
-  log "VERDICT: CONTRACT HELD at $(( ${V1:-0} / 1000 )) mV across 6 cap cycles"
+# 60% of the starting power. A renegotiation between operating points costs a little; a collapse
+# costs almost everything - the two measured cases were 84% and 11%, which is not a close call.
+if [ "$PCT" -ge 60 ]; then
+  log "VERDICT: CONTRACT HELD - ${PCT}% of the starting power retained (${P0}W -> ${P1}W)."
+  log "         Voltage may have stepped down; that is renegotiation, not collapse, while the"
+  log "         power is still there."
 else
-  log "VERDICT: CONTRACT COLLAPSED $(( V0 / 1000 )) -> $(( ${V1:-0} / 1000 )) mV and did not recover."
-  log "         This is the curtana symptom. A physical replug should restore it - if it does, the"
-  log "         collapse was negotiation, not the charger giving up."
+  log "VERDICT: CONTRACT COLLAPSED - only ${PCT}% of the starting power retained (${P0}W -> ${P1}W)."
+  log "         This is the curtana symptom, which was reported as 5.84W against 15.3W."
+  log "         A physical replug should restore it."
 fi
