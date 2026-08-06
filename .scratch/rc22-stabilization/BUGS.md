@@ -239,8 +239,20 @@ vendor left low. No steady-state measurement covers a fresh install or a scan.
 
 t46 is mutation-verified at 1/14 against the rc21 baseline.
 
-**Not yet demonstrated on hardware.** All three live in the discovery window, and both test phones
-have a switch locked, so a steady-state run cannot exercise them. Proving them needs the switch
-blanked (`acc -s charging_switch=`) on a live charge, watching whether ACC cuts a healthy charge to
-hunt for a switch it does not need yet. Until that runs, these are source- and sandbox-verified only,
-and the register should not claim more.
+**Bug 25 is now hardware-verified.** A3 on 202505314, switch blanked at 69% with pause at 76, so the
+probe threshold was 71:
+
+    10s  70%  suspend=0  Charging       below the threshold, no cut
+    30s  70%  suspend=0  Charging
+    40s  71%  suspend=0  Not charging   threshold reached, sweep begins
+    60s  71%  suspend=1  Discharging    probing
+   140s  71%  suspend=0  Charging       done, 2.6A restored
+
+Held back below 71, released exactly at it, and a switch WAS locked
+(`input_suspend 0 1`) - so the gate does not block discovery, which was the risk in the fix itself.
+
+**Bugs 23 and 24 remain source-verified only.** The sweep restored every candidate it touched -
+`restrict_chg`, `restrict_cur`, `input_suspend` and `voltage_max` all show matched write/restore
+pairs in the ledger - so nothing was left latched. But `input_suspend` holds on the first attempt on
+this phone, so the REJECT arm never executed and the scan restore path was never entered. Those two
+need a device where a candidate fails, or a synthetic candidate list.
