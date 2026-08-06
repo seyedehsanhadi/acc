@@ -350,18 +350,22 @@ if isnum "${_t#-}" && [ "$_t" -gt 12 ] 2>/dev/null; then
     && ok "charging stops at max_temp (the reported sweet symptom)" \
     || no "still charging at ${_r} mA above max_temp -- the sweet symptom reproduces"
   # bug 11: a resume must act on a temperature read AFTER the sleep, not one taken before it.
+  # Judge by CURRENT, not by the kernel's status label. On a native-limit phone the kernel reports
+  # Charging while charge_stop_level holds the pack at zero, so the label flags a correct thermal
+  # hold as a failure - it did exactly that here, once in 25 samples, on a phone drawing nothing.
+  # A pack that is genuinely being charged draws real current; that is the thing worth asserting.
   _n=0; _bad=0
   while [ $_n -lt 25 ]; do
     _n=$((_n + 1))
-    _tn=$(tmp); _rn=$(rd $G/current_now)
+    _tn=$(tmp); _rn=$(rd $G/current_now); _rn=${_rn#-}
     if isnum "${_tn#-}" && [ "$_tn" -ge $(( _t - 2 )) ] 2>/dev/null; then
-      case "$(rd $G/status)" in Charging) _bad=$((_bad + 1));; esac
+      case "${_rn:-x}" in ''|*[!0-9]*) :;; *) [ "$_rn" -gt 400000 ] && _bad=$((_bad + 1));; esac
     fi
     sleep 4
   done
   [ "$_bad" -eq 0 ] \
     && ok "never re-enabled on a stale pre-sleep temperature across 25 samples (bug 11)" \
-    || no "reported Charging in $_bad of 25 samples while still at or above max_temp (bug 11)"
+    || no "drew real current in $_bad of 25 samples while at or above max_temp (bug 11)"
   acc -s cooldown_temp=$S_CT max_temp=$S_MT resume_temp=$S_RT >/dev/null 2>&1
   waitfor 150 sh -c '[ "$(cat '"$G"'/status)" = Charging ]' \
     && ok "resumes once the temperature limit is lifted" \
@@ -435,7 +439,13 @@ if [ -n "$_vb" ]; then
   fi
   # Only this section's writes. Reading the tail of the ledger picked up D3's legitimate 500 mA cap
   # from earlier in the same run and reported it as a probe-time snapshot: 24 of them.
-  _snap=$(tail -n +$(( _wl7 + 1 )) $WL 2>/dev/null | cnt '<- 500000')
+  # Anchored. '<- 500000' is a SUBSTRING of '<- 5000000', which is the release-high value ACC writes
+  # on every clear, so the unanchored pattern counted ACC's own correct releases as snapshots - four
+  # of them on a Pixel whose ledger contained no 500000 write at all.
+  # A trailing SPACE, not an end-anchor: ledger lines continue with '(was NNN)', so '$' matches
+  # nothing at all, while a bare '<- 500000' also matches inside '<- 5000000'. The space is what
+  # separates the six-zero value from the seven-zero one.
+  _snap=$(tail -n +$(( _wl7 + 1 )) $WL 2>/dev/null | cnt '<- 500000 ')
   [ "${_snap:-0}" -eq 0 ] \
     && ok "no 500000 probe-time snapshot was written back (bug 9)" \
     || no "a 500 mA snapshot was written back $_snap times (bug 9)"
