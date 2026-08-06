@@ -78,6 +78,13 @@ log ""
 
 [ "$(rd $U/online)" = 1 ] || { log "NOT PLUGGED. Nothing to measure."; exit 0; }
 
+# Let the supply settle BEFORE phase 1. Run straight after a stress test the charger is still
+# recovering, and phase 1 reads low for reasons that have nothing to do with ACC - measured at
+# 1505 mA where the same phone settled at 2438 mA minutes later.
+log "settling for 90s before measuring, so phase 1 is not a charger still ramping up"
+_i=0; while [ $_i -lt 18 ]; do sleep 5; _i=$((_i + 1)); done
+log ""
+
 _mcc=$(sed -n 's/^maxChargingCurrent=//p' $DD/config.txt | tr -d '()' | cut -d' ' -f1)
 _mcv=$(sed -n 's/^maxChargingVoltage=//p' $DD/config.txt | tr -d '()' | cut -d' ' -f1)
 if [ -n "$_mcc" ] || [ -n "$_mcv" ]; then
@@ -117,6 +124,17 @@ log "  ACC stopped   : ${P2:-?} mA"
 log "  level moved   : ${L1}% -> ${L3}%   (a big rise means the phases are not comparable)"
 log ""
 if isnum "$P1" && isnum "$P2" && isnum "$P3"; then
+  # Phases 1 and 3 must AGREE before either is compared to phase 2. Averaging them hides a ramp:
+  # 1505 and 2438 average to 1971, which read as "ACC costs 220 mA" when phase 3 - the settled one,
+  # with ACC running - was in fact the fastest of the three.
+  _sp=$(( P1 > P3 ? P1 - P3 : P3 - P1 ))
+  _big=$P1; [ "$P3" -gt "$P1" ] && _big=$P3
+  if [ "$_big" -gt 0 ] && [ $(( _sp * 100 / _big )) -gt 20 ]; then
+    log "  INCONCLUSIVE: the two ACC-running phases disagree by ${_sp} mA (${P1} and ${P3})."
+    log "                Something was still moving - a charger recovering, or the level climbing."
+    log "                level ${L1}% -> ${L3}%. Re-run on a settled charge."
+    exit 0
+  fi
   _run=$(( (P1 + P3) / 2 ))
   _d=$(( _run - P2 ))
   _pct=0; [ "$P2" -gt 0 ] && _pct=$(( _d * 100 / P2 ))
