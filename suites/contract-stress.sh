@@ -55,7 +55,10 @@ done
 vbus(){ rd $SUP/voltage_now; }
 icl(){ rd $SUP/current_max; }
 styp(){ for _t in real_type usb_type type; do [ -f "$SUP/$_t" ] && { rd $SUP/$_t; return; }; done; }
-wl(){ _n=$(wc -l < $TD/.write-ledger 2>/dev/null); isnum "$_n" && echo "$_n" || echo 0; }
+# The ledger is on tmpfs and does not exist until ACC first writes a node, which after a reboot may
+# be minutes away. Reading it must be silent and must answer 0, not an error.
+wl(){ [ -f "$TD/.write-ledger" ] || { echo 0; return; }
+      _n=$(wc -l < "$TD/.write-ledger" 2>/dev/null); isnum "$_n" && echo "$_n" || echo 0; }
 
 S_MCC=$(sed -n 's/^maxChargingCurrent=//p' $DD/config.txt | tr -d '()' | cut -d' ' -f1)
 cleanup(){ trap - EXIT INT TERM HUP
@@ -99,7 +102,7 @@ fi
 # 18.5W -> 2.0W (11% retained) while rc22 went 14.2W -> 11.9W (84%), and a voltage rule would have
 # failed both.
 I0=$(icl)
-P0=$(( (V0 / 1000) * (${I0:-0} / 1000) / 1000 ))
+P0=$(( (V0 / 1000) * (${I0:-0} / 1000) / 1000000 ))
 W0=$(wl)
 LOW=0; MIN=$V0
 log "stressing: 6 cycles of cap-on / cap-off, sampling vbus throughout"
@@ -128,8 +131,11 @@ case "${S:-x}" in ''|*[!0-9]*) S=0;; esac
 
 log ""
 I1=$(icl)
-P1=$(( (${V1:-0} / 1000) * (${I1:-0} / 1000) / 1000 ))
-[ "$P0" -gt 0 ] 2>/dev/null && PCT=$(( P1 * 100 / P0 )) || PCT=0
+P1=$(( (${V1:-0} / 1000) * (${I1:-0} / 1000) / 1000000 ))
+# Percent from milliwatts, so a 12W-to-11W comparison does not lose its resolution to integer watts.
+_mw0=$(( (V0 / 1000) * (${I0:-0} / 1000) / 1000 ))
+_mw1=$(( (${V1:-0} / 1000) * (${I1:-0} / 1000) / 1000 ))
+[ "$_mw0" -gt 0 ] 2>/dev/null && PCT=$(( _mw1 * 100 / _mw0 )) || PCT=0
 log "start   : $(( V0 / 1000 )) mV x $(( ${I0:-0} / 1000 )) mA = ${P0} W"
 log "final   : $(( ${V1:-0} / 1000 )) mV x $(( ${I1:-0} / 1000 )) mA = ${P1} W   (${PCT}% of start)"
 log "lowest v: $(( MIN / 1000 )) mV   ($LOW samples under 5.5V)"
