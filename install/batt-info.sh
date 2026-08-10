@@ -48,6 +48,29 @@ batt_info() {
   currNow=$(calc2 ${currNow:-0} / $factor)
 
 
+  # NORMALIZE THE SIGN. The kernel's raw sign is not a convention, it is a per-device accident:
+  # measured on a Mi A3 draining 1.19A and reporting current_now=+1194458 with status Discharging,
+  # while a Pixel 6a draining the same way reports -342812. Passing the raw value through meant
+  # AccA's dashboard read "+1.26A / 4.65W" for a battery that was emptying - the number, the sign
+  # and the wattage all wrong on one of the two phones here, and wrong in the direction that looks
+  # like fast charging.
+  #
+  # ACC already resolved this question. _status is the output of the whole arbitration chain in
+  # idle_discharging (cached polarity, then the coulomb window, then the kernel status tie-break,
+  # then the physical present() gate), and not_charging has just run, so it is current. Take the
+  # magnitude from the gauge and the sign from that verdict: negative drains, positive fills,
+  # everywhere. powerNow is computed below from this value, so the wattage sign follows.
+  case "${_status-}" in
+    Charging)
+      currNow=${currNow#-} ;;
+    Discharging)
+      case "$currNow" in
+        -*|0|0.00|0.0) : ;;
+        *) currNow=-$currNow ;;
+      esac ;;
+  esac
+
+
   # parse VOLTAGE_NOW & convert to Volts
   voltNow_=$(echo "$info" | sed -n "s/^voltage_now //p")
   dtr_conv_factor $voltNow_ ${voltFactor-}
@@ -82,7 +105,13 @@ charge_type $power_supply_type"
       dtr_conv_factor ${psaRaw#-} ${ampFactor:-$ampFactor_}
       power_supply_amps=$(calc2 ${psaRaw:-0} / $factor)
 
-      if [ 0${power_supply_amps%.*} -gt 0 ]; then
+      # Absolute value, and a string test rather than arithmetic. The old form was
+      # [ 0${power_supply_amps%.*} -gt 0 ], which on a supply reporting a negative current builds
+      # the token "0-0" and asks test to read it as an integer: not a number, so the comparison
+      # errors and the whole charger W/V/A block silently vanishes from the dashboard on exactly
+      # the phones whose sign convention is inverted. calc2 always formats %.2f, so zero is the
+      # literal string 0.00 and anything else is a real reading.
+      if [ "${power_supply_amps#-}" != 0.00 ]; then
         psvRaw=$(cat $i/voltage_now 2>/dev/null)
         dtr_conv_factor ${psvRaw:-0} ${voltFactor-}
         power_supply_volts=$(calc2 ${psvRaw:-0} / $factor)

@@ -32,7 +32,12 @@ printf '%s' "$_g" | grep -q 'present 2>/dev/null' \
   && ok "gated on present -- a cable is physically attached" \
   || no "not gated on present; it could cut with no cable"
 
-printf '%s' "$_g" | grep -qE '^\s*if online' \
+# [[:space:]], not \s. Neither test phone's grep implements \s -- laurus has BSD grep 2.5.1 and
+# bluejay has toybox 0.8.12, which rejects the pattern outright with "trailing backslash". A
+# pattern that can never match makes this NEGATIVE assertion fire its || arm every time, so it
+# reported "not gated on online" unconditionally - a test that passes whether or not the defect
+# is present. Two of these were live across the suite set.
+printf '%s' "$_g" | grep -qE '^[[:space:]]*if online' \
   && no "gated on online -- an input-cut switch reads offline while still plugged" \
   || ok "not gated on online, which lies while the input is suspended"
 

@@ -359,7 +359,14 @@ if isnum "${_t#-}" && [ "$_t" -gt 12 ] 2>/dev/null; then
     _n=$((_n + 1))
     _tn=$(tmp); _rn=$(rd $G/current_now); _rn=${_rn#-}
     if isnum "${_tn#-}" && [ "$_tn" -ge $(( _t - 2 )) ] 2>/dev/null; then
-      case "${_rn:-x}" in ''|*[!0-9]*) :;; *) [ "$_rn" -gt 400000 ] && _bad=$((_bad + 1));; esac
+      case "${_rn:-x}" in ''|*[!0-9]*) :;;
+        *) if [ "$_rn" -gt 400000 ]; then
+             _bad=$((_bad + 1))
+             # Print the offending sample. "1 of 25" is not diagnosable on its own: a genuine
+             # re-enable, a cooldown pulse and a boundary flicker all look identical as a count.
+             log "        sample $_n: ${_tn}C (limit $(( _t - 2 ))C) drawing ${_rn} uA, stop_level=$(rd "${SWN:-/nonexistent}" 2>/dev/null), status=$(rd $G/status)"
+           fi;;
+      esac
     fi
     sleep 4
   done

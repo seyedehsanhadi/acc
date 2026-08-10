@@ -41,14 +41,17 @@ OUT=/data/local/tmp
 for d in /sdcard/Download /storage/emulated/0/Download; do [ -w "$d" ] 2>/dev/null && OUT="$d" && break; done
 TS=$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)
 DEV=$(getprop ro.product.device 2>/dev/null || echo dev)
-STAGE=/data/local/tmp/accdiag-$$; rm -rf "$STAGE"; mkdir -p "$STAGE/charging" "$STAGE/reboot" "$STAGE/crash" "$STAGE/acc-logs" "$STAGE/android" "$STAGE/env"
+STAGE=/data/local/tmp/accdiag-$$; rm -rf "$STAGE"; mkdir -p "$STAGE/charging" "$STAGE/reboot" "$STAGE/crash" "$STAGE/acc-logs" "$STAGE/android" "$STAGE/env" "$STAGE/kernel"
 MAN="$STAGE/_MANIFEST.txt"; SUM="$STAGE/_SUMMARY.txt"; FS="$STAGE/_FILTERSTATS.txt"
 : > "$MAN"; : > "$SUM"; : > "$FS"
 
 man(){ echo "$1" >> "$MAN"; }
 # grab CMD... into a staged file
-grab(){ _o="$STAGE/$1"; _l="$2"; shift 2; "$@" > "$_o" 2>/dev/null
-  if [ -s "$_o" ]; then man "OK     $_l -> ${1} ($(wc -c <"$_o")b)"; else man "EMPTY  $_l"; rm -f "$_o"; fi; }
+# _n holds the destination because `shift 2` has already moved it out of $1 by the time the manifest
+# line is written. Without it every grab entry named the COMMAND it ran - 22 of the 45 lines in a
+# bluejay bundle read "-> sh" - so a responder looking for those files had nothing to look for.
+grab(){ _o="$STAGE/$1"; _n="$1"; _l="$2"; shift 2; "$@" > "$_o" 2>/dev/null
+  if [ -s "$_o" ]; then man "OK     $_l -> ${_n} ($(wc -c <"$_o")b)"; else man "EMPTY  $_l"; rm -f "$_o"; fi; }
 # FILTERED grab: keep only lines matching PATTERN; record raw->kept in _FILTERSTATS (loss accounting)
 grabf(){ _o="$STAGE/$1"; _l="$2"; _pat="$3"; _nm="$1"; shift 3; _raw="$STAGE/.raw$$"; "$@" > "$_raw" 2>/dev/null
   grep -iE "$_pat" "$_raw" > "$_o" 2>/dev/null
@@ -58,10 +61,33 @@ grabf(){ _o="$STAGE/$1"; _l="$2"; _pat="$3"; _nm="$1"; shift 3; _raw="$STAGE/.ra
     printf '%-26s raw=%sb/%sL  kept=%sb/%sL  dropped=%sb\n' "$_nm" "$_rb" "$_rl" "$_kb" "$_kl" "$(( _rb - _kb ))" >> "$FS"
   else rm -f "$_o"; man "EMPTY  $_l [filtered]"; fi; }
 # copy a file; record OK/ABSENT
-cpf(){ if [ -f "$3" ]; then cp -f "$3" "$STAGE/$1" 2>/dev/null; man "OK     $2 -> ${1} ($(wc -c <"$3")b)"; else man "ABSENT $2 (${3})"; fi; }
+# The OK line is earned by the DESTINATION, not the source. It used to be logged whenever the source
+# existed, with the cp error swallowed - so when the rc22 kernel/ collectors were added without their
+# directory, every bundle on a device with /proc/last_kmsg claimed to carry a file it did not have.
+# A manifest that records what was ATTEMPTED is worse than none: a responder reads it, sees a byte
+# count, and stops looking for the evidence.
+cpf(){ if [ -f "$3" ]; then
+    # The byte count is the DESTINATION's, never the source's. A procfs file reports size 0 however
+    # much it contains: /proc/last_kmsg on a Mi A3 stats as 0 and copies 254KB, and the manifest
+    # duly announced "OK ... last_kmsg.txt (0b)" for a quarter-megabyte of kernel log. Reporting
+    # what landed is both honest and the only figure a responder can act on.
+    if cp -f "$3" "$STAGE/$1" 2>/dev/null && [ -s "$STAGE/$1" ]; then man "OK     $2 -> ${1} ($(wc -c <"$STAGE/$1")b)"
+    else
+      rm -f "$STAGE/$1" 2>/dev/null
+      # An EMPTY source is not a failure. /proc/last_kmsg exists on a Mi A3 and reads zero bytes
+      # after a clean reboot - there simply was no previous-boot log to keep - and calling that
+      # FAILED sends a responder hunting for evidence that never existed. Same distinction `grab`
+      # has always made. A non-empty source that did not land IS a failure and still says so.
+      # `[ -s ]` cannot tell "empty" from "procfs" on the SOURCE, so ask by reading instead: if one
+      # byte can be read, the source had content and the copy genuinely failed.
+      if [ -n "$(dd if="$3" bs=1 count=1 2>/dev/null)" ]; then man "FAILED $2 -> ${1} (source has content, copy did not land)"
+      else man "EMPTY  $2 (${3} exists but is empty)"; fi
+    fi
+  else man "ABSENT $2 (${3})"; fi; }
 # tail a file into staging (smart-condense append-only repetitive logs)
 tailcpf(){ if [ -f "$3" ]; then tail -n "$4" "$3" > "$STAGE/$1" 2>/dev/null
-    man "OK     $2 [tail $4] -> ${1} ($(wc -c <"$STAGE/$1")b of $(wc -c <"$3")b)"
+    if [ -s "$STAGE/$1" ]; then man "OK     $2 [tail $4] -> ${1} ($(wc -c <"$STAGE/$1")b of $(wc -c <"$3")b)"
+    else rm -f "$STAGE/$1" 2>/dev/null; man "FAILED $2 [tail $4] -> ${1} (source present, tail did not land)"; fi
   else man "ABSENT $2 (${3})"; fi; }
 
 # ---- filter patterns (scope: charging / reboot / root) ----

@@ -51,6 +51,51 @@ set_prop() {
             echo "  acc 75 70    (shortcut for pause and resume capacity)" >&2
             return 2
           ;;
+
+          # rc22: REFUSE an out-of-range capacity here, the way the shorthand already does.
+          #
+          # rc21 added this check to `acc 999` only. The -s form never got it, so it stayed the
+          # "success tick over a value you did not ask for" that the shorthand fix exists to stop:
+          #
+          #     acc -s pause_capacity=999  ->  exit 0, prints the tick, stores 80
+          #     acc -s pause_capacity=101  ->  exit 0, prints the tick, stores 80
+          #     acc -s pause_capacity=abc  ->  exit 0, prints the tick, stores 75
+          #
+          # write-config clamps anything outside the documented ranges to 80 and drops a
+          # non-numeric value entirely, so the number on screen is not the number in force and
+          # nothing says so. Measured on a Mi A3 running rc22; a non-numeric pause capacity also
+          # moved shutdown_capacity to 0, so garbage in one field disabled protection in another.
+          #
+          # This is the more important of the two paths: `-s key=value` is what AccA sends for
+          # every setting the app writes, and what the daemon uses internally.
+          #
+          # Ranges are the documented ones and match acc.sh exactly: percent, or millivolts. An
+          # EMPTY value is allowed through untouched - clearing a key is a legitimate operation and
+          # the daemon relies on it. cooldown_capacity is deliberately NOT checked here: it uses
+          # 101 to mean "disabled", a different domain that this rule would wrongly reject.
+          # write-config's own clamp stays exactly as it is, as the backstop for a corrupt config
+          # file rather than for a user command.
+          pause_capacity=*|resume_capacity=*|shutdown_capacity=*)
+            _spv=${_spk#*=}
+            if [ -n "${_spv:-}" ]; then
+              case "$_spv" in
+                *[!0-9]*)
+                  echo "Invalid ${_spk%%=*}: $_spv" >&2
+                  echo "Expected a number: 0-100 (percent) or 3001-5000 (mV)" >&2
+                  return 2
+                ;;
+                *)
+                  if [ "$_spv" -le 100 ] 2>/dev/null; then :
+                  elif [ "$_spv" -ge 3001 ] 2>/dev/null && [ "$_spv" -le 5000 ] 2>/dev/null; then :
+                  else
+                    echo "Capacity out of range: $_spv" >&2
+                    echo "Expected 0-100 (percent) or 3001-5000 (mV)" >&2
+                    return 2
+                  fi
+                ;;
+              esac
+            fi
+          ;;
         esac
       done
 
@@ -65,7 +110,7 @@ set_prop() {
       # treated this way; the documented no-control-file exit (0) still persists the intent for
       # the daemon to re-apply, and a failed apply (1) is unchanged.
       [ .${mcc-${max_charging_current-x}} = .x ] \
-        || set_ch_curr ${mcc:-${max_charging_current:--}} \
+        || { : > $TMPDIR/.mcc-settling 2>/dev/null; set_ch_curr ${mcc:-${max_charging_current:--}}; } \
         || { [ $? -ne 11 ] || unset mcc max_charging_current; }
 
       [ ".${mcv-${max_charging_voltage-x}}" = .x ] \
@@ -236,6 +281,28 @@ set_prop() {
 
   # update config.txt
   . $execDir/write-config.sh
+  # The set is now COMPLETE: nodes written and the config published. Until this point a daemon tick
+  # could see the marker already up while still holding the pre-set config, conclude the user had
+  # cleared a cap, and run the release path - deleting the marker mid-apply and restoring every node
+  # it had just capped. That is why a cap could land in config, read as active in AccA, and throttle
+  # nothing. `acc -s` takes no lock, so the daemon needs an explicit signal that a set is in flight.
+  # RE-ASSERT the marker now that the config is published, then drop the mutex.
+  #
+  # Checking the mutex before the destructive rm was not enough, and could never have been: a daemon
+  # tick that entered its release branch BEFORE the mutex existed is already committed, and no test
+  # placed later in that path can un-commit it. Measured 3 losses in 30 cycles with the guard in
+  # place, against 1 in 6 without it - narrower, not closed.
+  #
+  # What IS final is the config. Until write-config publishes, the daemon holds a config with no cap
+  # and its release branch is live; once the cap is in the config that branch can never run again,
+  # because it is gated on maxChargingCurrent[0] being empty. So re-asserting the marker here, after
+  # publish, is the first moment the assertion cannot be undone. It is idempotent, it only ever runs
+  # when the config actually carries a cap, and it costs one touch.
+  _rcfg=$(sed -n 's/^maxChargingCurrent=(//p' ${config:-/data/adb/vr25/acc-data/config.txt} 2>/dev/null | cut -d' ' -f1 | tr -d ')')
+  if [ -n "$_rcfg" ]; then
+    touch $TMPDIR/.mcc-custom 2>/dev/null || :
+  fi
+  rm -f $TMPDIR/.mcc-settling 2>/dev/null || :
 
   if $restartDaemon; then
     if [ ".${cw-${current_workaround-x}}" != .x ]; then

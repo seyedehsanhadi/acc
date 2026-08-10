@@ -8,18 +8,55 @@ Community fork of VR-25's ACC, maintained by seyedehsanhadi.
 
 Changes since the fork baseline (v2025.5.18-stable.6.5):
 
-**v2025.5.18-6.5.1-rc22 (202505302)**
+**v2025.5.18-6.5.1-rc22 (202505325)**
+
+Everything since rc21, in one release.
 
 Fixed
-- **The temperature limit did nothing on a Pixel unless the battery was already near its charge limit.** On these phones the limit is held by firmware, and the way ACC asked for a pause when the battery got too warm was to lower the "stop charging at" level to the "resume at" level. The firmware only stops once the battery reaches that stop level, so below it nothing happened at all. Since most of a charge is spent below the resume level, the temperature limit was quietly absent for most of it. Measured on a Pixel 6a at 38 degrees against a 37 degree limit: still drawing 1.2 amps. The pause now sits at wherever the battery actually is, so it takes effect immediately at any charge level, and lifts on its own once the battery cools. Also fixed alongside it: while too warm, ACC would briefly raise the firmware limit to 100% roughly every ten seconds as part of an unrelated workaround for phones that refuse to resume charging, letting the battery charge through each of those windows.
-- **A Pixel could stop charging entirely and stay that way, while ACC looked healthy.** On phones whose charge limit is held by firmware, one setting made ACC hand control to the generic switch machinery instead: "never sit above the limit". That machinery then went looking for a charging switch, testing each candidate for thirty-five seconds, and none of them work on this hardware, which is the whole reason the firmware limit is used in the first place. Everything else stopped for the duration. The limit stayed frozen at whatever it happened to be, and the phone sat not charging with a limit far above where it was. Nothing reported a problem, because the usual check only asks whether ACC is still running, and it was. Reproduced on a Pixel 6a: the limit was set to 74%, the battery was at 42%, and the phone would not charge; raising the limit changed nothing until ACC was restarted. That setting is now declined on these phones with an explanation, rather than being attempted in a way that cannot work.
-- **ACC could report your phone as charging when nothing was plugged in.** It works out whether the battery is filling from three clues: which way the current is flowing, whether the charge counter is climbing, and what the kernel says. Each one can be wrong on its own, and with no cable attached all three went wrong together on both test phones at once. One was draining while its current read positive, the other while its current read negative, and both were reported as charging. The safeguard that catches the opposite mistake only works in one direction, by design, so nothing was left to catch this one. The last word now goes to something that needs no guesswork: with no cable attached, the phone is not charging. A pause that ACC itself applied is unaffected, because the cable is still attached during one.
-- **Every charging limit could go blind at once on phones with a slow fuel gauge.** ACC decides whether the battery is filling by three tests in order: the current's sign, the charge counter's movement, and the kernel's own charging status. All of the limits are only checked while it believes charging is happening, so getting that wrong disables temperature, capacity, current and voltage together. The kernel check was written to stand down whenever the charge counter had already decided, and it tested that by asking whether a counter reading existed rather than whether that reading meant anything. A counter too slow to move within the sample window produced a reading of zero, which is not a decision, and that switched the kernel check off. On those phones an unchallenged and sometimes wrong current sign decided everything. Reproduced here on a Mi A3 whose counter did not move across two minutes: ACC reported the battery as draining with the cable in and the kernel saying otherwise. It matches the report from a Redmi Note 10 Pro that sat at 41 degrees against a 40 degree limit without ever pausing.
-- **The cached charge-direction never settled on some phones.** The polarity ACC learns for a phone is cached, and re-learning it appended another line to that cache rather than replacing the old one, so the file accumulated every attempt and whichever line happened to be written last silently won on the next read. A Mi A3 was found holding fifteen entries, two of them contradicting the other thirteen. There is a guard meant to stop this re-learning once a phone proves its current sign is not stable, but the only thing that armed it was the charge counter proving a contradiction, which needs a battery moving faster than one holding near full. So on exactly the phones that flip-flop the most, the guard could never arm. The cache now holds one entry, and a genuine change in polarity arms the guard whatever detected it.
-- **Charging came back on above your maximum temperature.** Four separate paths turned charging back on after checking the battery level alone: the shutdown handler when the daemon stops, the startup recovery that releases a switch a previous run left cut, the re-arm that runs when you plug in, and the firmware-limit unlatch on Pixel and other native-limit phones. All four shared one piece of reasoning, that a level below your pause level means a resume cannot overcharge. That is true for a capacity limit and says nothing at all about heat, so on a hot pack with the level anywhere under the pause level, which is the ordinary case, each of them undid a temperature pause the daemon then had to apply again. Reported on a Redmi Note 10 Pro as repeated resumes at 40.4 to 41.4 degrees against a 40 degree limit, one of them logged as a release decided on "level 64 < pause 75" with no temperature in it. Reproduced on a Mi A3, where stopping the daemon on a pack two degrees over the limit turned charging on and left no daemon running to pause it again. All four now consult the pack temperature first. The guard blocks only on a temperature it can actually read, so a phone with an unreadable sensor still releases a stuck switch rather than being stranded on a live cable, which is the failure the startup recovery exists to prevent.
-- **Fast charging collapsed to 5 V on some Qualcomm phones.** At startup the daemon restores input-current nodes to undo a cap it may have left behind, deciding on whether a node reads below the default it recorded earlier. During a fast-charge negotiation the charger driver holds those nodes at real intermediate values that are legitimately below a default captured in an earlier session, so the restore overwrote a live negotiation and it fell back to slow USB. Reported on a Redmi Note 9S, charging at 1.5 A and 4.59 V afterwards, with upstream ACC unaffected. Only a node ACC could plausibly have zeroed, at or under 100 mA, is restored now.
-- **A phone could report discharging while it was charging.** Where the kernel's own status node and the charge-direction reading disagreed, and no coulomb reading was available to break the tie, the daemon took the pessimistic answer. It now trusts a kernel status of Charging in that specific case.
-- **The daemon could not recover its own working directory after a reboot.** Its scratch directory lives on a filesystem that is wiped on every boot, and a cold start died trying to take a lock inside a directory that no longer existed. It now creates the directory before taking the lock.
+- ACC no longer reports charging with nothing plugged in.
+- A phone that charges with an inverted current sign is no longer read as discharging.
+- A fuel gauge too slow to move no longer blinds every limit at once.
+- The learned charge direction now settles instead of re-learning forever.
+- The temperature limit now works on Pixel and other firmware-limit phones.
+- Charging no longer resumes above your maximum temperature.
+- "Never sit above the limit" no longer leaves a Pixel unable to charge.
+- Switch discovery no longer interrupts charging at any level on every plug.
+- `acc -e` on an unplugged phone no longer leaves it unable to charge.
+- Startup restore no longer overwrites a live charger negotiation.
+- A new current limit is now actually written the first time it is set.
+- A failed apply no longer leaves ACC believing a limit is in force.
+- The daemon no longer releases a current limit while you are setting one.
+- The daemon now re-reads the config when it decides, not the copy it started with.
+- Clearing a current limit no longer lets the daemon put it straight back.
+- `acc -s pause_capacity=999` is refused instead of silently storing 80.
+- An idle phone no longer wakes the charger driver every second.
+- Healing the state cache no longer re-applies a limit already held.
+- The daemon can recreate its working directory after a reboot.
+- An unwritable data partition no longer stops the daemon silently.
+- The switch scan no longer disturbs current limits while restoring nodes.
+- The write ledger is no longer empty on firmware-limit phones.
+- The collapsed fast-charge detector can now fire; it never could.
+- Diagnostic bundles now contain the kernel logs they claim to contain.
+- Bundle entries name the file they hold, not the command that made it.
+- An empty source is reported as empty, not as a failure.
+- A missing log directory no longer aborts the command writing to it.
+- Battery info reports correct watts on inverted-sign phones.
+
+Added
+- Charger voltage, input current limit and negotiated supply type are recorded on every pass.
+- A polarity that flips with the charge mode is recorded, so ACC stops re-learning it.
+- Every power-off ACC performed or refused is collected in the diagnostic bundle.
+- The test suite is installed with the module, so a flashed build can check itself.
+- A voltage limit is refused on phones with no voltage-control node.
+
+Changed
+- ACC lets the charger re-negotiate once per plug, only from the 5 V floor.
+- A supply at 6 V or more counts as a fast session without a vendor node.
+- Every USB re-detection honours `acc -sk off`, the rate limit and the ledger.
+- The charger-node list is resolved once per process instead of twice a second.
+- Boot and voltage applies skip the write when the value already matches.
+- Byte counts in a bundle describe what reached it, not what the source claimed.
+- Installing the module clears the marker an interrupted test run leaves behind.
 
 **v2025.5.18-6.5.1-rc21 (202505301)**
 

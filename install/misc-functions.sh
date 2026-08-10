@@ -22,6 +22,31 @@ apply_on_boot() {
     else
       default=${3:-${2-}}
     fi
+    # READ BEFORE WRITE. A node already holding the target value must not be written again.
+    #
+    # This path wrote unconditionally, and on the input-negotiation nodes every write re-triggers
+    # AICL - the charger re-measures the source and can settle LOWER. Repeating that is how a
+    # healthy contract erodes: traced on a Mi A3 across one test run, 7.6V down to 5.76V through
+    # ordinary cap cycling with no re-kick involved at all, and the same phone had already been
+    # measured taking ~105 futile writes in 90s on a node that never changed.
+    #
+    # ACC already holds this convention elsewhere - set_temp_level reads before writing for exactly
+    # this reason, and t52 asserts it - so this is bringing the current path in line rather than
+    # inventing a rule. A write that would change nothing can only cost: a fork, and a nudge to a
+    # negotiation the driver had already settled.
+    #
+    # Deliberately NOT applied when exitCode_ is set (a switch test/scan must write regardless of
+    # what a node reads), and the comparison is string-exact so any unreadable or oddly-formatted
+    # value falls through to the write - failing toward doing the work, which is the safe direction
+    # for a cap.
+    if [ -z "${exitCode_-}" ]; then
+      eval "_tv=\$$arg"
+      _lv=; { read -r _lv < "$file"; } 2>/dev/null || _lv=
+      if [ -n "${_lv:-}" ] && [ "$_lv" = "${_tv:-}" ]; then
+        continue
+      fi
+    fi
+
     set +e
     write \$$arg $file 0 &
     set -e
@@ -39,7 +64,7 @@ apply_on_plug() {
   local value=
   local default=
   local arg=${1:-value}
-  local _rk= _rv= _rc= _lv=
+  local _rk= _rv= _rc= _lv= _tv=
 
   for entry in ${applyOnPlug[@]-} ${maxChargingVoltage[@]-} \
     ${maxChargingCurrent[@]:-$([ .$arg != .default ] || cat $TMPDIR/ch-curr-ctrl-files 2>/dev/null || :)}
@@ -69,8 +94,19 @@ apply_on_plug() {
     # the daemon can reach here holding a config it read before the user cleared it. Without this
     # the cap is re-applied a second after being released, and the phone stays capped.
     if [ "$arg" = value ] && [ -n "${maxChargingCurrent[0]-}" ]        && [ ! -f "$TMPDIR/.mcc-custom" ] && [ -z "${exitCode_-}" ]; then
+      # MEMBERSHIP, not five hardcoded names. ls_curr_ctrl_files resolves roughly twenty patterns and
+      # this list covered five, so a released cap was re-applied to everything else and then left
+      # pinned with no later clear to lift it: restrict_cur on Qualcomm (measured 4.64V/1.51A against
+      # a charger that had negotiated far more), usb/input_current_max on Tensor, and the
+      # batt_tune_*/ac_charge/sdp_charge family on Samsung. ch-curr-ctrl-files IS the set of nodes a
+      # cap writes, so ask it, and keep the patterns as the fallback for a phone that has not
+      # resolved its ctrl files yet (tmpfs, so that is every phone on its first charge after a boot).
+      case "$file" in /*) _mf=${file#/sys/class/power_supply/};; *) _mf=$file;; esac
+      if [ -s "$TMPDIR/ch-curr-ctrl-files" ]          && { grep -q "^${_mf}::" "$TMPDIR/ch-curr-ctrl-files" 2>/dev/null               || grep -q "^${file}::" "$TMPDIR/ch-curr-ctrl-files" 2>/dev/null; }; then
+        continue
+      fi
       case "$file" in
-        */current_max|*/input_current|*/input_current_limit|*/input_current_settled|*constant_charge_current*) continue;;
+        */current_max|*/input_current*|*constant_charge_current*|*restrict_cur*|*restrict_chg*) continue;;
       esac
     fi
 
@@ -665,11 +701,153 @@ rekick_usb() {
     command -v _wlog >/dev/null 2>&1 && _wlog "rekick skipped ($_reason): too soon" || :
     return 1
   fi
+
+  # NEVER RENEGOTIATE A CONTRACT THAT IS ALREADY WORKING.
+  #
+  # This is the whole hazard of the function, and until now the only thing standing between a user
+  # and it was a rate limit. apsd_rerun re-runs charger-type detection; on a QC or PD supply that
+  # means dropping to the 5V floor, and it does not come back without a physical replug - the note
+  # at the top of this function has said so all along while the code fired it regardless.
+  #
+  # A re-kick is a REPAIR. Repairing something that is not broken can only lose: the best case is
+  # the contract survives and nothing was gained, the worst case is a user on 9V/2A wakes up on
+  # 5V/500mA until they unplug. Traced on a Mi A3: 7712800 uV at the start of a run, a 5V floor by
+  # the middle, and no software path back - apsd_rerun, two rounds of rerun_aicl and `acc -e` all
+  # failed while the input limit ratcheted 900000 -> 0.
+  #
+  # So: if a high-voltage contract is live AND the input limit is healthy, there is nothing to
+  # recover and this must not run. The stalled-charger cases this function exists for all present
+  # as a collapsed limit or a 5V supply, and both still fall through to the re-kick below.
+  #
+  # 6V threshold: a 5V supply sagging under load (5.0-5.2V measured) can never reach it, and the
+  # lowest real negotiated step is 9V. Two builtin reads, no fork.
+  # VOLTAGE ALONE. The first version of this guard also required the input limit to be above
+  # 600mA, and that condition was the hole it leaked through.
+  #
+  # A low input limit is almost always ACC'S OWN CAP, not a sick charger. During a cap cycle ACC
+  # deliberately drives the limit to 500mA - and the guard then read "unhealthy", permitted the
+  # re-kick, and tore down the contract at exactly the moment a cap was applied. Traced from the
+  # write ledger on a Mi A3, one run: the guard correctly refused twice at 7851mV and 6005mV, and
+  # let two through while a cap held the limit at 700mA, after which the supply sat at 4675mV.
+  #
+  # So the only question worth asking is whether a negotiated contract exists. If it does, a
+  # re-kick can only lose it - there is nothing above 5V that apsd_rerun can win back, and it does
+  # not come back without a physical replug. The stalled-charger case this function exists for is
+  # handled better downstream anyway: the zero-ICL branch below restores the recorded limit
+  # directly, which is what actually recovered a stuck phone in testing, and it does so without
+  # renegotiating anything.
+  #
+  # Below 6V there is no high-voltage contract to protect and the re-kick proceeds as before.
+  # A LATCH, NOT AN INSTANTANEOUS READING.
+  #
+  # The previous version compared usb/voltage_now against 6V at the moment of the call. That is not
+  # a reliable statement about whether a negotiated contract exists, because a high-voltage supply
+  # SAGS UNDER LOAD: a QuickCharge 3 contract measured 6433-6712mV on a Mi A3 while delivering ~2A,
+  # already brushing the threshold. The instant it dipped below, the guard concluded there was no
+  # contract to protect, permitted a re-kick, and the re-kick made the drop permanent. Ledger from
+  # that run: a clean sequence of rate-limit skips, then "rekick usb/apsd_rerun <- 1" at 07:28:59,
+  # and the supply sat at 4860mV/400mA afterwards.
+  #
+  # A contract is a property of the PLUG, not of this millisecond. So latch it: once a high voltage
+  # has been seen since the cable went in, treat the contract as live until the cable comes out.
+  # accd sets and clears $TMPDIR/.hvcontract around the plug transition. A sag can no longer open
+  # the door, and a genuine 5V-only supply never sets the latch, so real stalls still get repaired.
+  if [ -f "$TMPDIR/.hvcontract" ]; then
+    _rkv=
+    { read -r _rkv < usb/voltage_now; } 2>/dev/null || :
+    command -v _wlog >/dev/null 2>&1 && _wlog "rekick skipped ($_reason): negotiated contract latched this plug (now $(( ${_rkv:-0} / 1000 ))mV) - apsd_rerun would drop it to 5V until replug" || :
+    return 1
+  fi
+
+  # NO LATCH YET - AND A SINGLE READ HERE IS THE v3 BUG VERBATIM.
+  #
+  # There are real windows where no loop has latched this plug and a contract nonetheless exists:
+  #   - the daemon is STOPPED (users stop ACC to charge at full speed) and AccA clears a current
+  #     limit, which reaches this function through set-ch-curr's clear path;
+  #   - the plug-time aim-high block is mid-poll, holding for up to 17s before it writes the latch,
+  #     while the charger has already stepped up to 9V.
+  # In both, the only thing standing between the user and a dead contract is this check - and a
+  # single instantaneous sample is exactly what failed on hardware: a QC3 line delivering ~2A was
+  # measured at 6433-6712mV, dipping under the threshold, and one unlucky sample permitted the
+  # re-kick that killed it.
+  #
+  # So SAMPLE, do not glance. Three reads about a second apart, refuse if ANY of them shows a
+  # negotiated contract. A real high-voltage supply cannot read below 6V on three consecutive
+  # samples; a 5V-only or collapsed supply always does. The cost is two seconds on a path already
+  # rate-limited to once per five minutes, and it buys the difference between a guess and a fact.
+  _rkv=; _rkhi=0; _rkn=0
+  while [ $_rkn -lt 3 ]; do
+    _rkn=$(( _rkn + 1 ))
+    _rkv=
+    { read -r _rkv < usb/voltage_now; } 2>/dev/null || :
+    case "${_rkv:-x}" in
+      ''|x|*[!0-9]*) : ;;
+      *) [ "$_rkv" -ge 6000000 ] 2>/dev/null && { _rkhi=$_rkv; break; } ;;
+    esac
+    [ $_rkn -lt 3 ] && sleep 1
+  done
+  if [ "${_rkhi:-0}" -ge 6000000 ] 2>/dev/null; then
+    : > "$TMPDIR/.hvcontract" 2>/dev/null || :
+    command -v _wlog >/dev/null 2>&1 && _wlog "rekick skipped ($_reason): $(( _rkhi / 1000 ))mV negotiated contract seen while sampling - apsd_rerun would drop it to 5V until replug" || :
+    return 1
+  fi
   for _rn in */apsd_rerun */rerun_aicl; do
     [ -w "$_rn" ] || continue
     command -v _wlog >/dev/null 2>&1 && _wlog "rekick $_rn <- 1 ($_reason)" || :
     echo 1 > "$_rn" 2>/dev/null || :
   done
+  # VERIFY the input limit came back.
+  #
+  # apsd_rerun ZEROES the ICL while charger detection re-runs; rerun_aicl is what restores it. The
+  # loop above writes both, which is why this normally self-corrects in milliseconds - but nothing
+  # ever checked. Measured by hand on a Mi A3 against a PD-only laptop brick: after apsd_rerun the
+  # ICL read 0 and stayed there until AICL was run a second time.
+  #
+  # An operation whose purpose is to restore full charging speed must not be able to leave a phone
+  # at zero current. One read, one retry, and only when the limit is actually still zero.
+  _rkicl=
+  { read -r _rkicl < usb/current_max; } 2>/dev/null || :
+  case "${_rkicl:-x}" in
+    ''|x|0)
+      sleep 2
+      { read -r _rkicl < usb/current_max; } 2>/dev/null || :
+      case "${_rkicl:-x}" in
+        ''|x|0)
+          # Still zero after a second look. Another rerun_aicl is the WRONG remedy, and this used to
+          # do exactly that.
+          #
+          # AICL is a MEASUREMENT of what the source can supply, not a repair. Re-running it on a
+          # degraded supply just re-measures a degraded supply, and each pass ratchets the estimate
+          # further down. Traced on a Mi A3 whose QuickCharge contract had collapsed to a 5V floor,
+          # sampling every 10s:
+          #
+          #     start        icl 900000   charging
+          #     rerun_aicl   icl 800000 -> 700000 -> 500000
+          #     apsd_rerun   icl 300000 -> 100000 -> 0
+          #     acc -e       icl 0, and the phone DISCHARGED on a live cable for the next 40s
+          #
+          # Writing the limit back ended it instantly in the same session: 0 -> 1700000, charging at
+          # 1.35A. So restore the recorded default and let the driver clamp - which is ACC's standing
+          # rule everywhere else, and what the clear path in set-ch-curr.sh already does before it
+          # calls this function.
+          #
+          # Only the input-negotiation nodes, and only when the limit is genuinely at zero: a phone
+          # that is charging fine must never have a snapshot replayed onto it.
+          command -v _wlog >/dev/null 2>&1 && _wlog "rekick icl still 0 after $_reason - restoring recorded defaults (aicl cannot repair a degraded source)" || :
+          while IFS= read -r _rkl; do
+            case "$_rkl" in
+              */current_max::*|*/input_current*::*) : ;;
+              *) continue ;;
+            esac
+            _rkn=${_rkl%%::*}
+            _rkd=${_rkl##*::}
+            case "${_rkd:-x}" in ''|x|*[!0-9]*) continue;; esac
+            [ -w "$_rkn" ] || continue
+            command -v _wlog >/dev/null 2>&1 && _wlog "rekick restore $_rkn <- $_rkd" || :
+            echo "$_rkd" > "$_rkn" 2>/dev/null || :
+          done < "$TMPDIR/ch-curr-ctrl-files" 2>/dev/null || : ;;
+      esac ;;
+  esac
   return 0
 }
 
@@ -684,9 +862,9 @@ enable_charging() {
     # current-cap switches even while online=0 (same name exception as the resume gate below).
     if [ -f $TMPDIR/.sw ]; then
       . $TMPDIR/.sw 2>/dev/null || :; rm -f $TMPDIR/.sw 2>/dev/null || :
-      if present; then   # rc7 (U5): gate resume on PRESENT (cable attached), not online+name-allowlist. Many input-cut switches (charging_enabled/charge_disable/slate_mode/force_*_suspend/mmi/night_charging...) drive */online to 0 while latched, and were NOT in the allowlist -> never re-armed -> stuck not-charging till reboot. present stays 1 whenever plugged, covers EVERY cut class, and still skips the flip when truly unplugged (no phantom-charging blip).
-        flip_sw on 2>/dev/null || :
-      fi
+      # rc22: NOT gated on present -- see the release below for why. A switch latched off while the
+      # cable is out must still be returned to its resume value, or nothing electrically undoes it.
+      flip_sw on 2>/dev/null || :
     fi
 
     if ! $ghostCharging || { $ghostCharging && online; }; then
@@ -702,13 +880,26 @@ enable_charging() {
       # the charger input, so while paused */online reads 0 -- meaning `online` can NEVER become
       # true to re-arm it, and charging is stuck off until a reboot (the no-charge-til-reboot bug
       # on these devices, e.g. MTK Moto). For these switches the online signal is unreliable, so
-      # flip ON regardless:
-      # writing the resume value (input_suspend=0) is harmless when truly unplugged (no VBUS =
-      # no current = no phantom "Charging") and un-masks online when actually plugged. The
-      # pause path still enforces the limit, so this can never overcharge. All OTHER switch
-      # types keep the online gate (avoids the cosmetic unplug blip).
-      if present; then   # rc7 (U5): gate resume on PRESENT (cable attached), not online+name-allowlist. Many input-cut switches (charging_enabled/charge_disable/slate_mode/force_*_suspend/mmi/night_charging...) drive */online to 0 while latched, and were NOT in the allowlist -> never re-armed -> stuck not-charging till reboot. present stays 1 whenever plugged, covers EVERY cut class, and still skips the flip when truly unplugged (no phantom-charging blip).
-        flip_sw on || cycle_switches on
+      # flip ON regardless, and rc22: regardless of `present` too.
+      #
+      # The old gate rested on "skipping the flip changes nothing electrically". That is false: it
+      # changes everything on the NEXT plug. A node left latched off keeps blocking charge as soon
+      # as power returns, and the only thing that would undo it is a later enable_charging from a
+      # RUNNING daemon -- which is exactly what is missing here. `acc -e` and `acc -d` stop the
+      # daemon by design and never restart it, and the daemon's EXIT trap calls this on the way
+      # out, when no daemon is left to retry.
+      #
+      # Measured on a Mi A3, unplugged, battery/input_suspend latched at 1: `acc -e` printed
+      # "Charging enabled", exited 0, wrote no switch value at all, and left the phone unable to
+      # charge. A direct `echo 0` to the same node worked, so the hardware was never the problem.
+      #
+      # The anti-blip reason is obsolete: write() is idempotent (read-before-write), so a switch
+      # already at its resume value writes nothing and cannot blip. The only case that writes is
+      # the latched one, which must never be skipped.
+      #
+      # Re-negotiation stays behind present: APSD/AICL only mean anything with a cable attached.
+      flip_sw on || cycle_switches on
+      if present; then
         # D8 (rc5: extended to current-cap classes): after un-cutting, re-run APSD/AICL so the
         # charger re-negotiates. Input-cut switches (input_suspend/bypass/vbus) mask */online to 0
         # -> fire when present && !online. CURRENT-CAP switches (constant_charge_current[_max],
@@ -718,18 +909,15 @@ enable_charging() {
         # re-detect); self-limits once current flows. (rc4 D8 missed both: the *constant_charge_
         # current* (no _max) name, and the !online gate that a current-cap never satisfies.)
         case "${chargingSwitch[*]-}" in
+          # Both arms went straight at the nodes, bypassing rekick_usb() and therefore the user's
+          # `acc -sk off`. The help text tells people that switch stops ACC re-running input
+          # detection - the usual advice when a QC/PD contract keeps collapsing - and these two ran
+          # on every resume regardless. rekick_usb() carries the off flag, the rate limit and the
+          # ledger entry; nothing here needs to reach past it.
           *current_max*|*input_current*|*constant_charge_current*)
-            if present && not_charging && _rekick_due; then
-              for _rn in */apsd_rerun */rerun_aicl; do
-                [ -w "$_rn" ] && { _wlog "rekick $_rn <- 1" 2>/dev/null; echo 1 > "$_rn" 2>/dev/null; } || :
-              done
-            fi ;;
+            present && not_charging && rekick_usb resume 2>/dev/null || : ;;
           *suspend*|*bypass*|*vbus*)
-            if present && ! online && _rekick_due; then
-              for _rn in */apsd_rerun */rerun_aicl; do
-                [ -w "$_rn" ] && { _wlog "rekick $_rn <- 1" 2>/dev/null; echo 1 > "$_rn" 2>/dev/null; } || :
-              done
-            fi ;;
+            present && ! online && rekick_usb resume 2>/dev/null || : ;;
         esac
       fi
 

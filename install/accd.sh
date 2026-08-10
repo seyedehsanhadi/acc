@@ -295,18 +295,38 @@ if ! $_INIT; then
     # Degrades safely to a plain countdown if stat/online are unavailable.
     # rc19: fork-free ticks (_tick) + a cached, builtin-read present() -- this loop used to
     # spawn sleep+stat+ls+grep+cat every second, all night, on every unplugged phone.
-    local left=${1:-60}
+    local left=${1:-60} _pt=0
     case $left in ''|*[!0-9]*) left=60;; esac
     : > $TMPDIR/.nap-ref 2>/dev/null || :
     set +x
+    # rc22c: poll present() every Nth tick, not every tick.
+    #
+    # present() is CHEAP only when a node reports 1. Unplugged, nothing does, so it falls through to
+    # online() - and a power_supply */online read is not a file read, it calls into the charger
+    # driver. On a Snapdragon 665 that is an I2C round trip, and this loop ran it once a second all
+    # night. Measured on a Mi A3, unplugged, 120s windows: 69 CPU ticks against rc21's 49, a 40%
+    # idle regression; a build that skipped the sweep measured a third of that.
+    #
+    # The saving is taken HERE and not inside present(), because narrowing what present() accepts as
+    # evidence is how the fuxi drain-while-charging bug happens - t47 exists to reject exactly that,
+    # and it rejected the attempt. Polling less often changes no semantics at all: present() and
+    # online() answer precisely as before, just less frequently.
+    #
+    # The cost is latency noticing a cable, 1s worst case becoming ${presentEvery:-5}s, against a
+    # loop that runs at 9s intervals once plugged. _tick still runs every second, so an AccA config
+    # edit is still picked up within ~1s.
     while [ $left -gt 0 ]; do
       left=$((left - 1))
+      _pt=$(( _pt + 1 ))
       # charger attached -> wake now so charging logic runs immediately. rc9: gate on
       # present (cable attached), not online -- an input-cut switch holds online=0 while
       # plugged, which kept the daemon in this 120s deep nap (delaying resume + config
       # edits). present stays 1 whenever the cable is in. Written "! present || break"
       # so the truly-unplugged case returns 0 under set -e, like _nap's mtime guard.
-      ! present || break
+      if [ $_pt -ge ${presentEvery:-5} ]; then
+        _pt=0
+        ! present || break
+      fi
       # config changed -> wake now so AccA edits apply live (via _tick's -nt test)
       _tick || break
     done
@@ -321,13 +341,20 @@ if ! $_INIT; then
     # ticks like _nap_idle, but break on UNPLUG (present gone) instead of plug-in; config
     # edits still break within ~1s. Worst-case resume detection moves from 9s to ~30s
     # against a multi-hour drain curve -- nothing a battery can do in 30s matters here.
-    local left=${1:-30}
+    local left=${1:-30} _pt=0
     case $left in ''|*[!0-9]*) left=30;; esac
     : > $TMPDIR/.nap-ref 2>/dev/null || :
     set +x
+    # Same per-tick present() cost as _nap_idle, same gating. This loop's own comment already
+    # accepts a 30s worst case for resume detection, so a ${presentEvery:-5}s poll is well inside
+    # the tolerance it was designed around.
     while [ $left -gt 0 ]; do
       left=$((left - 1))
-      present || break
+      _pt=$(( _pt + 1 ))
+      if [ $_pt -ge ${presentEvery:-5} ]; then
+        _pt=0
+        present || break
+      fi
       _tick || break
     done
     set -x
@@ -591,7 +618,7 @@ if ! $_INIT; then
         $cooldown || (set_ch_curr ${cooldownCurrent:--} || :)
         (maxChargingCurrent=(); apply_on_plug)
       else
-        [ -n "${maxChargingCurrent[0]-}" ] || (set_ch_curr - || :)
+        [ -n "${maxChargingCurrent[0]-}" ] || [ -f $TMPDIR/.mcc-settling ] || (_accdRelease=true; set_ch_curr - || :)
         apply_on_plug
       fi
 
@@ -669,10 +696,24 @@ if ! $_INIT; then
     # most likely to be the only thing asking.
     [ -s $TMPDIR/.batt-interface.sh ] \
       || { command -v _cache_republish >/dev/null 2>&1 && _cache_republish >/dev/null 2>&1; } || :
-    { printf '%s,%s,%s,%s,%s,%s,%s,%s\n' "$(date +%s 2>/dev/null)" "$(batt_cap 2>/dev/null)" \
+    # The three contract fields. `read` is a shell builtin, so this is three redirections and NO
+    # fork - the discipline rc19 established when per-loop stat calls cost 26% of a core at idle.
+    # The paths were resolved once at init precisely so this could stay fork-free.
+    #
+    # These reads are what make the detector below work at all. Until now the init scan resolved
+    # _psVolt/_psIcl/_psType and nothing ever read them, this printf wrote 8 fields while the comment
+    # above advertised vbus/icl/supply, and the collapse detector tested _ft and _fv which no line in
+    # install/ ever assigned - so `case "${_ft:-}"` always fell through to `*) _lowV=0` and it could
+    # not fire on any device. The rc22 change was three halves that never met.
+    _fv=; _fi=; _ft=
+    [ -n "${_psVolt:-}" ] && { read _fv < "$_psVolt" 2>/dev/null || :; }
+    [ -n "${_psIcl:-}" ]  && { read _fi < "$_psIcl"  2>/dev/null || :; }
+    [ -n "${_psType:-}" ] && { read _ft < "$_psType" 2>/dev/null || :; }
+    { printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$(date +%s 2>/dev/null)" "$(batt_cap 2>/dev/null)" \
         "$(cat "$currFile" 2>/dev/null)" "$(read_status 2>/dev/null)" \
         "$(online 2>/dev/null && echo 1 || echo 0)" "$(present 2>/dev/null && echo 1 || echo 0)" \
-        "${chDisabledByAcc:-?}" "${1:-loop}" >> "$dataDir/logs/flight.log"; } 2>/dev/null || :
+        "${chDisabledByAcc:-?}" "${1:-loop}" \
+        "${_fv:-}" "${_fi:-}" "${_ft:-}" >> "$dataDir/logs/flight.log"; } 2>/dev/null || :
     # rc22: name a collapsed fast-charge contract when it happens.
     #
     # The curtana report is a charger that advertises HVDCP or PD sitting at 5V, delivering ~5.8W
@@ -756,11 +797,24 @@ if ! $_INIT; then
       # setting, so nothing a user waits on gets slower. state.json is display-only -- no charging
       # decision reads it and acc -i / acc -j build fresh -- so this cannot affect control.
       #
-      # Worth raising because the publish is by far the daemon's most expensive act: profiled at
-      # 1216ms of CPU per call on an A3 and 444ms on a Pixel 6a, against a ~2000ms/min floor for
-      # everything else combined. Measured idle, screen off: 30s = 3937ms/min, 60s = 2946 (-25%),
-      # 120s = 2394 (-39%). uiRefresh=0 drops the heartbeat entirely (~2000ms/min, -49%) and
-      # leaves only change-driven publishes, which suits a plugged phone nobody is watching.
+      # RE-MEASURED, and the publish is no longer the dominant cost the older note claimed.
+      #
+      # That note quoted 30s = 3937ms/min, 60s = 2946, 120s = 2394, off = ~2000 on an A3. Those
+      # deltas do not reproduce. The first re-run did not either, and for an instructive reason:
+      # on a phone that deep-sleeps, cost-per-wall-minute is not a property of the setting at all.
+      # The A3 ran an identical `sleep 240` in 496s of wall in one arm and 586s in another, so the
+      # arm that slept least looked most expensive, and the run reported that publishing LESS cost
+      # 44% MORE. Holding a partial wakelock fixes it: every arm then spends the same fraction of
+      # the window awake and only the setting differs.
+      #
+      # Pinned that way, with a repeated 60s control arm to establish the noise floor (0.5% on a
+      # Pixel 6a, 1.4% on an A3), per minute of awake time:
+      #   Pixel 6a:  60s = 3334/3350,  120s = 3190 (-4%),  off = 2746 (-18%)
+      #   Mi A3:     60s = 5980/5896,  120s = 6093 (nil),  off = 5661 (-5%)
+      # So off is the only setting that reliably buys anything, 120s is worth little to nothing,
+      # and most of the daemon's idle cost is now the loop itself rather than the publish. Raising
+      # this is still free in correctness terms -- state.json is display-only -- but it is not the
+      # lever it used to be, and the settings labels no longer promise a fraction it cannot deliver.
       _uiR=${uiRefresh:-60}
       case $_uiR in ""|*[!0-9]*) _uiR=60;; esac
       if { [ "$_uiR" != 0 ] && [ $(( SECONDS - ${_wsAt:-0} )) -ge "$_uiR" ]; } \
@@ -785,6 +839,118 @@ if ! $_INIT; then
       # and wasOnline clears on unplug.
       freshPlug=false
       if online; then $wasOnline || freshPlug=true; wasOnline=true; else wasOnline=false; fi
+
+      # THE HIGH-VOLTAGE CONTRACT LATCH.
+      #
+      # rekick_usb must not renegotiate a live QC/PD contract, and asking "is the supply above 6V
+      # right now" is not a sound way to know one exists: a high-voltage supply SAGS UNDER LOAD.
+      # Measured on a Mi A3, a QC3 contract delivering ~2A read 6433-6712mV - brushing the
+      # threshold - and the moment it dipped below, the guard permitted a re-kick that made the
+      # drop permanent. A contract is a property of the PLUG, not of the current millisecond.
+      #
+      # So: clear the latch when the cable comes out, set it whenever a high voltage is seen while
+      # plugged. Once set it stays set for that plug, and a sag cannot open the door. A supply that
+      # is genuinely 5V-only never sets it, so a stalled charger is still repairable.
+      if ! present 2>/dev/null; then
+        rm -f $TMPDIR/.hvcontract 2>/dev/null || :
+        # A REAL cable removal, observed by this daemon. freshPlug alone is not that: it is driven
+        # by `online`, and an input-cut switch (input_suspend, current_max 0) drives online to 0
+        # while the cable is still attached - which ACC's own code documents in three places. So on
+        # every resume from a capacity pause, online goes 0->1 and freshPlug becomes true mid-plug.
+        # Gating the aim-high block on freshPlug alone therefore re-ran charger re-detection on a
+        # LIVE contract at every pause/resume cycle, on exactly the phones that use an input-cut
+        # switch. present() is the physical fact and is what re-arms it.
+        sawUnplug=true
+      else
+        _hvv=
+        { read -r _hvv < usb/voltage_now; } 2>/dev/null || :
+        case "${_hvv:-x}" in
+          ''|x|*[!0-9]*) : ;;
+          *) if [ "$_hvv" -ge 6000000 ] 2>/dev/null; then
+               [ -f $TMPDIR/.hvcontract ] || : > $TMPDIR/.hvcontract 2>/dev/null || :
+             fi ;;
+        esac
+      fi
+
+      # AIM FOR THE BEST CONTRACT THE CHARGER CAN GIVE, ONCE, AT PLUG TIME.
+      #
+      # Everything measured this session points at one rule: a charger re-detection is FREE before
+      # a contract is established and DESTRUCTIVE afterwards. apsd_rerun re-runs the handshake -
+      # at plug time that is exactly what negotiates 9V instead of 5V, and mid-session it is what
+      # throws 9V away with no way back except a physical replug.
+      #
+      # rekick_usb already refuses to touch a live high-voltage contract. This is the other half:
+      # when a plug lands on the 5V floor, give the charger one honest chance to do better rather
+      # than accepting whatever the kernel happened to settle on. Some kernels negotiate lazily, or
+      # settle low because a stale input limit was still capping the line when detection ran; both
+      # are recoverable at this exact moment and at no other.
+      #
+      # Order matters. The input nodes are released HIGH first, because AICL measures what it is
+      # allowed to draw: re-detecting while a 500mA limit is still in place teaches the charger that
+      # 500mA is all this phone wants, and it settles there. Release, then detect, then leave it
+      # alone forever.
+      #
+      # Bounded and quiet: only on the loop where a plug transition happened, only when the supply
+      # is actually on the floor, never when the user has turned re-kick off, and never more than
+      # once per plug. A phone that already negotiated well is untouched.
+      if $freshPlug && ${sawUnplug:-false} && [ ! -f $TMPDIR/.hvcontract ]         && [ ! -f $dataDir/.rekick-off ]; then
+        sawUnplug=false
+        _mcv=
+        { read -r _mcv < usb/voltage_now; } 2>/dev/null || :
+        case "${_mcv:-x}" in
+          ''|x|*[!0-9]*) : ;;
+          *)
+            # A high pre-read means a contract already exists: latch it and do nothing else.
+            # Previously this branch simply fell through, leaving the contract unlatched until the
+            # periodic check happened to catch it between load sags.
+            if [ "$_mcv" -ge 6000000 ] 2>/dev/null; then
+              : > $TMPDIR/.hvcontract 2>/dev/null || :
+            fi
+            if [ "$_mcv" -lt 6000000 ] 2>/dev/null; then
+              # Release the input ceiling so detection is not measuring our own cap. High, and let
+              # the driver clamp - the same rule the restore path uses.
+              for _mcf in */current_max */input_current_limit */input_current_settled; do
+                [ -w "$_mcf" ] || continue
+                case "$_mcf" in */battery/*|*/bms/*) continue;; esac
+                echo 5000000 > "$_mcf" 2>/dev/null || :
+              done
+              for _mcf in */apsd_rerun; do
+                [ -w "$_mcf" ] && echo 1 > "$_mcf" 2>/dev/null || :
+              done
+              sleep 2
+              for _mcf in */rerun_aicl; do
+                [ -w "$_mcf" ] && echo 1 > "$_mcf" 2>/dev/null || :
+              done
+              # WATCH LONG ENOUGH TO SEE THE ANSWER. A QC/PD handshake is not finished when the
+              # AICL write returns: it steps the voltage up over several seconds. Sampling once
+              # after 3s caught the supply mid-transition and logged "4542mV -> 4340mV", a DROP,
+              # on a run whose real outcome was a 7.3V QC3 contract at 2A a few seconds later.
+              # A log that reports the opposite of what happened is worse than no log - it would
+              # have sent the next person debugging this in exactly the wrong direction.
+              #
+              # Poll instead, and keep the BEST value seen: negotiation is monotonic upward here,
+              # and the peak is the contract that was actually won. Bounded at ~15s, and it breaks
+              # out as soon as a high-voltage step lands, so a phone that negotiates fast is not
+              # made to wait.
+              _mcv2=${_mcv:-0}; _mcw=0
+              while [ $_mcw -lt 15 ]; do
+                sleep 3
+                _mcw=$(( _mcw + 3 ))
+                _mcvn=
+                { read -r _mcvn < usb/voltage_now; } 2>/dev/null || :
+                case "${_mcvn:-x}" in
+                  ''|x|*[!0-9]*) : ;;
+                  *) [ "$_mcvn" -gt "${_mcv2:-0}" ] 2>/dev/null && _mcv2=$_mcvn
+                     if [ "$_mcvn" -ge 6000000 ] 2>/dev/null; then _mcw=15; fi ;;
+                esac
+              done
+              # Won a contract? Latch it immediately, so the very next loop cannot re-kick it away
+              # during a load sag before the periodic check above has run.
+              [ "${_mcv2:-0}" -ge 6000000 ] 2>/dev/null && { : > $TMPDIR/.hvcontract 2>/dev/null || :; }
+              command -v _wlog >/dev/null 2>&1 && _wlog "plug: aimed for best contract, $(( ${_mcv:-0} / 1000 ))mV -> $(( ${_mcv2:-0} / 1000 ))mV" || :
+            fi ;;
+        esac
+      fi
 
       # rc20: native firmware limit -- just keep the levels synced and let the firmware
       # hold/resume. Re-source $config so AccA limit changes apply live. No switch toggle,
@@ -1172,7 +1338,7 @@ if ! $_INIT; then
         # normal resting state) kept the old cap until reboot: config clean, phone still
         # current-limited (field report: "disabled it but it still sticks", capped at 1100 mA).
         # Cheap: set_ch_curr short-circuits on its marker once the defaults are restored.
-        [ -n "${maxChargingCurrent[0]-}" ] || (set_ch_curr - || :)
+        [ -n "${maxChargingCurrent[0]-}" ] || [ -f $TMPDIR/.mcc-settling ] || (_accdRelease=true; set_ch_curr - || :)
 
         # Same story for a cleared voltage limit. The charging branch releases voltage via
         # set_ch_volt above, but the daemon spends its resting life in THIS not-charging branch,
@@ -1452,7 +1618,44 @@ if ! $_INIT; then
     # tester's phone without reflashing).
     [ ! -f $TMPDIR/.fcguard-off ] || return 1
     [ ! -f $TMPDIR/.fcguard-force ] || return 0
-    local _n= _v=
+    local _n= _v= _fcv=
+
+    # A NEGOTIATED HIGH VOLTAGE IS ITSELF A LIVE FAST SESSION, on any chipset.
+    #
+    # Everything below this looks for a vendor session node - quick_charge_type, fast_chg_type,
+    # VOOC and friends. That covers the phones those nodes exist on and silently covers nothing
+    # else. A Mi A3 has NONE of them: the cached list is empty, the loop below runs zero times,
+    # and the guard reported "no fast session" while the phone was sitting on a 7.7V QuickCharge 3
+    # contract. So the guard never engaged, cap cycling was free to tear the contract down, and it
+    # did - traced from 7712800 uV at the start of a run to a 5V floor by the middle of it, where
+    # it stayed. No software path brings it back: apsd_rerun, two rounds of rerun_aicl and ACC's
+    # own enable path all failed, and the ICL ratcheted 900000 -> 0 while they tried. Only a
+    # physical replug re-negotiates it.
+    #
+    # USB is 5V until something negotiates otherwise, so anything meaningfully above that IS a
+    # negotiated contract - QC, PD, HVDCP, whichever - and every one of them is the fragile,
+    # replug-only kind this guard exists to protect. 6V is the threshold: high enough that a 5V
+    # supply drifting under load (5.0-5.2V observed) can never trip it, low enough to catch the
+    # lowest real step, 9V, with margin.
+    #
+    # Read-only, one builtin read, no fork. Deliberately BEFORE the vendor loop so it works on the
+    # phones that have no vendor node at all - which is most of them.
+    for _n in ${_vbusF:-usb/voltage_now}; do
+      _fcv=
+      { read -r _fcv < "$_n"; } 2>/dev/null || :
+      # `if`, not `[ ... ] && return 0`. accd runs under set -e, where a case arm ending in a
+      # FAILED test exits non-zero and takes the whole daemon down with it. Every other branch in
+      # this function uses case for exactly that reason. Written the short way, this killed accd on
+      # any phone whose supply was below 6V - which is every unplugged phone, and every 5V charger.
+      # Caught on a Mi A3: the daemon died mid-run and the phone charged on with no limit enforced.
+      if [ "${_fcv:-x}" != x ]; then
+        case "$_fcv" in
+          ''|*[!0-9]*) : ;;
+          *) if [ "$_fcv" -ge 6000000 ] 2>/dev/null; then return 0; fi ;;
+        esac
+      fi
+    done
+
     for _n in ${_fcNodes:-}; do
       _v=
       { read -r _v < "$_n"; } 2>/dev/null || :
@@ -1532,10 +1735,21 @@ if ! $_INIT; then
     # first is strictly safer -- a node the firmware drifted off target is still re-synced; only
     # redundant same-value pokes are skipped, so a healthy wired/wireless negotiation is never
     # disturbed. The values still change on a config edit, a thermal pause, or firmware drift.
-    [ "$(cat $gcst 2>/dev/null)" = "$start" ] || { chmod 0644 $gcst 2>/dev/null || :; echo "$start" > $gcst 2>/dev/null || :; }
+    # rc22: these two writes are the ONLY enforcement a firmware-limit phone ever gets, and until
+    # now neither reached the write ledger -- write() logs, a raw echo does not. So on any Pixel the
+    # ledger stayed completely empty while the limit was in fact being held, and "no writes" reads
+    # as "ACC did nothing". That cost a full diagnostic cycle: a thermal pause was measured holding
+    # correctly on bluejay (stop/start driven to 63/62 at 28C against a 27C limit) against an empty
+    # ledger. Logged inside the value-differs branches on purpose, so this stays faithful to the
+    # ledger's contract -- actual writes only -- and the idempotency above is untouched.
+    if [ "$(cat $gcst 2>/dev/null)" = "$start" ]; then :; else
+      command -v _wlog >/dev/null 2>&1 && _wlog "native charge_start_level <- $start (was $(cat $gcst 2>/dev/null))${_tl:+ thermal hold}" || :
+      chmod 0644 $gcst 2>/dev/null || :; echo "$start" > $gcst 2>/dev/null || :
+    fi
     if [ "$(cat $gcsl 2>/dev/null)" = "$stop" ]; then
       _nlDrift=0
     else
+      command -v _wlog >/dev/null 2>&1 && _wlog "native charge_stop_level <- $stop (was $(cat $gcsl 2>/dev/null))${_tl:+ thermal hold, temp=$t max=$(( ${temperature[1]:-50} * 10 ))}" || :
       chmod 0644 $gcsl 2>/dev/null || :; echo "$stop" > $gcsl 2>/dev/null || :
       # ACC is not the only thing that writes these nodes. Android's Adaptive
       # Charging and Google's Battery Defender manage the same firmware limit,
@@ -2177,6 +2391,14 @@ if ! $_INIT; then
   # verbose
   [ -z "${LINENO-}" ] || export PS4='$LINENO: '
   echo "###$(date)###" >> $log
+  # The high-voltage contract latch is a statement about the plug THIS daemon run has observed.
+  # tmpfs survives `acca -D stop`, so without this a latch set on yesterday's 9V charger is still
+  # present after the user stops ACC, unplugs, and plugs into a stalled port - and every repair for
+  # the whole session is then refused, citing a contract that is not attached. Clear it at start
+  # and let the loop re-establish it from what is actually there.
+  rm -f $TMPDIR/.hvcontract 2>/dev/null || :
+  sawUnplug=false
+
   exec >> $log 2>&1
   set -x
 
@@ -2269,6 +2491,13 @@ if ! $_INIT; then
   # itself destroys. Only ever RAISES a node back to the default ACC recorded for it, and only
   # when the user has configured no current limit at all -- so it can never weaken a cap the
   # user asked for, and it cannot overcharge (input current is not the charge switch).
+  # The marker lives in tmpfs and is wiped on every boot, but the cap it stands for is persisted in
+  # config. apply_on_plug refuses to apply a current cap while the marker is absent, so without this
+  # the FIRST charge after every reboot ran with the guard active and skipped every node that
+  # actually throttles: the cap was configured, displayed as active, and enforced nowhere. The
+  # config is the durable record of intent; the marker is only its runtime shadow, so rebuild it.
+  [ -n "${maxChargingCurrent[0]-}" ] && { touch $TMPDIR/.mcc-custom 2>/dev/null || :; }
+
   if [ -z "${maxChargingCurrent[0]-}" ] && [ -f $TMPDIR/ch-curr-ctrl-files ]; then
     while IFS= read -r _ccl || [ -n "${_ccl:-}" ]; do
       case "$_ccl" in ''|'#'*) continue;; esac
@@ -2489,8 +2718,30 @@ else
 
 
   # log
-  mkdir -p $TMPDIR $dataDir/logs
-  exec > $dataDir/logs/init.log 2>&1
+  #
+  # rc22: LOGGING MUST NEVER COST THE LIMIT.
+  #
+  # Both of these were unsuppressed (inherited from VR-25, its accd line 563). If $dataDir/logs could
+  # not be created or written - a full /data, a corrupted data partition, an SELinux denial, a
+  # filesystem not fully mounted at the moment the daemon starts - then `exec >` failed and the daemon
+  # ABORTED at startup. Charge control was therefore lost because a log file could not be opened, and
+  # it was lost silently: the redirect that would have recorded the reason is the thing that failed.
+  #
+  # This cannot be hit through a normal install ($domain and $id are hardcoded, so $dataDir always
+  # resolves to /data/adb/vr25/acc-data) which is why it has never been reported. It is still the wrong
+  # priority. The limit is the product; the log is a convenience. Fall back to discarding output and
+  # keep enforcing.
+  #
+  # $TMPDIR keeps its own mkdir because the daemon genuinely cannot run without it (the tmpfs is wiped
+  # every boot, and a cold `accd --init` died at the lock with exit 13 before this existed). A failure
+  # there still surfaces, at the lock, where it is diagnosable.
+  mkdir -p $TMPDIR
+  mkdir -p $dataDir/logs 2>/dev/null || :
+  if : > $dataDir/logs/init.log 2>/dev/null; then
+    exec > $dataDir/logs/init.log 2>&1
+  else
+    exec > /dev/null 2>&1
+  fi
   set -x
 
 

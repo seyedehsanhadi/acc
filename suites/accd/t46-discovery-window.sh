@@ -60,7 +60,9 @@ printf '%s' "$_rej" | grep -q 'at_or_above_pause' \
   && ok "the reject arm consults the pause level before latching" \
   || no "the reject arm still latches unconditionally"
 
-printf '%s' "$_rej" | grep -qE '^\s*flip_sw off' \
+# [[:space:]], not \s -- see t44. This is a negative assertion, so an unmatchable pattern
+# made it pass unconditionally instead of failing loudly.
+printf '%s' "$_rej" | grep -qE '^[[:space:]]*flip_sw off' \
   && no "the reject arm still has a bare 'flip_sw off' with no level check" \
   || ok "no unconditional cut left in the reject arm"
 

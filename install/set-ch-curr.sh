@@ -51,6 +51,35 @@ set_ch_curr() {
           # for good. Ledger from a Mi A3, one second apart:
           #   20:43:47 write usb/current_max <- 5000000 (was 1000000)   the release
           #   20:43:48 write usb/current_max <- 1000000 (was 2050000)   the daemon putting it back
+          # rc22b: the SAME daemon-release guard as the resolved clear below. This branch had none.
+          #
+          # There are three sites that remove the marker and only one was covered, which is why two
+          # rounds of "fixes" moved the failure rate around without closing it: the guard was on a path
+          # the race was not always taking. A daemon-initiated release must back off here too while a CLI
+          # set is in flight, or the marker dies and every later apply skips the nodes that throttle.
+          #
+          # The user's own clear reaches this branch while the CLI legitimately holds the mutex, so the
+          # test is on _accdRelease, not on the mutex alone.
+          # rc22b: a daemon release must consult the config ON DISK, not the copy it loaded at the top of
+          # its loop.
+          #
+          # Three earlier attempts failed because all of them guarded on a MUTEX, and a mutex cannot cover
+          # a decision made from stale data. The daemon reads config once per tick; a tick that read the
+          # pre-publish config can arrive here AFTER the CLI has finished and dropped the mutex, so both
+          # the check in accd.sh and the mutex check here see nothing and let it through. Instrumentation
+          # showed exactly that: 2 losses in 20 cycles and exactly 2 daemon-initiated removals. The
+          # daemon was the writer and the guard was in the right branch - it just asked a stale question.
+          #
+          # The config file IS the authority on whether a cap exists. Reading it at the instant of the
+          # decision cannot go stale, and it costs one sed on a path that runs at most once per loop.
+          if ${_accdRelease:-false}; then
+            [ -f $TMPDIR/.mcc-settling ] && return 0
+            _dsk=$(sed -n 's/^maxChargingCurrent=(//p' ${config:-/data/adb/vr25/acc-data/config.txt} 2>/dev/null | cut -d' ' -f1 | tr -d ')')
+            case "${_dsk:-}" in
+              ''|-) : ;;
+              *) return 0 ;;
+            esac
+          fi
           rm $f 2>/dev/null || :
           grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null \
             && (applyOnPlug=(); maxChargingVoltage=(); maxChargingCurrent=(); apply_on_plug default) || :
@@ -90,6 +119,36 @@ set_ch_curr() {
     # showed 1100 mA). The not-charging clear above only covers the no-.mcc-read case; this covers
     # the .mcc-read-set-but-unresolved case. Mirrors set-ch-volt's clear.
     if [ $1 = - ]; then
+      # rc22b: refuse a DAEMON-initiated release while a CLI set is in flight.
+      #
+      # The first attempt at this checked the mutex up in accd.sh, before calling here. That leaves
+      # the whole function call between the check and the `rm` below, and the CLI can create both
+      # the mutex and the marker inside that window - measured at 1 set in 6 still losing the
+      # marker, down from about 40% but not gone. The check has to be adjacent to the action.
+      #
+      # It must also NOT block the user's own clear: `acc -s max_charging_current=` reaches this
+      # same branch while the CLI legitimately holds the mutex. Only the daemon sets _accdRelease,
+      # so only the daemon backs off.
+      # rc22b: a daemon release must consult the config ON DISK, not the copy it loaded at the top of
+      # its loop.
+      #
+      # Three earlier attempts failed because all of them guarded on a MUTEX, and a mutex cannot cover
+      # a decision made from stale data. The daemon reads config once per tick; a tick that read the
+      # pre-publish config can arrive here AFTER the CLI has finished and dropped the mutex, so both
+      # the check in accd.sh and the mutex check here see nothing and let it through. Instrumentation
+      # showed exactly that: 2 losses in 20 cycles and exactly 2 daemon-initiated removals. The
+      # daemon was the writer and the guard was in the right branch - it just asked a stale question.
+      #
+      # The config file IS the authority on whether a cap exists. Reading it at the instant of the
+      # decision cannot go stale, and it costs one sed on a path that runs at most once per loop.
+      if ${_accdRelease:-false}; then
+        [ -f $TMPDIR/.mcc-settling ] && return 0
+        _dsk=$(sed -n 's/^maxChargingCurrent=(//p' ${config:-/data/adb/vr25/acc-data/config.txt} 2>/dev/null | cut -d' ' -f1 | tr -d ')')
+        case "${_dsk:-}" in
+          ''|-) : ;;
+          *) return 0 ;;
+        esac
+      fi
       # rc22: marker first, same re-apply race as the clear above.
       rm $f 2>/dev/null || :
       grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null && {

@@ -89,7 +89,17 @@ _write() {  # _write <on|off> <switch line>
   done
 }
 write_off()  { _write off "$1"; }
-restore_on() { _write on  "$1"; }
+# rc22b: the same filter restore_all_on carries. The sweep was fixed and this was not, so a scan
+# still ended with the charger-input nodes pinned at whatever they read at probe time instead of
+# released high - on a Mi A3 that is usb/current_max back at 2.2A after ACC had negotiated 2.8A.
+# These nodes are owned by charger negotiation; ACC's rule everywhere else is release HIGH and let
+# the driver clamp, never replay a snapshot.
+restore_on() {
+  case "${1-}" in
+    */current_max*|*/input_current*|*/constant_charge_current*|*restrict_cur*) return 0;;
+  esac
+  _write on "$1"
+}
 
 # ---------- daemon control (always restart on exit) ----------
 ACCA=

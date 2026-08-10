@@ -4,7 +4,10 @@ logf() {
 
   if [[ "${1:-x}" = -*e* ]]; then
 
-    mkdir -p $dataDir/logs
+    # Suppressed for the same reason as accd's init log: an unwritable data dir must not abort the
+    # caller. Less critical here (the exit path calls enable_charging BEFORE reaching the export, so
+    # charge state is already safe) but it is the same shape and the same wrong priority.
+    mkdir -p $dataDir/logs 2>/dev/null || :
 
     exec 2>> ${log:-/dev/null}
     mkdir -p $TMPDIR/.logf

@@ -294,6 +294,26 @@ cp $srcDir/module.prop $installDir/
 for _e in acc-compat.sh amps.sh; do
   [ -f "$srcDir/$_e" ] && cp -f "$srcDir/$_e" "$installDir/$_e" || :
 done
+
+# The test suite, for exactly the same reason and with exactly the same consequence.
+#
+# suites/ also lives at the package ROOT, so `cp -R $srcDir/install/*` never shipped it either. Every
+# suite defaults to $execDir/suites, which meant a flashed module could not test itself: the copies
+# on the two development phones had only ever arrived by hand, and a fresh install got none. That
+# hides regressions in the most direct way possible - the checks that would catch them are absent -
+# and it made a stale on-device t64 pass with wording from a version that had already been fixed.
+#
+# Removed first, so a suite deleted upstream does not linger on a phone and fail forever.
+# A test run that died mid-arm leaves /data/local/tmp/.mega2-arm-installed behind, and P0 refuses to
+# run while it exists. Installing the module is precisely the act that makes that marker stale, so
+# clear it here rather than leaving a dead file to block the next run - it cost one full test cycle.
+rm -f /data/local/tmp/.mega2-arm-installed 2>/dev/null || :
+
+[ -d "$srcDir/suites" ] && {
+  rm -rf "$installDir/suites" 2>/dev/null
+  cp -R "$srcDir/suites" "$installDir/" 2>/dev/null
+  chmod -R 755 "$installDir/suites" 2>/dev/null
+} || :
 cp -f $srcDir/README.* $data_dir/
 
 

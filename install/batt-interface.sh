@@ -153,10 +153,18 @@ not_charging() {
 
 
 online() {
-  local i= seen=false
-  for i in $(online_f); do
+  local i= v= seen=false
+  # $_onlineF directly rather than $(online_f): the helper is cached now, but calling it through a
+  # command substitution would still fork once per call just to read the cache back.
+  [ -n "${_onlineF+x}" ] || online_f >/dev/null
+  for i in $_onlineF; do
     seen=true
-    grep -q 0 $i || return 0
+    # `read` builtin, not `grep -q 0`. That grep was a fork PER NODE per call, on a path that runs
+    # about once a second while idle. Same verdict: anything that is not a literal 0 counts as
+    # energized, including an unreadable or empty node, which is the safe direction here.
+    v=
+    { read -r v < $i; } 2>/dev/null || :
+    case "$v" in 0) : ;; *) return 0;; esac
   done
   # rc5 (#6): if NO */online node matched the regex (a device with an unlisted charger-node
   # name), do NOT blindly report offline -- that silently breaks generic_rearm/native_unlatch,
@@ -166,7 +174,19 @@ online() {
 
 
 online_f() {
-  ls -1 */online | grep -Ei '^ac/|^dc/|^mains/|^main-?charger/|^mtk\-.*(chg|charger)/|^pc_port/|^smb[0-9]{3}\-usb/|^usb/|ucsi.*pmic|oplus.*chg|.*glink.*charg|^wireless/' || :
+  # Cached for the life of the process, for the same reason present_f is (rc19) and with the same
+  # justification: the supply list is fixed hardware and power-supply entries exist from boot, so a
+  # process-lifetime cache cannot miss one.
+  #
+  # It was left uncached, and rc22 turned that into a real cost. present() no longer short-circuits
+  # when a node reports 0 -- it has to fall through to online(), which is what fixes the fuxi bundle
+  # where an idle wireless supply was answering for the whole device. The consequence is that an
+  # UNPLUGGED phone now reaches online() on every present() call, and present() runs about once a
+  # second inside the idle naps. Each call was paying a command substitution plus ls plus grep,
+  # three forks, before it even looked at a node. That is the cost rc19 removed from present_f,
+  # re-entered by a different door.
+  [ -n "${_onlineF+x}" ] || _onlineF=$(ls -1 */online 2>/dev/null | grep -Ei '^ac/|^dc/|^mains/|^main-?charger/|^mtk\-.*(chg|charger)/|^pc_port/|^smb[0-9]{3}\-usb/|^usb/|ucsi.*pmic|oplus.*chg|.*glink.*charg|^wireless/' || :)
+  printf '%s\n' "$_onlineF"
 }
 
 
@@ -185,16 +205,49 @@ present_f() {
 }
 
 present() {
-  local i= v= seen=false
+  local i= v=
   [ -n "${_presentF+x}" ] || present_f >/dev/null
   for i in $_presentF; do
-    seen=true
     v=
     { read -r v < $i; } 2>/dev/null || :
     case "$v" in 1) return 0;; esac
   done
-  # no usable present node -> defer to online (a path that is energized is plugged)
-  $seen && return 1 || online
+  # rc22b: nothing reported present=1, and that is NOT proof the cable is out.
+  #
+  # This used to set seen=true for any present node it merely READ, so a node reporting 0 counted
+  # as authoritative and the online fallback below was never reached. A fuxi (Xiaomi) bundle showed
+  # what that costs: the phone has NO usb/present node at all, wireless/present reads 0 because no
+  # pad is in use, and the attached charger is visible only as ucsi-source-psy-.../online=1. The
+  # idle wireless supply therefore answered the question for the whole device.
+  #
+  # The consequence was silent and total. ACC paused at 80% by writing input_suspend=1, which zeroes
+  # usb/online; present() then said "unplugged", the daemon took the `! present` branch into the
+  # 120s idle nap, and the resume condition was never evaluated again. The pack drained from 80% to
+  # 62% over four hours with the charger plugged in, AccA reporting "draining", and only a manual
+  # "charge once, no restrictions" released it. The flight log recorded cutByAcc=false throughout:
+  # ACC had cut the input and then lost the fact that it had.
+  #
+  # An input-cut switch does zero */online, which is exactly why present is consulted FIRST and why
+  # this is a fallback rather than a replacement. When no node claims present, online is the only
+  # remaining evidence, and the asymmetry is stark: a false positive costs a faster poll loop, a
+  # false negative costs the user their charge.
+  #
+  # rc22c REVERTED - a wired node does NOT get a veto.
+  #
+  # An attempt to recover the idle CPU cost gave WIRED nodes (usb, ac, main-charger) authority to
+  # answer "unplugged" without consulting online(), on the reasoning that only wireless/ and dc/ pads
+  # were ever the problem. t47 rejects that, and t47 is right: a phone whose usb/present reads 0 with
+  # a cable attached - visible only as */online=1 - would be reported unplugged, which is the fuxi
+  # drain-while-charging bug with a different node name on it.
+  #
+  # The cost is real and measured: present() runs about once a second inside the idle naps, each call
+  # sweeps */online, and a power_supply online read calls into the charger driver (an I2C round trip
+  # on a Snapdragon 665). A Mi A3 measured 69 CPU ticks per 120s against rc21's 49. But the asymmetry
+  # this function is built on decides it: a false positive costs a faster poll loop, a false negative
+  # costs the user their charge. The saving has to come from somewhere that cannot be wrong - polling
+  # present() less often, or memoising online() within a single nap - not from narrowing what counts
+  # as evidence.
+  online
 }
 
 
