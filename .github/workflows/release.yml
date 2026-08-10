@@ -43,4 +43,6 @@ jobs:
           files: |
             _builds/*/*.zip
             _builds/*/*.tgz
+            install-tarball.sh
+            install-online.sh
           fail_on_unmatched_files: false
