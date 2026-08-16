@@ -35,7 +35,7 @@ AD=$execDir/accd.sh
 
 _fr=$(sed -n '/flight_rec()/,/^  }/p' "$AD")
 [ -n "$_fr" ] || { no "could not extract flight_rec"; fin; }
-_code=$(printf '%s' "$_fr" | sed 's/#.*//')
+_code=$(printf '%s' "$_fr" | sed 's/^[[:space:]]*#.*//')
 
 # ---- 1: every variable the recorder consumes has a producer ------------------------------------------
 # The general rule, not the three names. Any variable the detector reads must be assigned somewhere in

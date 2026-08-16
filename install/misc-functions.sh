@@ -309,6 +309,26 @@ cycle_switches() {
 
   while read -A chargingSwitch; do
 
+    # rc23d: stop when the sweep's budget is spent. Unbounded, this loop held a plugged Mi A3 off
+    # charge for over five minutes with four limiters standing at once and flight.log frozen, while
+    # every liveness check still reported the daemon alive. Nothing is lost by stopping: the reject
+    # arm and the failure arm below rotate every candidate that COST TIME to the end of ch-switches,
+    # so the next sweep resumes on new work, while free skips (absent node, blacklisted) stay at the
+    # front and are re-passed in milliseconds.
+    #
+    # Only an ARMED off-sweep is bounded. cycle_switches_off owns the budget as a local, so the
+    # restore direction and accd.sh:2885's exit-trap sweep never see one. acc -t is exempt as well:
+    # it walks every candidate on purpose, with a user watching it, and that is how an awkward phone
+    # gets a switch at all.
+    if [ "$1" = off ] && [ -n "${_swEnd-}" ] && ! ${acc_t:-false} && [ $SECONDS -ge $_swEnd ]; then
+      # `read -A` has ALREADY overwritten the global array with this untried candidate, and
+      # accd.sh:1219 writes it straight to $TMPDIR/.sw. Leave nothing that looks like a selection.
+      chargingSwitch=()
+      ${isAccd:-false} && command -v _wlog >/dev/null 2>&1 \
+        && _wlog "sweep budget spent; stopped early, next sweep resumes from here" || :
+      break
+    fi
+
     # Brick-safe guard (GitHub #305/#308): a switch that panicked the kernel mid-write
     # on a previous boot is on the persistent blacklist -- never touch it again.
     ! journal_blacklisted "${chargingSwitch[*]}" || continue
@@ -413,7 +433,23 @@ cycle_switches() {
               # probe on a healthy charge could therefore leave */current_max or
               # */constant_charge_current at 0 for the whole session while ACC reported normal.
               # Same rule as the failure arm below, which already got this right.
-              at_or_above_pause || flip_sw on 2>/dev/null || :
+              # rc23c: a VOLTAGE candidate is always restored, whatever the level.
+              #
+              # The suppression below is right for a current/suspend switch: at or above the pause
+              # level charging is meant to be off, leaving the node cut costs nothing, and the next
+              # enable_charging puts it back. A voltage switch is a different animal. Its off value
+              # is a float-voltage CEILING, so leaving it applied does not pause charging - it ends
+              # it, at every level, including far below resume, and across reboots. Nothing restores
+              # it either, because the daemon never recorded owning the node.
+              #
+              # Measured on a Mi A3 with chargingSwitch=(): sitting at 31% with pause=31, a rejected
+              # battery/voltage_max was left at 3600000 against a 3.9V pack, and the charger refused
+              # everything - "battery over-voltage vbat_fg = 3905196uV, fv = 3600000uV" - until the
+              # value was written back by hand, whereupon charging resumed at 2.8A.
+              case "${chargingSwitch[0]}" in
+                *voltage*) flip_sw on 2>/dev/null || : ;;
+                *)         at_or_above_pause || flip_sw on 2>/dev/null || : ;;
+              esac
               if ! ${acc_t:-false}; then
                 sed -i "\|^${chargingSwitch[*]}$|d" $TMPDIR/ch-switches
                 echo "${chargingSwitch[*]}" >> $TMPDIR/ch-switches
@@ -453,7 +489,13 @@ cycle_switches() {
           # the end. Mirrors the daemon's ${capacity[3]} domain check (% if <=100, else mV).
           # One helper, two callers. This arm and the reject arm above must agree, and when they
           # were separate copies only this one had the level check.
-          at_or_above_pause || flip_sw on 2>/dev/null || :
+          # rc23c: same rule as the reject arm above - a voltage candidate is always restored.
+          # Leaving a float-voltage ceiling applied does not pause charging, it ends it, at every
+          # level and across reboots, with nothing to put it back.
+          case "${chargingSwitch[0]}" in
+            *voltage*) flip_sw on 2>/dev/null || : ;;
+            *)         at_or_above_pause || flip_sw on 2>/dev/null || : ;;
+          esac
           if ! ${acc_t:-false}; then
             sed -i "\|^${chargingSwitch[*]}$|d" $TMPDIR/ch-switches
             echo "${chargingSwitch[*]}" >> $TMPDIR/ch-switches
@@ -468,6 +510,23 @@ cycle_switches() {
 
 
 cycle_switches_off() {
+  # rc23d: ONE sweep budget for this whole call, shared by all three passes below. It is a local and
+  # that is the design, not an accident: mksh scopes locals dynamically, so cycle_switches sees it
+  # while this call is on the stack and it is gone the moment this returns. A global would never
+  # clear, and cycle_switches is also reached by the exit-trap `online && ( cycle_switches on )` at
+  # accd.sh:2885 - the restore sweep, and the ONLY path that un-cuts candidates deliberately left cut
+  # at or above the pause level. Bounding that strands a phone unable to charge.
+  #
+  # 120s comes from the measured cost. A candidate that does not hold costs ~35s (batt-interface.sh
+  # _STI=35, one sleep 1 per iteration) and the strict pass adds 3 x loopDelay[0]=3, so the checks at
+  # 0, ~44 and ~88 all pass: at least three candidates START per sweep and a sweep can never make
+  # zero progress, which is what the resume story rests on. The check is only at the top of the loop
+  # body and a started candidate always runs to completion, so the honest ceiling is budget + one
+  # candidate = ~164s, against a full walk measured at 326s on laurus and 582s on bluejay.
+  #
+  # One budget for the call, not one per pass: three would put the ceiling above the full walk it is
+  # meant to beat, so the bound would buy nothing.
+  local _swEnd=$(( SECONDS + ${_SWMAX:-120} ))
   # rc11: demote the current-cap class (*/current_max, constant_charge_current[_max],
   # */input_current) to the END of the candidate list -- those can pass the 9s sustained-hold
   # verify yet get re-armed by the charger firmware afterwards, so discovery wastes ~9s on each
@@ -592,6 +651,25 @@ disable_charging() {
       cycle_switches_off
     fi
 
+    # rc23e: re-arm the suppression before confirming OUR OWN cut.
+    #
+    # not_charging CONSUMES the global $flip (batt-interface.sh: `local switch=${flip-}; flip=`), and
+    # sw_holds above already consumed the `off` that flip_sw set. So by this line $flip is empty AND
+    # chDisabledByAcc is still false - it is set below. Both suppressors of the kernel-status tie-break
+    # are therefore off, and on a phone whose status node keeps reporting Charging under a current cut
+    # the promotion fires and grades a WORKING cut as "still charging".
+    #
+    # The consequence is not a bad log line. It is `return 7` below, which means chDisabledByAcc is
+    # never set: the phone is cut and ACC has forgotten it cut it. Every later pass re-promotes for the
+    # same reason, is_charging stays true, and the loop parks in the charging branch - leaving the
+    # entire resume path, which is the `else` of that same `if`, unreachable. Measured on a Mi A3 as
+    # four stalls of 90-190s with the daemon awake and logging every 3s, which is loopDelay[0], the
+    # charging branch's own nap.
+    #
+    # Suppressing here is safe and is the same judgement the flip test above makes: a cut that did NOT
+    # work leaves current flowing in the charging direction, so the sign verdict says Charging on its
+    # own and a broken switch is still graded broken. t79 covers exactly that case.
+    flip=off
     if ! not_charging; then
       # fix7: restore 2022/2023 behavior -- report failure and let the daemon loop
       # retry the pause next tick (now also for --locked switches, since the
@@ -898,7 +976,28 @@ enable_charging() {
       # the latched one, which must never be skipped.
       #
       # Re-negotiation stays behind present: APSD/AICL only mean anything with a cable attached.
-      flip_sw on || cycle_switches on
+      # rc23c: the SWEEP fallback needs a cable. cycle_switches is DISCOVERY - it walks every
+      # candidate and each one costs a full not_charging verification, 35 one-second iterations with
+      # a status read (and a fork) per iteration. flip_sw returns 2 immediately when no switch is
+      # configured, so on a phone with chargingSwitch=() this `||` fired on every enable_charging
+      # and swept, forever, with no charger attached and nothing to re-arm.
+      #
+      # Measured on a Mi A3, unplugged, screen off, rc23:
+      #     system forks, ACC stopped :    96 per 600s
+      #     system forks, ACC running :  4068 per 600s
+      #     accd CPU                  :  5452 ticks per 600s, about 9% of one core
+      #     loop passes logged        :     0
+      # The trace showed two back-to-back 35s verify loops per 90s, indefinitely. A Pixel with a
+      # configured switch never reaches this line, which is exactly why it cost 83 forks per pass
+      # while the A3 burned 6.6 forks per second. The Pixel 6 Pro field report ships the same empty
+      # chargingSwitch, so this is not a lab-only state.
+      #
+      # ONLY the sweep is gated. Releasing a latched switch with the cable out must still happen -
+      # that is the rc22 fix for a phone left unable to charge - and it is done by the .sw restore
+      # block above and by flip_sw itself, both untouched. A sweep cannot re-arm anything
+      # electrically when there is no charger, so gating it costs no capability: with a cable
+      # attached, discovery still runs exactly as before.
+      flip_sw on || { present && cycle_switches on; } || :
       if present; then
         # D8 (rc5: extended to current-cap classes): after un-cutting, re-run APSD/AICL so the
         # charger re-negotiates. Input-cut switches (input_suspend/bypass/vbus) mask */online to 0
@@ -926,7 +1025,25 @@ enable_charging() {
       return 0
     fi
 
-    chDisabledByAcc=false
+    # rc23e: clear the flag only when the release is OBSERVED, not when the write is issued.
+    #
+    # Once $flip has been consumed this flag is the SOLE suppressor of the kernel-status tie-break
+    # (batt-interface.sh). Clearing it on the write alone means that if the ON write did not actually
+    # restore current, the very next pass promotes status to Charging, is_charging returns true, and the
+    # whole resume path becomes unreachable - including the resume-stall watchdog at accd.sh:1613 that
+    # exists to catch precisely this, and which is blinded by the flag its own resume just cleared.
+    #
+    # The check below runs while the flag is STILL TRUE, so the tie-break is suppressed and it reads the
+    # current sign honestly rather than the kernel's stale "Charging". Asking with the promotion live
+    # would be circular: it would answer "yes, charging" because of the very staleness being tested.
+    #
+    # Leaving it true costs nothing when the resume did work - the next pass sees real charging current
+    # and clears it there - and buys a retry when it did not.
+    if not_charging; then
+      :
+    else
+      chDisabledByAcc=false
+    fi
 
   set_temp_level
 

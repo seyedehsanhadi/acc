@@ -34,7 +34,7 @@ AD=$execDir/accd.sh
 BI=$execDir/batt-interface.sh
 [ -f "$AD" ] || { no "accd.sh not found"; fin; }
 
-body(){ sed -n "/^  $1() {/,/^  }/p" "$AD" | sed 's/#.*//'; }
+body(){ sed -n "/^  $1() {/,/^  }/p" "$AD" | sed 's/^[[:space:]]*#.*//'; }
 
 # ---- 1: both nap loops gate the present() call -------------------------------------------------------
 for _fn in _nap_idle _nap_hold; do
@@ -83,7 +83,7 @@ esac
 # The whole point. If a later change tries to buy the same saving inside present(), t47 will fail -
 # but say it here too, next to the reason.
 if [ -f "$BI" ]; then
-  _p=$(sed -n '/^present()/,/^}/p' "$BI" | sed 's/#.*//')
+  _p=$(sed -n '/^present()/,/^}/p' "$BI" | sed 's/^[[:space:]]*#.*//')
   printf '%s' "$_p" | grep -qE 'seen=(true|false)' \
     && no "present() tracks a 'seen' flag again - a node reading 0 can veto the online fallback" \
     || ok "present() has no 'seen' flag; a node reading 0 still cannot veto the fallback"

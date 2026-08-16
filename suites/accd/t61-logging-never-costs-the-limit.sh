@@ -41,7 +41,7 @@ LF=$execDir/logf.sh
 [ -f "$AD" ] || { no "accd.sh not found"; fin; }
 
 # The init block, comments stripped: its own commentary quotes the very lines being checked.
-_blk=$(sed -n '/# log$/,/set -x/p' "$AD" | sed 's/#.*//')
+_blk=$(sed -n '/# log$/,/set -x/p' "$AD" | sed 's/^[[:space:]]*#.*//')
 [ -n "$_blk" ] || { no "could not locate accd's log-init block"; fin; }
 
 # ---- 1: the log directory creation tolerates failure -------------------------------------------------
@@ -91,7 +91,7 @@ fi
 # Lower stakes - the exit path calls enable_charging BEFORE reaching the log export, so charge state is
 # already safe by then - but it is the same construct and the same wrong priority.
 if [ -f "$LF" ]; then
-  if sed 's/#.*//' "$LF" | grep -qE 'mkdir -p \$dataDir/logs *$'; then
+  if sed 's/^[[:space:]]*#.*//' "$LF" | grep -qE 'mkdir -p \$dataDir/logs *$'; then
     no "logf.sh still creates the log directory unsuppressed"
   else
     ok "logf.sh tolerates an unwritable log directory too"

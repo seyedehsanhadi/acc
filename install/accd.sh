@@ -334,6 +334,124 @@ if ! $_INIT; then
   }
 
 
+  _nap_native() {
+    # rc23b: the nap every firmware-limit exit takes.
+    #
+    # The $nativeLimit branch `continue`s in two places, so it never reaches the deep-nap block at
+    # the bottom of the loop that the generic switch path uses. Unplugged, that phone polled every
+    # 9s all night with no cable attached and the firmware owning the limit -- nothing for the
+    # daemon to enforce. Measured on rc23, screen off, no cable, 120s windows:
+    #     Mi A3 (switch path, reaches the deep nap)      11, 11 ticks
+    #     Pixel 6a (native path, never reached it)       84, 87 ticks
+    #
+    # One function rather than a copy at each exit: the bug being fixed IS one path missing what
+    # the other does, and a second copy is a second chance to drift.
+    #
+    # The guard is the generic call site's, unchanged: a phone at or below shutdown_capacity keeps
+    # the short cadence so the discharge-side shutdown is never delayed. _nap_idle breaks within
+    # ~1s of a plug-in or a config edit, so resume and live edits are unaffected.
+    if ! present && { ! _le_shutdown_cap || [ "${capacity[0]:-0}" -lt 1 ] 2>/dev/null; }; then
+      _nap_idle ${idleDelay:-120}
+    elif present 2>/dev/null && _gt_resume_cap 2>/dev/null && [ ! -f $TMPDIR/.minCapMax ]; then
+      # rc23c: plugged and holding ABOVE the resume level is the overnight-on-charger state, and it
+      # reached the firmware-limit path no more than the deep nap did. rc19 added _nap_hold for
+      # exactly this and wired it into the loop bottom, which this branch never sees. Measured on
+      # rc23, both phones plugged and held at their limit, 150s windows:
+      #     Mi A3    (switch path, reaches _nap_hold)     3 passes
+      #     Pixel 6a (firmware path, never reached it)   17 passes
+      # Ten times the wakeups, all night, watching a level that moves about 1% an hour. The hold
+      # breaks on unplug and on config edits within ~1s, so nothing about resume timing changes.
+      _nap_hold 30
+    else
+      _nap ${loopDelay[1]:-9}
+    fi
+    # rc23c: clear the first-pass marker, exactly as the loop bottom does for the switch path.
+    #
+    # .minCapMax is touched once when the daemon starts (see the init block) and removed at the END
+    # of the loop body. The $nativeLimit branch `continue`s long before that line, so on a
+    # firmware-limit phone the marker was created and never cleared - and the hold above requires it
+    # ABSENT. The result: the _nap_hold branch could never fire, on any Pixel, ever.
+    #
+    # Found by instrumenting every nap call site and reading which one the daemon reports taking.
+    # With an 8-point hysteresis (pause 41, resume 33, holding at 41%) it still logged 16 SHORT and
+    # zero HOLD, which ruled out my first theory that the test had parked the phone on the
+    # pause/resume boundary. The file was simply there, from boot.
+    #
+    # Cleared AFTER the nap, not before, so the ordering matches the generic path: the first pass
+    # after a start still takes the short cadence, and only later passes are eligible for the hold.
+    rm $TMPDIR/.minCapMax 2>/dev/null || :
+  }
+
+
+  auto_shutdown() {
+    # rc23c: low-battery shutdown, as a function, because the firmware-limit path could not reach it.
+    #
+    # This was inline at the bottom of the main loop. The $nativeLimit branch `continue`s long
+    # before that, so on every Tensor Pixel shutdown_capacity was accepted by AccA, written to
+    # config, echoed back by acc -sp, and silently ignored. Both test phones, same config, same
+    # night, unplugged until flat:
+    #     Mi A3    shutdown_capacity=5 -> stopped at 5%, .sd-latched written
+    #     Pixel 6a shutdown_capacity=5 -> ran to 1%, 81 samples under 6%, no latch ever created
+    # Someone who sets 5% to keep the pack off the floor gets Android's own ~1% cutoff instead.
+    #
+    # The code did document the intent -- "Low-battery shutdown + thermal are handled by the
+    # firmware/OS in this mode" -- but the thermal half of that was already wrong and rc23 fixed it
+    # (t74/t75 pin it). This is the other half. Nothing about the logic changes; it moved.
+    if _uptime 900 && not_charging Discharging; then
+      if [ ${capacity[0]} -ge 1 ]; then
+        # warnings
+        ! $shutdownWarnings || {
+          if [ ${capacity[0]} -gt 3000 ]; then
+            ! [ $(grep -o '^..' $voltNow) -eq $(( ${capacity[0]%??} + 1 )) ] \
+              || ! notif "⚠️ WARNING: ~100mV to auto shutdown, plug the charger!" \
+                || sleep ${loopDelay[1]}
+          else
+            ! [ $(batt_cap) -eq $(( ${capacity[0]} + 5 )) ] \
+              || ! notif "⚠️ WARNING: 5% to auto shutdown, plug the charger!" \
+                || sleep ${loopDelay[1]}
+          fi
+          shutdownWarnings=false
+        }
+        # action
+        # rc21: AT MOST ONE low-battery shutdown per discharge episode.
+        #
+        # Powering the phone off at shutdown_capacity and then doing it again every 15 minutes
+        # (_uptime 900 is the only thing that was holding it back) makes the device unusable
+        # exactly when someone needs it most: flat battery, powered back on for an emergency
+        # call. The threshold has already done its job once; after that the user has clearly
+        # chosen to keep using the phone, and that choice is theirs, not the module's.
+        #
+        # The latch lives in dataDir, NOT tmpfs, and is deliberate: tmpfs is wiped every boot,
+        # so a tmpfs latch would clear on exactly the power-on it exists to protect and the
+        # phone would shut down again 15 minutes later - the bug this fixes.
+        #
+        # It re-arms on its own. The else branch below clears it as soon as the level is back
+        # ABOVE the threshold, which only happens after a real charge, so the next flat
+        # battery is treated as a new episode and gets its shutdown. Nothing is permanently
+        # disabled and no config key changes, so AccA and every existing config are untouched.
+        #
+        # Scoped to the CAPACITY branch on purpose. shutdown_temp keeps firing every time:
+        # repeated overheating is a genuinely repeating hazard, a flat battery is not.
+        if _le_shutdown_cap; then
+          if [ -f $dataDir/.sd-latched ]; then
+            ${isAccd:-false} && command -v _wlog >/dev/null 2>&1 \
+              && _wlog "low-battery shutdown already fired this episode: leaving the phone on" || :
+          else
+            sleep ${loopDelay[1]}
+            ! not_charging Discharging || {
+              : > $dataDir/.sd-latched 2>/dev/null || :
+              sync 2>/dev/null || :
+              shutdown
+            }
+          fi
+        else
+          rm -f $dataDir/.sd-latched 2>/dev/null || :
+        fi
+      fi
+    fi
+  }
+
+
   _nap_hold() {
     # rc19 (standby): plugged-and-paused is the overnight-on-charger state -- nothing is
     # actionable until the battery drifts down to the resume level (about 1% per hour) or
@@ -660,10 +778,17 @@ if ! $_INIT; then
     mask_capacity
 
     set +u
-    [ -n "${idleApps[0]}" ] \
-      && dumpsys activity top | sed -En 's/(.*ACTIVITY )(.*)(\/.*)/\2/p' \
-      | tail -n 1 | grep -E "$(echo ${idleApps[*]} | sed 's/ /|/g; s/,/|/g')" >/dev/null \
-      && pause_now || :
+    # $isCharging FIRST, and it is not a style preference - it is the whole cost of this feature.
+    #
+    # The probe is `dumpsys activity top`, which on a Mi A3 measures ~150ms and 235KB of output for
+    # ONE call. It used to run on every daemon pass regardless of whether a charger was attached,
+    # and pause_now cannot do anything without one, so an unplugged phone paid the full cost for an
+    # answer it could never act on. Measured unplugged, screen off, 120s windows: 55-56 CPU ticks
+    # with idleApps empty against 65-70 with it set, about 21% more idle CPU for nothing.
+    #
+    # Empty idleApps was always free - the [ -n ] short-circuits before the dumpsys - so this only
+    # ever cost the users who turned the feature on, which is exactly the wrong way round.
+    $isCharging && idle_apps_check || :
     _enc=$(cat /dev/encore_mode 2>/dev/null || cat /data/adb/.config/encore/current_profile 2>/dev/null || print 0)
     case ${_enc:-0} in *[!0-9]*|'') _enc=0;; esac   # rc5 (#11): coerce non-numeric encore profile -> no "-ne" abort
     [ $_enc -ne 1 ] || pause_now
@@ -853,6 +978,23 @@ if ! $_INIT; then
       # is genuinely 5V-only never sets it, so a stalled charger is still repairable.
       if ! present 2>/dev/null; then
         rm -f $TMPDIR/.hvcontract 2>/dev/null || :
+        # rc23e: the collapse-recovery budget is per PLUG, exactly like the latch it relieves. Cleared
+        # here so a genuine collapse on a later plug can still be repaired, and so the zero-run counter
+        # never carries across a cable event.
+        rm -f $TMPDIR/.hvrecover $TMPDIR/.hvzero 2>/dev/null || :
+        # rc23f: the stalled-supply aim is per PLUG too. .hvaim is its once-per-plug marker and
+        # .hvfloor its consecutive-floor counter; both must go with the cable or a phone gets exactly
+        # one repair attempt for the rest of the boot, which is the defect this pair exists to fix.
+        rm -f $TMPDIR/.hvaim $TMPDIR/.hvfloor $TMPDIR/.hvlost 2>/dev/null || :
+        # rc23e: give the polarity learn one fresh chance per cable event. .dpol_unstable is set after
+        # two sign flips and read by set_dp as an unconditional `return 0`, so once set it froze _DPOL
+        # for the rest of the boot -- and nothing under install/ ever removed it. A phone that latched a
+        # WRONG sign was then stuck with it, and its charge/discharge verdict fell entirely to the
+        # kernel-status tie-break, which is the single signal the pause/resume stall turned on.
+        # Same lifetime as .hvcontract above, for the same reason: a real cable removal is the one
+        # moment a re-learn is both safe and warranted. It cannot thrash - the two-flip counter has to
+        # be earned again from scratch, so at worst this costs one re-learn per plug.
+        rm -f $TMPDIR/.dpol_unstable 2>/dev/null || :
         # A REAL cable removal, observed by this daemon. freshPlug alone is not that: it is driven
         # by `online`, and an input-cut switch (input_suspend, current_max 0) drives online to 0
         # while the cable is still attached - which ACC's own code documents in three places. So on
@@ -870,7 +1012,195 @@ if ! $_INIT; then
                [ -f $TMPDIR/.hvcontract ] || : > $TMPDIR/.hvcontract 2>/dev/null || :
              fi ;;
         esac
+
+        # rc23e: ONE way back from a contract that has actually COLLAPSED, without unplugging.
+        #
+        # The latch above is right and stays: a high-voltage supply SAGS under load (a QC3 contract
+        # measured 6433-6712mV on a Mi A3 while delivering ~2A), and an instantaneous voltage check
+        # let one re-kick through that dropped it to 4860mV/400mA permanently. rekick_usb refusing
+        # while the latch is set is what prevents that.
+        #
+        # But the latch clears only on a real unplug, so it also blocks the ICL restore after a
+        # GENUINE collapse. Measured on laurus, twice, and it invalidated two whole plugged rounds:
+        #     present=1 online=1 ceiling=1400000  input_current_now=5353  pack +516968 (discharging)
+        # The same phone on the same cable pulled 2.89A the moment the ceilings were written back by
+        # hand, so the supply was fine and ACC simply had no path back. A switch sweep cutting input
+        # nodes is enough to trigger it, which is why it kept happening mid-round.
+        #
+        # CURRENT is what separates the two, not voltage. A sag is CAUSED by amps being drawn, so it
+        # can never look like this; a collapse delivers nothing while still claiming present and
+        # online. Require the input to be near zero AND the pack not to be charging, for several
+        # CONSECUTIVE passes, then allow exactly one recovery per plug. .hvrecover is the once-per-plug
+        # marker and is cleared beside .hvcontract on unplug.
+        # THREE exclusions, and each one is load-bearing:
+        #
+        #   ! chDisabledByAcc  - ACC's own capacity pause produces the IDENTICAL signature: present=1,
+        #     online=1, input near zero, pack not charging. Without this, a perfectly normal pause
+        #     clears .hvcontract after 5 passes and re-opens the 9V -> 4860mV/400mA re-kick the latch
+        #     exists to prevent. This is the difference between repairing a dead supply and breaking a
+        #     live one.
+        #   ! _ge_pause_cap    - a firmware-limit phone held at its limit has its input votes zeroed by
+        #     the firmware, not by ACC, so chDisabledByAcc is false there. Below the pause level there
+        #     is nothing legitimate holding the input down.
+        #   no is_charging()   - the first version called it here, in the plug-detect block, which runs
+        #     BEFORE `if $nativeLimit`. That breaks the invariant t38 and t69 are both premised on and
+        #     drags in every side effect of that function - set_dp, a second mask_capacity,
+        #     idle_apps_check, the xIdleCount reset, and the probe_due `disable_charging;
+        #     enable_charging` sweep that rc22 removed from the native path precisely because it froze
+        #     a Pixel 6a for 90s. The input reading alone answers the question: if under 50 mA is
+        #     crossing the port, nothing is charging from the wall, whatever the pack is doing.
+        if [ ! -f $TMPDIR/.hvrecover ] && ! ${chDisabledByAcc:-false} \
+           && ! _ge_pause_cap 2>/dev/null && online 2>/dev/null; then
+          _hvin=
+          { read -r _hvin < usb/input_current_now; } 2>/dev/null || :
+          case "${_hvin:-x}" in ''|x|*[!0-9-]*) _hvin=;; esac
+          if [ -n "$_hvin" ] && [ "${_hvin#-}" -lt 50000 ] 2>/dev/null; then
+            _hvz=$(cat $TMPDIR/.hvzero 2>/dev/null || echo 0)
+            case "${_hvz:-x}" in ''|*[!0-9]*) _hvz=0;; esac
+            _hvz=$(( _hvz + 1 ))
+            echo $_hvz > $TMPDIR/.hvzero 2>/dev/null || :
+            if [ "$_hvz" -ge ${hvZeroPasses:-5} ] 2>/dev/null; then
+              : > $TMPDIR/.hvrecover 2>/dev/null || :
+              rm -f $TMPDIR/.hvcontract $TMPDIR/.hvzero 2>/dev/null || :
+              command -v _wlog >/dev/null 2>&1 \
+                && _wlog "input collapsed (${_hvin}uA in for ${_hvz} passes, present+online, pack not charging) - allowing one contract recovery this plug" || :
+            fi
+          else
+            rm -f $TMPDIR/.hvzero 2>/dev/null || :
+          fi
+        fi
       fi
+      # THE LATCH MUST ALSO BE RELEASABLE BY A SUSTAINED COLLAPSE.
+      #
+      # Replaying the Pixel 9a's own flight records through the gate showed the fix as first written
+      # would NEVER have fired on the bug it was written for: 28 of the 39 records after the plug were
+      # blocked by .hvcontract. The very first reading was 8850mV, which latches the contract, and the
+      # latch clears only on a physical unplug - so on a charger that collapses seconds after plugging
+      # in, the latch is set by one transient blip and blocks the repair for the entire plug.
+      #
+      # .hvcontract means "a contract was WON". A sustained run below 6V while the cable is in means
+      # it has since been LOST. Clearing it (rather than bypassing it) keeps rekick_usb and every
+      # other consumer looking at one consistent world, and makes this the voltage-based sibling of
+      # the current-based collapse detector below.
+      #
+      # SUSTAINED is what separates this from the sag the latch exists to prevent re-detecting. A QC3
+      # contract under ~2A load measured 6433-6712mV on a Mi A3 - above the threshold even at its
+      # worst. Five consecutive passes is 45-70s at this loop cadence; no sag survives that.
+      if [ -f $TMPDIR/.hvcontract ] && ! ${chDisabledByAcc:-false}          && ! _ge_pause_cap 2>/dev/null && present 2>/dev/null; then
+        _lvb=
+        { read -r _lvb < usb/voltage_now; } 2>/dev/null || :
+        case "${_lvb:-x}" in ''|x|*[!0-9]*) _lvb=;; esac
+        # VOLTAGE ALONE CANNOT TELL A SAG FROM A COLLAPSE, and the 6V line sits right on top of a
+        # real operating point. Replaying a Mi A3's own records found it charging at 1.5A on a
+        # USB_HVDCP_3 supply reading 5974048uV - twenty-six millivolts under the threshold, and
+        # completely healthy. Releasing the latch there would re-detect a working contract, which is
+        # the precise fault the latch exists to prevent.
+        #
+        # So require that nothing is actually flowing. That is what "lost" means, and it is the same
+        # signal the collapse detector below already trusts. The node list mirrors it, because
+        # usb/input_current_now does not exist on every phone - a Pixel 6a charged at 1.67A while
+        # that path read nothing at all.
+        _lin=
+        for _lnode in usb/input_current_now usb/current_now main-charger/current_now usb/input_current_settled; do
+          { read -r _lin < "$_lnode"; } 2>/dev/null || continue
+          case "${_lin:-x}" in ''|x|*[!0-9-]*) _lin=; continue;; esac
+          break
+        done
+        # UNREADABLE INPUT IS NOT EVIDENCE OF A COLLAPSE. The comment said so and the code did the
+        # opposite: an empty reading failed the first test and fell straight through to the release,
+        # so a phone with no readable input node would drop the latch on voltage alone and re-detect
+        # a working contract. Absence of a measurement has to fail toward leaving things alone.
+        if [ -z "$_lin" ]; then
+          rm -f $TMPDIR/.hvlost 2>/dev/null || :
+        elif [ "${_lin#-}" -ge 500000 ] 2>/dev/null; then
+          rm -f $TMPDIR/.hvlost 2>/dev/null || :
+        elif [ -n "$_lvb" ] && [ "$_lvb" -lt 6000000 ] 2>/dev/null; then
+          _lvc=$(cat $TMPDIR/.hvlost 2>/dev/null || echo 0)
+          case "${_lvc:-x}" in ''|*[!0-9]*) _lvc=0;; esac
+          _lvc=$(( _lvc + 1 ))
+          echo $_lvc > $TMPDIR/.hvlost 2>/dev/null || :
+          if [ "$_lvc" -ge ${hvLostPasses:-5} ] 2>/dev/null; then
+            rm -f $TMPDIR/.hvcontract $TMPDIR/.hvlost 2>/dev/null || :
+            command -v _wlog >/dev/null 2>&1               && _wlog "contract lost ($(( _lvb / 1000 ))mV for ${_lvc} passes while plugged) - releasing the latch so a repair can be attempted" || :
+          fi
+        else
+          rm -f $TMPDIR/.hvlost 2>/dev/null || :
+        fi
+      else
+        rm -f $TMPDIR/.hvlost 2>/dev/null || :
+      fi
+
+
+      # rc23f: A SECOND ENTRY, for the plug the daemon never saw arrive.
+      #
+      # The gate above needs freshPlug AND sawUnplug, and sawUnplug is set only in the `! present`
+      # branch - the daemon has to have OBSERVED a clean unplug. When it did not, a phone that landed
+      # on a bad contract stayed on it with no way back, because this is the only code that can ask
+      # the charger to try again.
+      #
+      # Measured on a Pixel 9a (tegu, rc22), reported as "it said draining, flickered, and only
+      # started charging after I unplugged and replugged a few times":
+      #   15:35:07  plugged. vbus then oscillated 8850mV -> 25mV -> 0 -> 8650 -> 0 -> 5175 -> 0,
+      #             ICL flipping 500mA/1.5A/3A. chDisabledByAcc was FALSE on every record, so ACC
+      #             was not cutting anything - the supply itself kept collapsing.
+      #   15:38:30  the user's own disconnect finally set sawUnplug.
+      #   15:39:19  "plug: aimed for best contract, 0mV -> 8825mV" - and 35s later it was stable at
+      #             8.1V/3A, charging at 4.4A.
+      # The repair worked on the first attempt it was allowed to make. It was allowed to make it four
+      # minutes late, and only because the user happened to replug. That is the defect: the user was
+      # doing by hand what this block exists to do.
+      #
+      # WHY NOT REUSE THE COLLAPSE DETECTOR. That one requires input under 50mA for five consecutive
+      # passes. Here real current flowed between the collapses, so it could never have fired.
+      #
+      # THE EXCLUSIONS ARE THE WHOLE SAFETY ARGUMENT, and they are the same three the collapse
+      # detector uses, for the same reasons:
+      #   ! .hvcontract     - we have NEVER held a high-voltage contract on this plug. A sag cannot
+      #                       reach here, because winning one latches it and the latch is per-plug.
+      #                       This is what keeps re-detection in the "free" half of the rule above.
+      #   ! chDisabledByAcc - ACC's own capacity pause produces an identical low-voltage idle line.
+      #   ! _ge_pause_cap   - a firmware-limit phone held at its limit does too, with the flag false.
+      # Plus: sustained, never instantaneous. A negotiation in progress reads low for a few seconds,
+      # and interrupting one is how a good contract gets thrown away.
+      _aimStall=false
+
+      # PRESENT, not online. Measured on a Mi A3 whose contract had collapsed: usb/present=1,
+      # usb/online=0, USB_HVDCP_3 still negotiated, icl=0, vbus 5.9V - a supply that is attached and
+      # delivering nothing, which is precisely the state this repair exists for. Requiring `online`
+      # made the repair unreachable on the phones most likely to need it, because a collapse can take
+      # the online flag down with it. The Pixel 9a report had online=1 throughout, so that case was
+      # covered either way; this variant was not.
+      #
+      # This is a RELAXATION, so the window it opens is closed on the other side: the vbus test below
+      # is now a BAND with a lower bound, so a cable with nothing behind it - the case `online` was
+      # standing in for - still cannot reach the aim. Every other exclusion is unchanged.
+      if [ ! -f $TMPDIR/.hvaim ] && [ ! -f $TMPDIR/.hvcontract ] && [ ! -f $dataDir/.rekick-off ] \
+         && ! ${chDisabledByAcc:-false} && ! _ge_pause_cap 2>/dev/null && present 2>/dev/null; then
+        _avb=
+        { read -r _avb < usb/voltage_now; } 2>/dev/null || :
+        case "${_avb:-x}" in ''|x|*[!0-9]*) _avb=;; esac
+        # NO LOWER BOUND. I added one to replace the `online` check, reasoning that a line with
+        # nothing behind it was not worth re-detecting. The 9a replay showed that is exactly wrong:
+        # 14 of its records read vbus=0 with present=1, and vbus=0 while the cable is in IS the
+        # collapsed state this repair exists for. The floor excluded its own target.
+        # `present` and the sustain requirement are what keep this honest; re-detecting a genuinely
+        # dead line is harmless and happens at most once per plug.
+        if [ -n "$_avb" ] && [ "$_avb" -lt 6000000 ] 2>/dev/null; then
+          _afc=$(cat $TMPDIR/.hvfloor 2>/dev/null || echo 0)
+          case "${_afc:-x}" in ''|*[!0-9]*) _afc=0;; esac
+          _afc=$(( _afc + 1 ))
+          echo $_afc > $TMPDIR/.hvfloor 2>/dev/null || :
+          [ "$_afc" -ge ${hvFloorPasses:-5} ] 2>/dev/null && _aimStall=true
+        else
+          # Off the floor: either a contract exists or one is being negotiated. Either way the count
+          # restarts, so only a SUSTAINED floor can ever reach the aim.
+          rm -f $TMPDIR/.hvfloor 2>/dev/null || :
+        fi
+      fi
+      # The stall verdict above is a PRECONDITION of the aim, so it is computed before the aim's own
+      # section begins. It also has to live outside it: t56 extracts that section as
+      # `sed -n '/AIM FOR THE BEST CONTRACT/,/^      fi$/p'`, so a block placed inside it ends the
+      # extraction at its own closing `fi` and every later assertion grades a fragment.
 
       # AIM FOR THE BEST CONTRACT THE CHARGER CAN GIVE, ONCE, AT PLUG TIME.
       #
@@ -893,8 +1223,15 @@ if ! $_INIT; then
       # Bounded and quiet: only on the loop where a plug transition happened, only when the supply
       # is actually on the floor, never when the user has turned re-kick off, and never more than
       # once per plug. A phone that already negotiated well is untouched.
-      if $freshPlug && ${sawUnplug:-false} && [ ! -f $TMPDIR/.hvcontract ]         && [ ! -f $dataDir/.rekick-off ]; then
+      # The freshPlug arm keeps BOTH of its original guards. _aimStall already proved them itself,
+      # but restating them here means neither arm can ever reach the aim without them - an OR gate
+      # that drops a guard on one side is how a re-detect gets fired at a live 9V contract.
+      if { { $freshPlug && ${sawUnplug:-false}; } || ${_aimStall:-false}; } \
+         && [ ! -f $TMPDIR/.hvcontract ] && [ ! -f $dataDir/.rekick-off ]; then
         sawUnplug=false
+        # Once per plug, whichever entry got here. Cleared beside .hvcontract on unplug.
+        : > $TMPDIR/.hvaim 2>/dev/null || :
+        rm -f $TMPDIR/.hvfloor 2>/dev/null || :
         _mcv=
         { read -r _mcv < usb/voltage_now; } 2>/dev/null || :
         case "${_mcv:-x}" in
@@ -977,8 +1314,22 @@ if ! $_INIT; then
         if [ -n "${chargingSwitch[0]-}" ] && [ "${chargingSwitch[0]}" != "$gcsl" ]; then
           warn_once_per nativeshadow 86400 "ACC: this phone has a firmware charge limit and that is what holds your limit. The charging switch listed in settings (${chargingSwitch[0]##*/}) is not being used, so changing it will not change anything." || :
         fi
+        # rc22c: run the app-idle probe on the FIRMWARE-LIMIT path too.
+        #
+        # This branch continues before is_charging(), where the probe used to live, so idleApps did
+        # nothing whatsoever on a phone with a native limit - accepted, stored, echoed back, and
+        # ignored. Same branch and same failure as the allowIdleAbovePcap bug rc21 fixed.
+        #
+        # It must sit ABOVE sync_native_limit: pause_now lowers capacity[3], and sync_native_limit
+        # is what writes that level into the firmware. Below it, the pause would not reach the
+        # hardware until the next pass.
+        #
+        # Gated on present() so an unplugged phone never pays for the dumpsys, matching the
+        # $isCharging gate on the switch path. Empty idleApps returns before the fork either way.
+        present 2>/dev/null && idle_apps_check || :
         sync_native_limit || :
         native_unlatch || :
+        native_icl_restore || :
         native_verify_backstop || :
         # The Capacity Mask has to run here too. It is a DISPLAY feature and has
         # nothing to do with how charging is held, but it lives inside
@@ -990,6 +1341,11 @@ if ! $_INIT; then
         # .mask-n or .mask-on and never froze Android's level, while the same
         # build masked correctly on a Mi A3 whose switch is not native.
         mask_capacity || :
+        # rc23c: the low-battery shutdown check, which lives at the bottom of the loop and which
+        # this branch has never reached. Placed here so it runs before every one of this branch's
+        # three exits, and above the nap so a phone at its shutdown level is never left napping
+        # through it. Same function the switch path calls; the logic is shared, not duplicated.
+        auto_shutdown || :
         # rc21: honour allow_idle_above_pcap on firmware-limit phones.
         #
         # This branch `continue`s before is_charging(), and the ONLY place that reads
@@ -1011,7 +1367,9 @@ if ! $_INIT; then
         # where the user has raised the limit, turned the setting back on, or dropped below it.
         _nativeIdleAvoid=false
         if $allowIdleAbovePcap || ! _ge_pause_cap 2>/dev/null; then
-          _nap ${loopDelay[1]:-9}
+          # rc23b: this is the exit a default firmware-limit phone takes on EVERY pass
+          # (allowIdleAbovePcap defaults true), measured 8 of 8 naps on a Pixel 6a. See _nap_native.
+          _nap_native
           continue
         fi
         # rc22: DO NOT hand a firmware-limit phone to the generic switch logic. Falling through
@@ -1035,7 +1393,8 @@ if ! $_INIT; then
           _niaWarned=true
           warn_once_per nativenoidle 86400 "ACC: 'never sit above the limit' cannot be applied on this phone. Its charge limit is held by the firmware, and the only way to drain down to the resume level would be a charging switch this hardware does not honour. Your limit is still being held; the battery will rest at it instead of cycling down." || :
         fi
-        _nap ${loopDelay[1]:-9}
+        # rc23b: third exit out of the firmware-limit branch, same nap as the other two.
+        _nap_native
         continue
       fi
 
@@ -1154,7 +1513,8 @@ if ! $_INIT; then
             # charging genuinely stops.
             rm $TMPDIR/.breach $TMPDIR/.lockfail-count 2>/dev/null || :
           fi 2>/dev/null || :
-          _nap ${loopDelay[1]}
+          # rc23b: the idle-avoidance exit. Same nap as the exit above -- see _nap_native.
+          _nap_native
           rm $TMPDIR/.minCapMax 2>/dev/null || :
           continue
         fi
@@ -1508,59 +1868,11 @@ if ! $_INIT; then
           fi
         fi
 
-        # auto-shutdown
-        if _uptime 900 && not_charging Discharging; then
-          if [ ${capacity[0]} -ge 1 ]; then
-            # warnings
-            ! $shutdownWarnings || {
-              if [ ${capacity[0]} -gt 3000 ]; then
-                ! [ $(grep -o '^..' $voltNow) -eq $(( ${capacity[0]%??} + 1 )) ] \
-                  || ! notif "⚠️ WARNING: ~100mV to auto shutdown, plug the charger!" \
-                    || sleep ${loopDelay[1]}
-              else
-                ! [ $(batt_cap) -eq $(( ${capacity[0]} + 5 )) ] \
-                  || ! notif "⚠️ WARNING: 5% to auto shutdown, plug the charger!" \
-                    || sleep ${loopDelay[1]}
-              fi
-              shutdownWarnings=false
-            }
-            # action
-            # rc21: AT MOST ONE low-battery shutdown per discharge episode.
-            #
-            # Powering the phone off at shutdown_capacity and then doing it again every 15 minutes
-            # (_uptime 900 is the only thing that was holding it back) makes the device unusable
-            # exactly when someone needs it most: flat battery, powered back on for an emergency
-            # call. The threshold has already done its job once; after that the user has clearly
-            # chosen to keep using the phone, and that choice is theirs, not the module's.
-            #
-            # The latch lives in dataDir, NOT tmpfs, and is deliberate: tmpfs is wiped every boot,
-            # so a tmpfs latch would clear on exactly the power-on it exists to protect and the
-            # phone would shut down again 15 minutes later - the bug this fixes.
-            #
-            # It re-arms on its own. The else branch below clears it as soon as the level is back
-            # ABOVE the threshold, which only happens after a real charge, so the next flat
-            # battery is treated as a new episode and gets its shutdown. Nothing is permanently
-            # disabled and no config key changes, so AccA and every existing config are untouched.
-            #
-            # Scoped to the CAPACITY branch on purpose. shutdown_temp keeps firing every time:
-            # repeated overheating is a genuinely repeating hazard, a flat battery is not.
-            if _le_shutdown_cap; then
-              if [ -f $dataDir/.sd-latched ]; then
-                ${isAccd:-false} && command -v _wlog >/dev/null 2>&1 \
-                  && _wlog "low-battery shutdown already fired this episode: leaving the phone on" || :
-              else
-                sleep ${loopDelay[1]}
-                ! not_charging Discharging || {
-                  : > $dataDir/.sd-latched 2>/dev/null || :
-                  sync 2>/dev/null || :
-                  shutdown
-                }
-              fi
-            else
-              rm -f $dataDir/.sd-latched 2>/dev/null || :
-            fi
-          fi
-        fi
+        # auto-shutdown (rc23c: a function now, so the firmware-limit branch can reach it too).
+        # Guarded like the other call site: as a function its return status is the last command's,
+        # and a bare non-zero would abort the loop under set -e. Inline it was an `if` compound,
+        # which returns 0 when the condition is false, so nothing needed the guard before.
+        auto_shutdown || :
         # fix#293 (deep sleep): if genuinely unplugged and no shutdown action is
         # pending, wait much longer (interruptible) so the CPU can deep-sleep instead
         # of polling every ${loopDelay[1]}s. "No action pending" = shutdown_capacity
@@ -1702,7 +2014,32 @@ if ! $_INIT; then
     case $stop in ''|*[!0-9]*) stop=80;; esac; [ "$stop" -le 100 ] || stop=100
     case $start in ''|*[!0-9]*) start=75;; esac; [ "$start" -le 100 ] || start=100
     t=$(cat $temp 2>/dev/null || echo 0)
-    if [ "$t" -ge $(( ${temperature[1]:-50} * 10 )) ] 2>/dev/null; then
+    # rc23: HYSTERESIS. Engage at max_temp, then HOLD until the pack has cooled to resume_temp.
+    #
+    # This tested max_temp on both edges, so the hold lifted the moment the pack fell one tenth of a
+    # degree under the limit. Charging resumed, the pack heated straight back through max_temp, and
+    # it paused again -- so the battery sits AT the limit charging in bursts, and any glance at it
+    # shows charging at or above the temperature the user set. That is the "still charges above set
+    # temperature" report. The comment right below this used to describe the release as "it lifts on
+    # its own once the temperature drops back under max_temp", which is the defect written down as
+    # if it were the design.
+    #
+    # resume_temp is temperature[2]. It has always been in the config, it is documented in the
+    # README as `temperature=(cooldown_temp max_temp resume_temp shutdown_temp)`, and the generic
+    # switch path has always honoured it (`temp_now <= temperature[2]` on its resume branch). Only
+    # the firmware-limit path ignored it, which is why this reproduces on a Pixel and not on a
+    # phone using a switch.
+    _mt=$(( ${temperature[1]:-50} * 10 ))
+    _rt=$(( ${temperature[2]:-40} * 10 ))
+    # A resume_temp at or above max_temp could never release. Degrade to the old single-threshold
+    # behaviour rather than hold the charge off forever on a mis-edited config.
+    [ "$_rt" -lt "$_mt" ] 2>/dev/null || _rt=$_mt
+    if [ "$t" -ge "$_mt" ] 2>/dev/null; then
+      _ntHot=1
+    elif [ "$t" -le "$_rt" ] 2>/dev/null; then
+      _ntHot=0
+    fi
+    if [ "${_ntHot:-0}" = 1 ] 2>/dev/null; then
       # rc22: a thermal pause has to be BELOW the current level to be a pause at all. The firmware
       # charges until level >= charge_stop_level, so clamping stop to start only holds when the pack
       # already sits above start -- and below that it does nothing whatsoever. Measured on a Pixel 6a
@@ -1711,7 +2048,8 @@ if ! $_INIT; then
       # battery below its resume level, which is most of a charge.
       # Hold AT the present level instead, with start one point under it so the firmware does not
       # immediately resume. This is recomputed every loop, so as the pack drains the hold follows it
-      # down, and it lifts on its own once the temperature drops back under max_temp.
+      # down. It lifts when _ntHot clears, which is at resume_temp, not at max_temp -- see the
+      # hysteresis note above.
       _tl=$(batt_cap 2>/dev/null)
       case "${_tl:-x}" in ''|*[!0-9]*) _tl=;; esac
       if [ -n "$_tl" ] && [ "$_tl" -lt "$start" ] 2>/dev/null; then
@@ -1979,6 +2317,96 @@ if ! $_INIT; then
   }
 
 
+  native_icl_restore() {
+    # rc23: the firmware pause costs the phone its charge speed, permanently, on every cycle.
+    #
+    # Google's charge_stop_level pause is implemented by zeroing the input-current votes. On
+    # resume the firmware re-arms them, but only to the USB default, never back to what it had
+    # negotiated. Measured end to end on a Pixel 6a, one ordinary ACC pause/resume:
+    #
+    #   before pause   main-charger/current_max 3200000   pack 1.08 A
+    #   held           main-charger/current_max       0   pack -0.30 A (running off the cell)
+    #   after resume   main-charger/current_max  500000   pack  0.30 A
+    #
+    # and it stays at 500000 until the cable is physically pulled. So a phone that reaches its
+    # limit once charges at a third of its speed for the rest of that plug -- overnight, the
+    # difference between full and not. Writing the remembered value straight back fixes it in
+    # full and holds: 300 mA went to 1250 mA on the write and was still there minutes later.
+    #
+    # Deliberately narrow, because fighting a charger over its own current limit is how fast
+    # charging gets broken:
+    #   - one shot per pause, on the hold -> charging edge only. A thermal or PD throttle at any
+    #     other moment is the charger's business and is left completely alone.
+    #   - the remembered value is whatever the node last read WHILE CHARGING, not a maximum, so
+    #     an already-throttled ceiling is restored as it was rather than undone.
+    #   - forgotten on unplug, so a strong charger's ceiling is never pinned onto a weaker one
+    #     plugged in later.
+    #   - only ever raises a vote back to a value that same node held minutes earlier, never
+    #     invents one, and never touches the usb/type-C contract (see _iclNodes).
+    #
+    # The whole cycle is read off THE VOTE, and battery/status is not consulted at all. Two separate
+    # measurements say it must not be:
+    #   - bluejay reads "Not charging" for a sample at a time while charging perfectly normally, so
+    #     a status-keyed hold detector fired on nearly every loop. Zero is the firmware's own pause
+    #     signature and it does not flap.
+    #   - gating the RESTORE on status deadlocks. The firmware does not always release to 500000;
+    #     measured, it released to 100000, and 100 mA against a live screen means the pack keeps
+    #     draining, so status stays "Not charging" forever and the restore that would have fixed it
+    #     never runs. Filmed on bluejay: vote 100000, charger input 95 mA, pack -130 mA, held there
+    #     for the full 96s window. Waiting for "Charging" is waiting for the thing being fixed.
+    local n v k cur held=0
+    if ! present 2>/dev/null; then _iclSave=; _iclHeld=0; rm -f $TMPDIR/.icl-save 2>/dev/null; return 0; fi
+    # rc23e: the remembered ceiling lived ONLY in a shell variable, so a daemon that started while the
+    # phone was already held began with an empty _iclSave. The held branch below returns before the
+    # learn loop, so on resume there was nothing to restore -- and the learn loop then recorded the
+    # COLLAPSED value as the ceiling for the rest of that plug, locking the collapse in for every later
+    # cycle. An AccA config edit, `acc -D restart` or `acc -t` while at the limit was enough to do it.
+    #
+    # $TMPDIR is tmpfs, so this is forgotten at boot, and the unplug branch above deletes it. That is
+    # exactly the lifetime the in-memory value already had -- "one plug session" -- minus the accident
+    # of which process observed it.
+    [ -n "${_iclSave:-}" ] || { _iclSave=$(cat $TMPDIR/.icl-save 2>/dev/null) || _iclSave=; }
+    for n in $_iclNodes; do
+      v=; { read -r v < "$n"; } 2>/dev/null || :
+      [ "${v:-1}" = 0 ] && { held=1; break; }
+    done
+    [ "$held" = 1 ] && { _iclHeld=1; return 0; }
+    if [ "${_iclHeld:-0}" = 1 ] && [ -n "${_iclSave:-}" ]; then
+      for k in $_iclSave; do
+        n=${k%=*}; v=${k#*=}
+        case "${v:-x}" in ''|0|*[!0-9]*) continue;; esac
+        cur=; { read -r cur < "$n"; } 2>/dev/null || :
+        case "${cur:-x}" in ''|0|*[!0-9]*) continue;; esac
+        [ "$cur" -lt "$v" ] 2>/dev/null || continue
+        # rc23: honour the crash blacklist, exactly as sync_native_limit does.
+        # This restores a remembered vote rather than a configured switch, so it writes with a raw
+        # echo and never passes through write() -- which is precisely how it slipped past the
+        # blocked list. That is the same hole rc21 closed twice in this file, and it matters more
+        # here than usual: AMPS shares this list (its BLF is $dataDir/.acc-compat-blacklist, the
+        # file sw_blacklisted reads), so a node AMPS blacklisted after it took the phone down would
+        # be refused by every other writer in the module and written anyway by this one.
+        # Skipping costs only charge speed. Writing a node that has already downed a phone does not.
+        if command -v sw_blacklisted >/dev/null 2>&1 && sw_blacklisted "$n"; then
+          warn_once_per iclblocked 21600 "ACC: the charger's input-current node is on the blocked list, so ACC is not restoring it after a firmware pause. Charging may be slower than it should be after the limit is reached. Remove it from Blocked settings to allow it again." || :
+          continue
+        fi
+        chmod 0644 "$n" 2>/dev/null || :
+        echo "$v" > "$n" 2>/dev/null || :
+        command -v _wlog >/dev/null 2>&1 \
+          && _wlog "input current restored ${n#/sys/class/power_supply/} <- $v (firmware resumed it at $cur)" || :
+      done
+    fi
+    _iclHeld=0
+    _iclSave=
+    for n in $_iclNodes; do
+      v=; { read -r v < "$n"; } 2>/dev/null || :
+      case "${v:-x}" in ''|0|*[!0-9]*) continue;; esac
+      _iclSave="$_iclSave $n=$v"
+    done
+    printf '%s' "${_iclSave:-}" > $TMPDIR/.icl-save 2>/dev/null || :
+  }
+
+
   generic_rearm() {
     # rc24 (stable.6.3): generic (non-Pixel) counterpart to native_unlatch. Some charging
     # switches (input_suspend, */current_max 0, */charging_enabled 0, etc.) hold their
@@ -2007,6 +2435,31 @@ if ! $_INIT; then
     capacity[3]=$(batt_cap)
     capacity[2]=$((capacity[3] - 5))
     [ ${capacity[2]} -ge 0 ] || capacity[2]=0   # rc5 (#11): clamp resume_capacity >=0 at very low SOC
+  }
+
+  # The idleApps probe, defined ONCE and called from both loop paths.
+  #
+  # It used to be inline inside is_charging(), and that had two consequences, opposite in sign and
+  # both wrong.
+  #
+  # COST: it ran on every pass whether or not a charger was attached, and pause_now cannot do
+  # anything without one. `dumpsys activity top` measures about 150ms and 235KB of output per call
+  # on a Mi A3. Measured unplugged, screen off, 90s windows: 65 CPU ticks with idleApps set against
+  # 51 once gated, about 21% of the daemon's idle cost spent on an answer it could never act on.
+  #
+  # FUNCTION: on a phone with a firmware charge limit the main loop continues inside the
+  # $nativeLimit branch and never reaches is_charging() at all, so the probe never ran. idleApps was
+  # accepted, written to config, echoed back by acc -sp, and silently ignored on every Pixel. Same
+  # shape as the allowIdleAbovePcap bug rc21 fixed, in the same branch, for the same reason.
+  # Measured: gating it changed a Pixel 6a by nothing at all (52,55 -> 55,54), which is what exposed
+  # it. Code that never runs cannot cost anything.
+  #
+  # pause_now only lowers capacity[3]/[2] and touches no switch, so on the native path this works
+  # provided it runs BEFORE sync_native_limit writes the level to the firmware.
+  idle_apps_check() {
+    [ -n "${idleApps[0]-}" ] || return 0
+    dumpsys activity top | sed -En 's/(.*ACTIVITY )(.*)(\/.*)/\2/p'       | tail -n 1 | grep -E "$(echo ${idleApps[*]} | sed 's/ /|/g; s/,/|/g')" >/dev/null \
+      && pause_now || :
   }
 
 
@@ -2347,6 +2800,23 @@ if ! $_INIT; then
     case "${_pd##*/}" in usb) break;; esac
   done
 
+  # rc23: the CHARGER-side input-current vote, for native_icl_restore. _psIcl above resolves to one
+  # node and prefers usb, but usb's is not the vote that gates the pack: on a Pixel 6a
+  # usb/current_max sat at the 500000 SDP default the whole time while main-charger/current_max
+  # carried the real 3200000 ceiling.
+  #
+  # The allow-list is deliberate, and it is the narrow one. usb, tcpm*, pc_port and the type-C port
+  # supplies carry the NEGOTIATED contract, not a vote, and writing one renegotiates the link:
+  # measured on bluejay, a single write to usb/current_max dropped the port to 100000 -- 100 mA,
+  # unconfigured -- and charging stopped until it was written back. dc is the wireless input and the
+  # firmware restores it correctly on its own. Neither is ours to touch. The battery and the gauges
+  # are excluded on top of that: their current_max is a battery-side FCC, a different quantity.
+  _iclNodes=
+  for _pd in /sys/class/power_supply/*; do
+    case "${_pd##*/}" in main|main-charger|mainchg|charger|gccd|bbc) :;; *) continue;; esac
+    [ -f "$_pd/current_max" ] && _iclNodes="$_iclNodes $_pd/current_max"
+  done
+
   hasWakeFifo=false
   [ -p $TMPDIR/.wake ] || mkfifo $TMPDIR/.wake 2>/dev/null || :
   if [ -p $TMPDIR/.wake ]; then
@@ -2368,6 +2838,9 @@ if ! $_INIT; then
     [ -f "$_fn" ] && _fcNodes="$_fcNodes $_fn"
   done
   mtReached=false
+  # native thermal hold latch. Deliberately initialised HERE, outside the loop: the reset next to
+  # `xIdle=false` runs on every charging pass, and a latch cleared every pass is not a latch.
+  _ntHot=0
   resetBattStatsOnPlug=false
   resetBattStatsOnUnplug=false
   restrictCurr=false

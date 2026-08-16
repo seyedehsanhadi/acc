@@ -39,7 +39,7 @@ MF=$execDir/misc-functions.sh
 # every function defined at column 0 - which is why this extracted fast_session (indented in
 # accd.sh) and returned nothing for rekick_usb (column 0 in misc-functions.sh). `[ ]*` is
 # zero-or-more and matches both.
-body(){ sed -n "/^[ ]*$1()/,/^[ ]*}/p" "$2" | sed 's/#.*//'; }
+body(){ sed -n "/^[ ]*$1()/,/^[ ]*}/p" "$2" | sed 's/^[[:space:]]*#.*//'; }
 
 # ---- 1: the guard must not depend on vendor nodes existing ----------------------------------------
 _fs=$(body fast_session "$AD")
@@ -135,7 +135,7 @@ printf '%s' "$_rk" | grep -q '_rekick_due' \
 # the life of that plug rather than re-derived from whatever the line reads this millisecond.
 printf '%s' "$_rk" | grep -q 'hvcontract'   && ok "the guard consults a per-plug latch, so a load sag cannot open the door"   || no "the guard still decides from an instantaneous voltage - a sag will permit a re-kick"
 
-_ad=$(sed 's/#.*//' "$AD")
+_ad=$(sed 's/^[[:space:]]*#.*//' "$AD")
 printf '%s' "$_ad" | grep -q 'rm -f $TMPDIR/.hvcontract'   && ok "and the latch is cleared when the cable comes out"   || no "the latch is never cleared - it would survive a charger swap"
 printf '%s' "$_ad" | grep -q 'hvcontract'   && ok "the daemon sets the latch while a high voltage is present"   || no "nothing sets the latch"
 
@@ -148,7 +148,7 @@ printf '%s' "$_ad" | grep -q 'hvcontract'   && ok "the daemon sets the latch whi
 # apsd_rerun does, so an ordering check that greps the raw text finds the word in the prose above
 # the code and concludes the order is wrong. That is the fourth time in this suite set that a test
 # read a defect's description and reported it as the defect.
-_pl=$(sed -n '/AIM FOR THE BEST CONTRACT/,/^      fi$/p' "$AD" | sed 's/#.*//')
+_pl=$(sed -n '/AIM FOR THE BEST CONTRACT/,/^      fi$/p' "$AD" | sed 's/^[[:space:]]*#.*//')
 if [ -n "$_pl" ]; then
   printf '%s' "$_pl" | grep -q 'freshPlug'     && ok "the plug-time attempt is gated on a real plug transition"     || no "the plug-time attempt is not gated on freshPlug - it could fire every loop"
   printf '%s' "$_pl" | grep -q 'rekick-off'     && ok "and it honours acc -sk off"     || no "the plug-time attempt ignores acc -sk off"

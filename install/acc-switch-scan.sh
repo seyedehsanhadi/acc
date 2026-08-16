@@ -57,15 +57,60 @@ cd /sys/class/power_supply/ 2>/dev/null || { warn "no /sys/class/power_supply"; 
 
 # rc16: single-instance mutex. The daemon may auto-trigger this scan while the user
 # also taps a "Scan & lock" script -- two scanners toggling switches at once is chaos.
-# flock a tmpfs lock; if another scan holds it, exit cleanly. (No-op if flock absent.)
-if command -v flock >/dev/null 2>&1; then
-  exec 8>"$TMPDIR/.scan.lock" 2>/dev/null && { flock -n 8 || { warn "another switch scan is already running; aborting this one"; exit 0; }; }
+#
+# rc23 shipped this as `exec 8>"$TMPDIR/.scan.lock" && flock -n 8`, which ABORTED EVERY RUN on
+# Android. Android's flock is toybox's, whose usage is `flock [-sxun] fd`: it takes a descriptor as
+# an argument and cannot take one the shell opened for it, so `flock -n 8` returned non-zero with
+# nothing whatsoever holding the lock. Measured identically on a Mi A3 (Magisk) and a Pixel 6a
+# (KernelSU). All three of AccA's scan buttons run this file, so all three printed "another switch
+# scan is already running" -- never true -- and did nothing. The 0-byte lock file was the other half
+# of the evidence: `exec 8>` truncates it before any pid could be read back out.
+#
+# The replacement uses mkdir, which is atomic on every filesystem and needs no external tool. A
+# holder that is gone (killed, or the phone rebooted mid-scan) is taken over rather than blocking
+# every future scan forever, and the takeover check reads /proc/<pid>/cmdline so a RECYCLED pid
+# cannot masquerade as a live scan. $TMPDIR is tmpfs and is wiped at boot, so a reboot clears it
+# regardless; the /proc check is for the kill-mid-scan case within one boot.
+_SCANLOCK=$TMPDIR/.scan.lock.d
+_scan_alive() {   # $1 = pid -> true only if that pid is a LIVE switch scan that is not us
+  case "${1:-}" in ''|*[!0-9]*) return 1;; esac
+  [ "$1" = "$$" ] && return 1
+  [ -d "/proc/$1" ] || return 1
+  # rc23c: grep the file directly. This was `tr '\0' ' ' < cmdline | grep -q`, and that PIPELINE
+  # wedged on a Mi A3: tr spinning in state R, grep -q blocked behind it, the calling suite's shell
+  # parked in sigsuspend, and `timeout 300` unable to help because it waits on a child that never
+  # exits. It cost 25 minutes of a run and would stall any unattended suite sweep the same way.
+  # A single grep on the file has no pipe to wedge and no second process to inherit a stdin that
+  # never closes. -a because cmdline is NUL-separated and grep would otherwise call it binary; the
+  # NULs simply act as separators for the match.
+  grep -qa acc-switch-scan "/proc/$1/cmdline" 2>/dev/null
+}
+if ! mkdir "$_SCANLOCK" 2>/dev/null; then
+  _o=$(cat "$_SCANLOCK/pid" 2>/dev/null)
+  if _scan_alive "$_o"; then
+    warn "another switch scan is already running (pid $_o); aborting this one"
+    exit 0
+  fi
+  warn "clearing a stale scan lock (pid ${_o:-unknown} is gone)"
 fi
+echo $$ > "$_SCANLOCK/pid" 2>/dev/null || :
 
 # fix7: resolve the "pcap" off-token (used by limit-type switches like
 # charge_stop_level) to the configured pause_capacity, falling back to the live
 # capacity. This makes the scan test the same flat-hold value the daemon applies,
 # so the limit node reads as a clean [idle] hold instead of a [discharging] drain.
+# rc23: DO NOT resolve this from the configured pause level. It looks like a bug that the grep below
+# matches nothing -- there is no `pause_capacity=` line in the config, the value is field 4 of the
+# capacity array -- so the fallback to the LIVE battery level always wins. That fallback is not an
+# accident to be repaired; it is the only thing that makes the token work.
+#
+# pcap is the OFF value written to a limit node DURING A SCAN. Resolved to the live level, writing it
+# stops charging immediately, which is the observable the switch test needs. Resolved to the
+# configured pause -- 76 while you scan at 55% -- the firmware would not stop at all, and the scan
+# would record a perfectly good level switch as "no effect". The daemon can use the configured value
+# because it only applies it once the pack has REACHED that level; a scan has not.
+#
+# A change here was written and reverted on 2026-08-11 for exactly this reason. Leave it alone.
 PCAP=$(grep -hoE '^pause_capacity=[0-9]+' "$dataDir/config.txt" "$execDir/config.txt" 2>/dev/null | grep -oE '[0-9]+' | head -n1)
 [ -n "${PCAP:-}" ] || PCAP=$(cat battery/capacity 2>/dev/null || echo 60)
 
@@ -94,11 +139,72 @@ write_off()  { _write off "$1"; }
 # released high - on a Mi A3 that is usb/current_max back at 2.2A after ACC had negotiated 2.8A.
 # These nodes are owned by charger negotiation; ACC's rule everywhere else is release HIGH and let
 # the driver clamp, never replay a snapshot.
+# rc23: the filter has to be PER NODE. A switch line is a sequence of "<node> <on> <off>" triples and
+# grouped lines are real -- the tester emits them (a Pixel's four current paths go on one line, and a
+# OnePlus pairs charging_enabled with op_disable_charge). This matched the whole LINE, so a single
+# current_max anywhere on it skipped the restore of every other node on that line, including the
+# input_suspend that was doing the cutting. That leaves the phone not charging until a reboot, which
+# is the exact failure restore_all_on exists to prevent.
+# rc23b: this must NOT carry restore_all_on's filter, and carrying it was a real bug.
+#
+# The two functions look alike and are not. restore_all_on sweeps the WHOLE switch file, which can
+# hold a probe-time SNAPSHOT line for a current node (usb/current_max 2200000 0) appended by
+# read-ch-curr-ctrl-files-p2.sh; replaying a snapshot hands back a stale negotiated value, so
+# skipping current nodes there is correct. restore_on replays the CANDIDATE'S OWN line, whose ON
+# field is the high release value (main/current_max 3000000 0 -> write 3000000). That is exactly
+# ACC's rule everywhere else: release HIGH and let the driver clamp.
+#
+# With the filter here, a current node written to its OFF value (0) by write_off was never put back
+# by anything. Measured on a Mi A3 after one scan: main/current_max, pc_port/current_max,
+# usb/current_max, battery/constant_charge_current, battery/constant_charge_current_max,
+# main/constant_charge_current_max and battery/charge_control_limit ALL left at 0. Two consequences,
+# both bad. The phone is left unable to draw current until something else rewrites those nodes. And
+# every candidate tested AFTER a current node is measured on a phone that can no longer charge, so
+# a switch that works is recorded as "no effect" -- the scan contaminates its own remaining results.
 restore_on() {
-  case "${1-}" in
-    */current_max*|*/input_current*|*/constant_charge_current*|*restrict_cur*) return 0;;
-  esac
-  _write on "$1"
+  local _restore=
+  set -f; set -- ${1-}; set +f
+  while [ $# -ge 3 ]; do
+    [ "$1" = "--" ] && { shift 3; continue; }
+    _restore="$_restore $1 $2 $3"; shift 3
+  done
+  [ -n "$_restore" ] && _write on "$_restore"
+  return 0
+}
+
+# The sweep's variant: same PER-NODE walk, but current nodes are dropped because the sweep reads
+# lines it did not write and one of them may be a snapshot. Per node, never per line: a grouped line
+# is real (a Pixel's four current paths share one, a OnePlus pairs charging_enabled with
+# op_disable_charge), and filtering the whole line would skip the input_suspend doing the cutting.
+restore_on_safe() {
+  local _restore=
+  set -f; set -- ${1-}; set +f
+  while [ $# -ge 3 ]; do
+    case "$1" in
+      --|*/current_max|*/input_current*|*/constant_charge_current*|*restrict_cur*) shift 3; continue;;
+    esac
+    _restore="$_restore $1 $2 $3"; shift 3
+  done
+  [ -n "$_restore" ] && _write on "$_restore"
+  return 0
+}
+
+# rc23b: the baseline every candidate is measured against has to be REAL, not assumed.
+#
+# test_switch decides "this switch stopped charging" by comparing current against a baseline it read
+# just before writing. If the previous candidate left the phone unable to charge, that baseline is
+# taken on a dead phone and every later verdict is noise. Restoring is necessary but not sufficient:
+# a node can refuse the write, or the charger can need a moment to renegotiate after being cut.
+#
+# So after each candidate is put back, wait for current to actually come back before testing the
+# next one, and if it does not, say so rather than reporting confident nonsense for the remainder.
+baseline_ok() {   # 0 = charging current is back
+  local _i=0
+  while [ "$_i" -lt 24 ]; do
+    [ "$(abs "$(raw)")" -gt "$THR" ] 2>/dev/null && return 0
+    nap; _i=$((_i+1))
+  done
+  return 1
 }
 
 # ---------- daemon control (always restart on exit) ----------
@@ -121,32 +227,110 @@ restore_all_on() {
   # back at 2.2A after ACC had negotiated it to 2.8A - handing back the entire measured advantage
   # for the rest of the session, silently, with no re-kick behind it.
   #
-  # These nodes do not need restoring anyway. They are owned by charger negotiation, and ACC's
+  # These nodes do not need restoring HERE. They are owned by charger negotiation, and ACC's
   # standing rule everywhere else is release HIGH and let the driver clamp, never replay a
   # snapshot - see set-ch-curr.sh, which documents this same hazard and pairs its restore with a
-  # re-kick. A scan that cut one has already had it released by the per-candidate restore_on above;
-  # this belt-and-braces sweep only needs to cover the binary switches.
+  # re-kick. The candidate's own line IS released high, by restore_on, right after it is tested.
+  #
+  # rc23b: the skip is now per NODE (restore_on_safe), not per line. This dropped the whole line on
+  # any match, so a grouped line - which the tester really does emit - lost the restore of every
+  # other node on it, including the input_suspend that was doing the cutting. That is the exact
+  # "no charge until reboot" failure this sweep exists to prevent.
   [ -f "${SW:-/x}" ] || return 0
   while IFS= read -r _l; do
     case "$_l" in ''|'#'*) continue;; esac
-    case "$_l" in
-      */current_max*|*/input_current*|*/constant_charge_current*|*restrict_cur*) continue;;
-    esac
-    restore_on "$_l" 2>/dev/null || :
+    restore_on_safe "$_l" 2>/dev/null || :
   done < "$SW"
 }
+# rc23: THE reason the scanner was left inert. `acca -D restart` ends, inside daemon_ctrl, in
+# `exec $TMPDIR/accd` -- the process we spawn does not merely start the daemon, it BECOMES the
+# daemon. Called plainly from cleanup that daemon inherits this script's session, process group and
+# stdio, so it dies the moment the script exits or the caller's pipe closes, and no amount of
+# retrying inside cleanup can help: every retry inherits the same doom. That is why 25 s of retries
+# plus an `acc -D restart` fallback still ended with no daemon on both phones, while the identical
+# command run by hand from a surviving shell worked in about 2 s.
+#
+# setsid puts it in a session of its own, with stdio on /dev/null so a closed pipe cannot reach it.
+# Exactly the fix `acc -t` carries for exactly the same defect.
+# rc23b: `pgrep -f accd.sh` IS NOT A DAEMON CHECK, and using it made cleanup lie.
+#
+# release-lock.sh runs `pkill -f /data/adb/vr25/acc/accd.sh` and service.sh runs
+# `start-stop-daemon -bx /data/adb/vr25/acc/accd.sh -S`. Both carry that path in their OWN argv, so
+# `pgrep -f accd.sh` matches the machinery that tears the daemon down and the launcher that has not
+# started it yet. Measured: a scan reported "ACC daemon restarted; charging is back under ACC
+# control" and there was no daemon 45 seconds later; the wait loop had matched a transient that
+# lived two seconds at t+62.
+#
+# Match the daemon itself: a shell running accd.sh as its script argument, and never a helper that
+# merely names it.
+# True only for the daemon itself. Substring matching is not enough and that is the whole point:
+# `pkill -f <execDir>/accd.sh` and `start-stop-daemon -bx <execDir>/accd.sh -S` both CONTAIN the
+# path, and so does any helper invoked with it. The daemon is specifically a shell whose SCRIPT
+# argument is accd.sh, which none of those are. Excluding the known helpers by name would be a
+# blacklist that the next helper defeats; this is a positive test for the real shape.
+_is_accd() {   # $1 = pid
+  local _pid=${1:-} _c
+  case "$_pid" in ''|*[!0-9]*) return 1;; esac
+  [ -r "/proc/$_pid/cmdline" ] || return 1
+  _c=$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null)
+  [ -n "$_c" ] || return 1
+  set -f; set -- $_c; set +f
+  case "${1:-}" in sh|*/sh|mksh|*/mksh|bash|*/bash|busybox|*/busybox) ;; *) return 1;; esac
+  [ "${1##*/}" = busybox ] && shift          # busybox sh <script>
+  case "${2:-}" in */accd.sh|accd.sh) return 0;; esac
+  return 1
+}
+daemon_alive() {
+  local _p
+  for _p in $(pgrep -f "accd.sh" 2>/dev/null); do
+    _is_accd "$_p" && return 0
+  done
+  return 1
+}
+
+restart_daemon_detached() {
+  [ -n "$ACCA" ] || return 1
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$ACCA" -D restart </dev/null >/dev/null 2>&1 &
+  else
+    nohup "$ACCA" -D restart </dev/null >/dev/null 2>&1 &
+  fi
+  return 0
+}
 cleanup() {
+  # release the single-instance mutex only if this process still owns it, so a scan that started
+  # while we were exiting is not unlocked out from under itself
+  [ "$(cat "${_SCANLOCK:-/nonexistent}/pid" 2>/dev/null)" = "$$" ] && rm -rf "$_SCANLOCK" 2>/dev/null
   [ -n "$cur_line" ] && restore_on "$cur_line" 2>/dev/null
   restore_all_on
-  [ -n "$ACCA" ] && "$ACCA" -D restart >/dev/null 2>&1 || :
+  restart_daemon_detached || :
   # fix10: confirm the daemon actually came back. `acca -D restart` now detaches it,
   # but verify so a failed restart is never silent -- a stopped daemon = no cap.
   # `acca -D` exits 0 when accd holds its lock (running), 9 when it does not.
+  # rc23: wait in SECONDS, and try the restart again before giving up.
+  # This waited `nap` x8, and nap is usleep STEP_MS -- 300 ms -- so the whole window was 2.4 s
+  # against a restart measured at about 2 s on a Mi A3. It was a coin flip, and losing it printed
+  # "charging is currently UNCAPPED" at a user whose daemon was about to come back on its own.
+  # Nobody had seen it because the single-instance guard above aborted every run before this line.
   up=0
   if [ -n "$ACCA" ]; then
-    i=0; while [ "$i" -lt 8 ]; do
-      "$ACCA" -D >/dev/null 2>&1 && { up=1; break; }
-      nap; i=$((i+1))
+    i=0; while [ "$i" -lt 20 ]; do
+      daemon_alive && { up=1; break; }
+      [ "$i" = 9 ] && restart_daemon_detached   # one more push half way through
+      sleep 1; i=$((i+1))
+    done
+  fi
+  # last resort: the module's own CLI, which resolves the daemon differently. Detached for the same
+  # reason as above -- a bare `acc -D restart` here execs accd into this dying script's session.
+  if [ "$up" = 0 ] && command -v acc >/dev/null 2>&1; then
+    if command -v setsid >/dev/null 2>&1; then
+      setsid acc -D restart </dev/null >/dev/null 2>&1 &
+    else
+      nohup acc -D restart </dev/null >/dev/null 2>&1 &
+    fi
+    i=0; while [ "$i" -lt 20 ]; do
+      daemon_alive && { up=1; break; }
+      sleep 1; i=$((i+1))
     done
   fi
   say ""
@@ -157,7 +341,13 @@ cleanup() {
     say "  Fix: reboot, or toggle the daemon off then on in AccA."
   fi
 }
-trap cleanup EXIT INT TERM
+# HUP as well as INT/TERM, matching acc.sh's exxit trap and AMPS's restore trap. This scan works by
+# writing every candidate node to its OFF value in turn, and SIGHUP is what arrives when the terminal
+# or adb session that launched an unattended scan goes away - the likeliest way one is interrupted in
+# the field. Without it cleanup never runs: candidates stay cut and no daemon comes back, so charging
+# is uncapped on a phone whose owner thinks a scan is still in progress. EXIT does not cover this; a
+# shell killed by an uncaught signal dies without running its EXIT trap.
+trap cleanup EXIT INT TERM HUP
 
 # ---------- current source (reuse ACC's own detection if present) ----------
 currFile=; battStatus=; ampFactor_=
@@ -265,7 +455,34 @@ test_switch() {
 
 # ---------- switch list ----------
 SW=$TMPDIR/ch-switches
-[ -s "$SW" ] || { warn "no switch list at $SW - run 'acc -D restart' once, then retry"; exit 1; }
+# rc23b: build the list rather than telling the user to run a command that does not build it.
+#
+# $SW is written only by the daemon's INIT path (accd.sh with -i, or when its cached battery
+# interface is unusable). A plain `acc -D restart` does NOT rebuild it, so the old remedy here --
+# "run 'acc -D restart' once, then retry" -- was wrong, and following it left the user in exactly
+# the same place. On a phone that has been up a while the file is simply absent, because $TMPDIR is
+# tmpfs and only the boot-time init populated it.
+#
+# The scan is about to stop the daemon anyway, so asking for an init first costs nothing it was not
+# already going to spend.
+if [ ! -s "$SW" ]; then
+  say "building the switch list (first run since boot)..."
+  if [ -n "$ACCA" ]; then
+    "$ACCA" -D stop >/dev/null 2>&1 || :
+    if command -v setsid >/dev/null 2>&1; then
+      setsid $TMPDIR/accd --init </dev/null >/dev/null 2>&1 &
+    else
+      nohup $TMPDIR/accd --init </dev/null >/dev/null 2>&1 &
+    fi
+    _iw=0
+    while [ "$_iw" -lt 45 ]; do
+      [ -s "$SW" ] && break
+      sleep 1; _iw=$((_iw+1))
+    done
+  fi
+fi
+[ -s "$SW" ] || { warn "no switch list at $SW, and building one did not produce it."; \
+                  warn "  Reboot once and re-run: the list is written when ACC starts at boot."; exit 1; }
 
 # ---------- go ----------
 say "== ACC fast switch scan =="
@@ -304,12 +521,29 @@ mkdir -p $dataDir/logs 2>/dev/null || :
 results=
 drained=0
 n=0
+contaminated=0
 BL=$TMPDIR/.sw-blacklist
 while IFS= read -r line; do
   case "$line" in ''|'#'*) continue;; esac
   # rc16: skip switches the runtime monitor parked as non-holding for this session
   [ -f "$BL" ] && grep -qxF "$line" "$BL" 2>/dev/null && continue
   n=$((n+1))
+  # rc23b: prove the phone is back to a charging baseline BEFORE this candidate is measured, so a
+  # residue from the previous one cannot be read as this one's verdict. Only meaningful once at
+  # least one candidate has been written; the very first read is the run's own baseline.
+  if [ "$n" -gt 1 ] && [ "$contaminated" = 0 ]; then
+    if ! baseline_ok; then
+      contaminated=1
+      say ""
+      # One self-contained line first, so this is greppable. The wrapped prose below split
+      # "cannot be trusted" across two lines, which defeated a grep looking for exactly that.
+      say "  ! RESULTS-UNTRUSTWORTHY: charging did not resume between switches."
+      say "    Everything from here on was measured on a phone that is not charging, so a switch"
+      say "    that works can be recorded as 'no effect'. Unplug, replug and re-run; if it happens"
+      say "    again, send this output back."
+      say ""
+    fi
+  fi
   printf '  %2d. %-56.56s ' "$n" "$line"
   r=$(test_switch "$line")
   set -- $r
@@ -359,7 +593,15 @@ if [ -n "$results" ]; then
   { echo ""; echo "BEST(${METHOD})=${best}"; } >> $RESLOG 2>/dev/null || :
   say ""
   say "BEST=${best}"
-  if [ "$APPLY" = 1 ] && [ -n "$best" ] && [ "$anyResume" = 1 ]; then
+  if [ "$APPLY" = 1 ] && [ -n "$best" ] && [ "${contaminated:-0}" = 1 ]; then
+    # rc23b: the run already told the user its later results cannot be trusted, because charging did
+    # not come back between candidates. Locking a switch chosen from that data is exactly how a phone
+    # ends up on a switch that does not work. Observed live on a Pixel 6a: four drain-type switches
+    # cut passthrough, charging stayed down, and candidates 10 through 21 were all measured on a
+    # phone that was not charging -- any of which could have been the "best" here.
+    say "NOT auto-locked: charging stopped part-way through, so the ranking is unreliable."
+    say "  Unplug, replug and re-run. Only lock a switch from a run with no such warning."
+  elif [ "$APPLY" = 1 ] && [ -n "$best" ] && [ "$anyResume" = 1 ]; then
     [ -n "$ACCA" ] && "$ACCA" -s "s=${best} --" >/dev/null 2>&1 || :
     say "APPLIED=1   method=${METHOD}   (locked in: acc -s s='${best} --')"
   elif [ "$APPLY" = 1 ] && [ -n "$best" ]; then

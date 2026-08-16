@@ -8,6 +8,35 @@ Community fork of VR-25's ACC, maintained by seyedehsanhadi.
 
 Changes since the fork baseline (v2025.5.18-stable.6.5):
 
+**v2025.5.18-6.5.1-rc23 (202505331)**
+
+Fixed
+- Charging no longer resumes a tenth of a degree under your maximum temperature: on firmware-limit phones the hold now stays on down to your resume temperature, as the switch path already did.
+- Every busybox tool could silently vanish from the daemon's PATH, leaving a phone with no daemon and charging uncapped after a switch scan.
+- The charger's input current no longer stays collapsed after a firmware pause, where the firmware handed it back at a fraction of what it took.
+- `acc -t` can no longer leave your phone with no daemon and charging uncapped, whether it is piped, interrupted, or simply finishes.
+- `acc -t` no longer waits forever for a cable: it reports how long it has waited and gives up after three minutes.
+- Switch discovery runs at all: every invocation used to abort claiming a scan was already running, so all three of AccA's scan buttons did nothing.
+- Switch discovery builds the switch list itself when it is missing, instead of telling you to run a command that does not build it.
+- A switch scan no longer leaves your phone unable to draw current: the current limits it writes while testing are now put back, instead of being left at zero.
+- A switch scan no longer grades the rest of its list against a phone it has already stopped from charging, and says so plainly if charging does not come back between tests.
+- `--apply` now refuses to lock a switch chosen from a run the scan itself flagged as unreliable.
+- A switch scan no longer reports the daemon as restored when what it found was the process that had just killed it.
+- Switch discovery now restores each node it wrote, instead of matching whole recorded lines.
+- A diagnostic bundle from a phone that hung at boot now carries the kernel logs.
+- An unplugged Pixel no longer polls at the plugged-in rate all night, which cost it around eight times the idle CPU of a phone on the switch path.
+- Pausing charging while a listed app is in the foreground works on firmware-limit phones, and an unplugged phone no longer pays for the check it cannot act on.
+- Switch testing no longer rejects a switch that works, on phones whose kernel keeps reporting "Charging" after the input is cut, which could leave you with no charge limit at all.
+- Putting charging back after a switch test is no longer slow on those same phones. The check that decides charging has resumed was left blind during the restore, so a search that should stop at the first switch that works walked the whole list instead, around thirty five seconds an entry, with the daemon out of its loop and your limits unenforced for all of it.
+- Your shutdown level is honoured on Pixel and other firmware-limit phones, where it was accepted and then ignored, letting the battery run to empty instead of stopping where you asked.
+- A Pixel resting at its charge limit overnight no longer wakes ten times more often than it needs to.
+- A phone with no charging switch chosen yet no longer searches for one over and over while unplugged, which cost about a tenth of a processor core continuously and found nothing, because there was no charger to test against.
+- A search for a charging switch can no longer hold a plugged phone off charge for minutes on end. It had no time limit at all: a candidate that does not work costs about thirty five seconds to rule out, there are well over a hundred to try, and the search runs up to three times per attempt. While it ran, nothing else ran either, so your charge limit and temperature limit were not being enforced and the phone looked idle to every health check. The search now stops after about two minutes and continues from where it stopped the next time, so a phone with an awkward switch still ends up with one. `acc -t` is untouched and still tests every candidate.
+- Reading the battery for the app's status feed no longer starts three dozen short-lived processes each time.
+
+Added
+- Diagnostics now say when your phone's own battery authentication has failed, which pins it to a slow 5V charge no matter what the charger offers and is nothing ACC can override.
+
 **v2025.5.18-6.5.1-rc22 (202505325)**
 
 Everything since rc21, in one release.

@@ -45,7 +45,7 @@ AS=$execDir/acc.sh
 [ -f "$MF" ] || { no "misc-functions.sh not found"; fin; }
 
 # `^[ ]*` not `^  *`: the latter needs a leading space and silently misses column-0 functions.
-body(){ sed -n "/^[ ]*$1()/,/^[ ]*}/p" "$2" | sed 's/#.*//'; }
+body(){ sed -n "/^[ ]*$1()/,/^[ ]*}/p" "$2" | sed 's/^[[:space:]]*#.*//'; }
 
 _ec=$(body enable_charging "$MF")
 [ -n "$_ec" ] || { no "could not extract enable_charging"; fin; }
@@ -54,7 +54,14 @@ _ec=$(body enable_charging "$MF")
 # The flip that returns the switch to its resume value must not sit inside a present() test. Anchor
 # on the line itself and check nothing gates it: comments are stripped above, so a mention of
 # present in the surrounding prose cannot be mistaken for the gate.
-_flip=$(printf '%s' "$_ec" | grep -n 'flip_sw on || cycle_switches on' | head -1 | cut -d: -f1)
+# rc23c: match the FLIP, not the whole original line. This anchored on the exact text
+# `flip_sw on || cycle_switches on`, so when the sweep FALLBACK was later gated on present() -
+# `flip_sw on || { present && cycle_switches on; } || :` - it stopped finding the line at all and
+# reported "enable_charging no longer flips the switch on", which was false: the flip was untouched.
+# The invariant this test exists for is about the FLIP, not about what follows the `||`. The flip
+# must run with the cable out or a latched switch is never released; what comes after the `||` is a
+# discovery sweep, which cannot re-arm anything with no charger attached and may be gated.
+_flip=$(printf '%s' "$_ec" | grep -n 'flip_sw on ||' | head -1 | cut -d: -f1)
 if [ -n "$_flip" ]; then
   ok "the release flip is present in enable_charging"
   # Everything before the flip, with the ghostCharging wrapper allowed. If `if present` appears in
@@ -63,6 +70,12 @@ if [ -n "$_flip" ]; then
   printf '%s' "$_pre" | grep -qE 'if present; then' \
     && no "the release flip is gated on present() again - an unplugged phone stays latched and cannot charge on the next plug" \
     || ok "nothing gates the release on present() - a latched switch is released with the cable out"
+  # And nothing may guard the flip ON ITS OWN LINE either: it must be the first command there.
+  _fl=$(printf '%s' "$_ec" | sed -n "${_flip}p")
+  case "${_fl%%flip_sw on*}" in
+    *present*|*if\ *|*'&&'*) no "the flip itself is now guarded on its own line: $_fl" ;;
+    *) ok "the flip runs unconditionally; only the fallback after it is gated" ;;
+  esac
 else
   no "could not find the release flip - enable_charging no longer flips the switch on"
 fi
@@ -139,7 +152,7 @@ fi
 # ---- 5: name the reason the daemon cannot be relied on ------------------------------------------------
 # The gate was defensible only if something always retried later. These two arms are why it was not.
 if [ -f "$AS" ]; then
-  _e=$(sed -n '/-e|--enable/,/;;/p' "$AS" | sed 's/#.*//')
+  _e=$(sed -n '/-e|--enable/,/;;/p' "$AS" | sed 's/^[[:space:]]*#.*//')
   printf '%s' "$_e" | grep -q 'daemon_ctrl stop' \
     && ok "acc -e does stop the daemon, so nothing would have retried the release afterwards" \
     || echo "      note  acc -e no longer stops the daemon; the retry assumption may hold again"

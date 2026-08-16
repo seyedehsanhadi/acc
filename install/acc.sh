@@ -194,6 +194,17 @@ test_charging_switch_() {
   }
 
   ${blacklisted:-false} && {
+    # rc23c: put the switch BACK before bailing out. This returned with the OFF value still applied,
+    # and for a voltage switch that is not a slow charge, it is no charge at all.
+    #
+    # Field fault on a Mi A3: hours after an acc -t run the phone was plugged in and dead flat-lining
+    #   pmi632_charger: battery over-voltage vbat_fg = 3905196uV, fv = 3600000uV
+    # battery/voltage_max had been left at 3600000 against a 3.9V pack, so the charger refused to
+    # charge at all. acc -t had tested `battery/voltage_max 4400000 3600mV` and never wrote the
+    # 4400000 back. Nothing else ever would: the daemon did not set that node, so the daemon does not
+    # restore it, and the value simply persists. Writing 4400000 by hand brought charging back at
+    # 2.27A immediately.
+    flip_sw on 2>/dev/null || :
     print_blacklisted
     return 10
   }
@@ -839,7 +850,17 @@ case "${1-}" in
 
   -t*|--test*)
 
+    # rc23: ignore SIGPIPE for the whole of `acc -t`, FIRST, before a single line is printed.
+    # `acc -t | head`, or `acc -t | less` and pressing q, closes the pipe under us. Measured on a
+    # Pixel 6a: the shell is killed outright and no trap runs at all. It has to be ignored here
+    # rather than trapped later, because the killing write lands between stopping the daemon and
+    # arming the restore -- see the trap below.
+    # Ignored, not handled: a handler fires on EVERY failed write (measured at 120-164 times in one
+    # run), where ignoring lets the script run to its end and fire the EXIT trap exactly once.
+    trap '' PIPE
+
     parsed=
+    daemonWasUp=false
     exitCode_=10
     exitCode=$exitCode_
     writeLog=$dataDir/logs/write.log
@@ -853,21 +874,29 @@ case "${1-}" in
     shift
     [ "${1:-x}" != q ] || shift
     print_wait
-    print_unplugged
-
-    ! daemon_ctrl stop > /dev/null && daemonWasUp=false || {
-      daemonWasUp=true
-      echo "#!/system/bin/sh
-        sleep 2
-        exec $TMPDIR/accd $config_" > $TMPDIR/.accdt
-      chmod 0755 $TMPDIR/.accdt
+    # rc23: only say this when it is true. It was printed unconditionally, so `acc -t` opened by
+    # telling every user to plug in a charger that, in the overwhelming majority of runs, was
+    # already plugged in -- and then the wait below could sit silently for minutes. Together that is
+    # what "acc -t doesn't auto-advance" looked like from the outside: one piece of wrong advice,
+    # then nothing. The check is the same absolute-path probe the wait uses, defined just below.
+    _t_plugged() {
+      local _pf= _pv=
+      for _pf in /sys/class/power_supply/*/online /sys/class/power_supply/*/present; do
+        [ -f "$_pf" ] || continue
+        case "$_pf" in */battery/*|*/bms/*|*maxfg*|*fuelgauge*) continue;; esac
+        _pv=; { read -r _pv < "$_pf"; } 2>/dev/null || continue
+        [ "$_pv" = 1 ] && return 0
+      done
+      return 1
     }
+    _t_plugged || print_unplugged
 
-    . $execDir/acquire-lock.sh
-
-    grep -Ev '^$|^#' $config > $TMPDIR/.config
-    config=$TMPDIR/.config
-
+    # rc23: the restore is armed BEFORE the daemon is stopped, not after the test is set up.
+    # It used to be armed about sixty lines later, so everything between `daemon_ctrl stop` and the
+    # trap ran with the daemon already down and nothing registered to bring it back. `acc -t | head`
+    # dies exactly in that window -- head takes its three lines, closes, and the next write kills a
+    # shell that has stopped the daemon and armed nothing. Never stop the daemon without the way
+    # back already in place.
     exxit() {
       trap - EXIT INT TERM HUP
       rm $TMPDIR/.testingsw 2>/dev/null || :
@@ -876,20 +905,107 @@ case "${1-}" in
           && awk '!seen[$0]++' $parsed | sed 's/ $//; /^$/d' > $TMPDIR/ch-switches
       fi
       cp -f $logF $logF_ 2>/dev/null
-      ! $daemonWasUp || start-stop-daemon -bx $TMPDIR/.accdt -S --
+      # rc23: start-stop-daemon DOES NOT EXIST on Android. It is a Debian/busybox tool, and this
+      # line returned 127 on both test phones -- so `acc -t` has never restored the daemon it
+      # stopped, on any phone lacking it. The script then exits and the user is left uncapped with
+      # no message. customize.sh and acca.sh already guard this call and fall back to a detached
+      # setsid launch; this was the one place that called it bare.
+      # Detached on purpose: a daemon left in this script's session dies when the script exits,
+      # which is the same trap acca.sh documents for the switch scanner.
+      if $daemonWasUp; then
+        if command -v setsid >/dev/null 2>&1; then
+          setsid $TMPDIR/.accdt </dev/null >/dev/null 2>&1 &
+        elif command -v start-stop-daemon >/dev/null 2>&1; then
+          start-stop-daemon -bx $TMPDIR/.accdt -S --
+        else
+          nohup $TMPDIR/.accdt </dev/null >/dev/null 2>&1 &
+        fi
+        # verify, because a silent failure here IS the bug
+        _dw=0
+        while [ $_dw -lt 15 ]; do
+          pgrep -f accd.sh >/dev/null 2>&1 && break
+          sleep 1; _dw=$((_dw+1))
+        done
+        pgrep -f accd.sh >/dev/null 2>&1           || printf '
+! The ACC daemon did not come back -- charging is currently UNCAPPED.
+  Run: acc -D restart
+' >&2
+      fi
       [ -n "${lastNode-}" ] && sed -i "\|^#${lastNode}$|s|^#||" $writeLog
       exit $exitCode
     }
+    trap exxit EXIT INT TERM HUP
+
+    ! daemon_ctrl stop > /dev/null && daemonWasUp=false || {
+      daemonWasUp=true
+      echo "#!/system/bin/sh
+        sleep 2
+        exec $TMPDIR/accd $config" > $TMPDIR/.accdt
+      chmod 0755 $TMPDIR/.accdt
+    }
+
+    . $execDir/acquire-lock.sh
+
+    grep -Ev '^$|^#' $config > $TMPDIR/.config
+    config=$TMPDIR/.config
+
 
     set +e
     echo $$ > $TMPDIR/.testingsw 2>/dev/null || touch $TMPDIR/.testingsw
-    trap exxit EXIT INT TERM HUP
     not_charging && enable_charging > /dev/null
 
     not_charging && {
-      print_unplugged
-      while not_charging; do
+      # rc23: this printed "Ensure the charger is plugged" once and then spun on not_charging every
+      # second, forever -- no timeout, no further output, no way out but Ctrl-C. Reported as
+      # "acc -t doesn't auto-advance".
+      #
+      # not_charging is status-based, and a phone sitting AT its charge limit reads "Not charging"
+      # and keeps reading it until the pack drains to the resume level. On a firmware-limit phone
+      # that is hours. So the user got one line of advice that was also wrong -- the charger IS
+      # plugged in -- from a command that then looked hung.
+      #
+      # Say which of the two situations it actually is, keep saying it, and stop eventually.
+      # _t_plugged is defined above, next to the opening message it also gates. Absolute paths on
+      # purpose: present() resolves its node list against the daemon's working directory, and
+      # `acc -t` does not set one, so calling it here reported "not plugged" on a phone that was
+      # plugged in -- printing the one message this fix exists to stop printing.
+      _tw=0; _twmax=${ACC_T_WAIT:-180}
+      # rc23e: ask with the kernel-status tie-break SUPPRESSED, or this guard does not hold.
+      #
+      # `acc -t` stops the daemon before it gets here, so in this process chDisabledByAcc is false and
+      # $flip is empty - both suppressors of the promotion in idle_discharging are off. A phone whose
+      # status node still reads "Charging" after its input collapsed (they do not follow a collapsed
+      # contract) therefore gets promoted to Charging, not_charging answers "it is charging", and this
+      # loop never runs.
+      #
+      # What that costs, measured on a Mi A3 whose contract had dropped to the 500mA SDP floor:
+      #     4b ran 26s: works 3 rejected 0 ... voltage_max left at 3600000 ... daemon DEAD
+      # Every candidate "works" because the test asks whether charging STOPPED, and it had already
+      # stopped - so a voltage node was recorded as working and left applied at 3600mV, which does not
+      # pause charging, it ends it, at every level and across reboots.
+      #
+      # `flip=off` makes not_charging judge on the current sign alone, which is the honest question
+      # here: is this pack actually taking current. Same idiom, and same reason, as the confirmation
+      # in disable_charging. A phone that IS charging still reads Charging from its sign and falls
+      # straight through, so nothing is slower for the case that works.
+      while { flip=off; not_charging; }; do
+        if [ "$_tw" = 0 ]; then
+          if _t_plugged; then
+            printf "Charger is plugged in, but the battery is not taking charge.\n"
+            printf "If you are at or above your charge limit, raise it (or let the battery drain a little) so the test has something to measure.\n\n"
+          else
+            print_unplugged
+          fi
+        elif [ "$(( _tw % 15 ))" = 0 ]; then
+          printf "  still waiting for charging to start (%ss of %ss)... Ctrl-C to abort.\n" "$_tw" "$_twmax"
+        fi
+        if [ "$_tw" -ge "$_twmax" ] 2>/dev/null; then
+          printf "\nGiving up after %ss: charging never started, so there is nothing to test.\n" "$_tw"
+          printf "Raise your charge limit above the current level, or plug in a working charger, then run this again.\n"
+          exit $exitCode_
+        fi
         sleep 1
+        _tw=$(( _tw + 1 ))
         set +x
       done
       eval "${_logOn:-:}"

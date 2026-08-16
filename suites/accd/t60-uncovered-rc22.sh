@@ -34,7 +34,7 @@ SP=$execDir/set-prop.sh
 for _f in "$AD" "$MF" "$AS"; do [ -f "$_f" ] || { no "missing $(basename $_f)"; fin; }; done
 
 # `^[ ]*` matches column-0 AND indented definitions; `^  *` silently requires a leading space.
-body(){ sed -n "/^[ ]*$1()/,/^[ ]*}/p" "$2" | sed 's/#.*//'; }
+body(){ sed -n "/^[ ]*$1()/,/^[ ]*}/p" "$2" | sed 's/^[[:space:]]*#.*//'; }
 
 # ---- 1: _cd_refresh - the cooldown must not freeze the level it is watching -------------------------
 # While ACC holds an Android battery override the reported level stops moving. During a sustained
@@ -54,7 +54,7 @@ if [ -n "$_cd" ]; then
     || no "_cd_refresh never writes the level back"
   # It has to run DURING the sleep, not only before it: a single refresh then a full cooldown sleep
   # leaves the level stale for the whole interval, which is the bug.
-  _mid=$(sed -n '/_cd_refresh$/,/esac/p' "$AD" | sed 's/#.*//')
+  _mid=$(sed -n '/_cd_refresh$/,/esac/p' "$AD" | sed 's/^[[:space:]]*#.*//')
   printf '%s' "$_mid" | grep -q '_cdHalf / 2' \
     && ok "the cooldown sleep is split so the level is refreshed mid-interval" \
     || no "the cooldown sleeps in one block - the level goes stale for the whole interval"
@@ -91,7 +91,7 @@ fi
 # ---- 3: ctrl_charging - the UI export must not be rebuilt every loop -----------------------------------
 # Measured on a Mi A3 at idle: 1673 of 2428 forks per minute were this export, about half a core with
 # the screen off. It is AccA's feed, not a safety function.
-_cc=$(sed -n '/^  ctrl_charging()/,/^  }/p' "$AD" | sed 's/#.*//')
+_cc=$(sed -n '/^  ctrl_charging()/,/^  }/p' "$AD" | sed 's/^[[:space:]]*#.*//')
 if [ -n "$_cc" ]; then
   printf '%s' "$_cc" | grep -q '_wsLvl' \
     && ok "ctrl_charging gates the state export on something having actually moved" \

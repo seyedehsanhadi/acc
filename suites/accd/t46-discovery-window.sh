@@ -77,16 +77,30 @@ printf '%s' "$_h" | grep -q "case \"\${capacity\[3\]-}\" in ''|\*\[!0-9\]\*) ret
   || no "an unparseable pause setting does not fail toward handing the node back"
 
 # ---- 2. the scan does not replay negotiation snapshots -------------------------------------------
+# rc23b: the filter moved. It used to sit inside restore_all_on; it now lives in restore_on_safe,
+# which restore_all_on calls per line. That split was the fix for a real bug: the SAME filter was
+# also in restore_on, the per-candidate path, where it meant a current node written to 0 by
+# write_off was never put back by anything. See t71, which EXECUTES both functions -- these checks
+# are only the wiring, and behaviour is t71's job.
 _ra=$(sed -n '/^restore_all_on() {/,/^}/p' "$SC")
-printf '%s' "$_ra" | grep -q 'current_max' \
-  && ok "restore_all_on filters the negotiation-owned nodes" \
-  || no "restore_all_on still sweeps every line, replaying probe-time snapshots"
+_rs=$(sed -n '/^restore_on_safe() {/,/^}/p' "$SC")
+[ -n "$_rs" ] || { no "restore_on_safe() is gone - the sweep and the per-candidate restore must stay separate"; }
+
+printf '%s' "$_ra" | grep -q 'restore_on_safe' \
+  && ok "the sweep goes through restore_on_safe, which carries the snapshot filter" \
+  || no "restore_all_on no longer routes through restore_on_safe - it may replay probe-time snapshots"
 
 for _pat in 'current_max' 'input_current' 'constant_charge_current' 'restrict_cur'; do
-  printf '%s' "$_ra" | grep -q "$_pat" \
-    && ok "  skips $_pat" \
-    || no "  does NOT skip $_pat - a snapshot for it would be replayed"
+  printf '%s' "$_rs" | grep -q "$_pat" \
+    && ok "  the sweep skips $_pat" \
+    || no "  the sweep does NOT skip $_pat - a snapshot for it would be replayed"
 done
+
+# and the per-candidate path must NOT carry that filter, or it strands the nodes it just zeroed
+_rc=$(sed -n '/^restore_on() {/,/^}/p' "$SC")
+printf '%s' "$_rc" | grep -qE '/current_max|constant_charge_current' \
+  && no "restore_on filters current nodes again - write_off set them to 0 and nothing else puts them back" \
+  || ok "the per-candidate restore does not filter current nodes (it releases them high)"
 
 # The binary switches must still be restored; that is what the sweep is for.
 printf '%s' "$_ra" | grep -q 'restore_on' \

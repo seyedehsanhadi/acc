@@ -30,14 +30,47 @@ CAUGHT=0; MISSED=0; TOTAL=0
 # A pristine copy of everything the suites read.
 setup_mut() {
   rm -rf $MUT 2>/dev/null
-  mkdir -p $MUT/suites/accd 2>/dev/null
+  mkdir -p $MUT/suites/accd $MUT/suites/amps 2>/dev/null
   for _f in $execDir/*.sh $execDir/*.txt $execDir/module.prop; do
     [ -f "$_f" ] && cp -f "$_f" $MUT/ 2>/dev/null
   done
   for _f in $execDir/suites/accd/t*.sh; do
     [ -f "$_f" ] && cp -f "$_f" $MUT/suites/accd/ 2>/dev/null
   done
+  # EVERYTHING under suites/ that is not a t*.sh, not just the suites themselves. t65 reads
+  # $execDir/suites/xf.awk and calls fin (exit 1) when it is absent -- and because the eligibility
+  # check below used to run against the REAL tree while the mutation ran against $MUT, that absence
+  # looked exactly like a caught defect. t65 sorts before t66, so it broke the loop on EVERY mutation
+  # and t66..t91 were never executed against a single one. Six mutations aimed squarely at them
+  # (thermal hysteresis, acc-switch-scan) were all credited to a suite that only failed because a
+  # file was missing.
+  for _f in $execDir/suites/*; do
+    [ -f "$_f" ] && cp -f "$_f" $MUT/suites/ 2>/dev/null
+  done
+  for _f in $execDir/suites/amps/*; do
+    [ -f "$_f" ] && cp -f "$_f" $MUT/suites/amps/ 2>/dev/null
+  done
   [ -f $MUT/accd.sh ] && [ -f $MUT/misc-functions.sh ]
+}
+
+# Which suites can prove anything at all against THIS staged tree?
+#
+# A suite is eligible only if it PASSES against the unmutated $MUT. Testing eligibility against
+# $execDir instead is what let a staging gap masquerade as detection: the suite passed on the real
+# tree, failed on $MUT for want of a file, and was recorded as having caught the defect.
+#
+# Computed once; every mutation reuses it.
+ELIGIBLE=$MUT.eligible
+build_eligible() {
+  : > $ELIGIBLE
+  for _t in $MUT/suites/accd/t*.sh; do
+    [ -f "$_t" ] || continue
+    ( cd $MUT && execDir=$MUT TMPDIR=${TMPDIR:-/data/local/tmp} sh "$_t" >/dev/null 2>&1 )       && echo "$_t" >> $ELIGIBLE
+  done
+  _ec=$(grep -c . $ELIGIBLE 2>/dev/null) || _ec=0
+  _tc=0; for _t in $MUT/suites/accd/t*.sh; do [ -f "$_t" ] && _tc=$((_tc+1)); done
+  note "eligible detectors: ${_ec}/${_tc} (a suite that cannot pass on a CLEAN staged tree cannot prove a mutation)"
+  [ "${_ec:-0}" -gt 0 ]
 }
 
 # $1 label, $2 file to mutate, $3 sed program
@@ -60,14 +93,12 @@ mutate() {
   fi
 
   _by=
-  for _t in $MUT/suites/accd/t*.sh; do
+  while read -r _t; do
     [ -f "$_t" ] || continue
-    # A suite that fails on the CLEAN copy cannot prove anything; skip it rather than credit it.
-    ( cd $MUT && execDir=$execDir sh "$_t" >/dev/null 2>&1 ) || continue
-    if ! ( cd $MUT && execDir=$MUT sh "$_t" >/dev/null 2>&1 ); then
+    if ! ( cd $MUT && execDir=$MUT TMPDIR=${TMPDIR:-/data/local/tmp} sh "$_t" >/dev/null 2>&1 ); then
       _by=$(basename "$_t"); break
     fi
-  done
+  done < $ELIGIBLE
 
   if [ -n "${_by:-}" ]; then
     CAUGHT=$(( CAUGHT + 1 ))
@@ -77,6 +108,9 @@ mutate() {
     no "MISSED: $1 - NO suite fails with the defect present. This is a real coverage hole."
   fi
 }
+
+# ---- eligibility, computed once against a clean staged tree ----------------------------------------
+setup_mut && build_eligible || no "could not establish an eligible detector set - every result below is unattributable"
 
 # ---- the catalogue --------------------------------------------------------------------------------
 # Every one of these is a defect that actually shipped, or was one edit away from shipping.
@@ -115,6 +149,44 @@ mutate "init log redirect made unconditional (unwritable /data aborts the daemon
 mutate "temperature guard removed from a re-enable path (charging resumes above max_temp)" \
   accd.sh \
   's#_temp_hold || enable_charging#enable_charging#g'
+
+# 8. THE REPORTED DEFECT. Put the firmware-limit thermal hold back on max_temp at BOTH edges, so it
+#    releases a tenth of a degree under the limit and the pack burst-charges at it. This is precisely
+#    "still charges above set temperature", and if nothing fails here then nothing was ever proving
+#    the fix.
+mutate "native thermal hold released at max_temp again (still charges above set temperature)" \
+  accd.sh \
+  's|^    _rt=$(( ${temperature\[2\]:-40} \* 10 ))|    _rt=$(( ${temperature[1]:-50} * 10 ))|'
+
+# 9. Reset the hold latch every pass. A latch cleared each loop is not a latch: it collapses to the
+#    old single-threshold behaviour while still LOOKING like hysteresis in the source.
+mutate "the thermal hold latch reset every charging pass (hysteresis present but inert)" \
+  accd.sh \
+  's|^    _mt=$(( ${temperature\[1\]:-50} \* 10 ))|    _ntHot=0\n    _mt=$(( ${temperature[1]:-50} * 10 ))|'
+
+# 10. Put the toybox-broken flock guard back, which aborted every switch scan ever run on Android.
+mutate "the switch scanner's flock guard restored (every scan aborts claiming one is running)" \
+  acc-switch-scan.sh \
+  's|^if ! mkdir "$_SCANLOCK" 2>/dev/null; then|if command -v flock >/dev/null 2>\&1 \&\& { exec 8>"$TMPDIR/.scan.lock"; flock -n 8; }; then :; fi\nif ! mkdir "$_SCANLOCK" 2>/dev/null; then|'
+
+# 11. Un-detach the scanner's daemon hand-off. daemon_ctrl ends in `exec accd`, so without setsid the
+#     daemon becomes a process in the dying script's session and the phone is left uncapped.
+mutate "the scan's daemon restart un-detached (scan ends with no daemon, charging uncapped)" \
+  acc-switch-scan.sh \
+  's|    setsid "$ACCA" -D restart </dev/null >/dev/null 2>&1 \&|    "$ACCA" -D restart >/dev/null 2>\&1|'
+
+# 12. Put restore_all_on's filter back into the per-candidate restore, so a current node written to 0
+#     by write_off is never put back. The phone is left unable to draw current, and every candidate
+#     tested after it is measured on a phone that cannot charge.
+mutate "the scan's per-candidate restore skips current nodes (leaves them at 0, contaminates the rest of the run)" \
+  acc-switch-scan.sh \
+  's|^    \[ "$1" = "--" \] \&\& { shift 3; continue; }|    case "$1" in --\|*/current_max\|*/constant_charge_current*) shift 3; continue;; esac|'
+
+# 13. Go back to a bare pgrep for the "is the daemon back" check, which matches pkill and
+#     start-stop-daemon and so reports success against the process tearing the daemon down.
+mutate "the daemon check back to a bare pgrep (reports 'restarted' with no daemon running)" \
+  acc-switch-scan.sh \
+  's|^      daemon_alive \&\& { up=1; break; }|      pgrep -f accd.sh >/dev/null 2>\&1 \&\& { up=1; break; }|'
 
 rm -rf $MUT 2>/dev/null
 

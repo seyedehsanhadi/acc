@@ -18,7 +18,11 @@ for _t in $SD/t*.sh; do
   [ -f "$_t" ] || continue
   _name=$(basename "$_t" .sh)
   _ran=$(( _ran + 1 ))
-  if execDir=$execDir sh "$_t" > $WORK/.out.$_name 2>&1; then
+  # DC too: t72 reads $DC for diag-collect.sh and only falls back to $execDir/diag-collect.sh. That
+  # fallback resolved somewhere without the file here, so t72 reported "could not extract the
+  # battery-auth block" while the installed diag-collect.sh had it and t72 passed 28/0 standalone.
+  # Pass it explicitly rather than relying on a default that depends on the caller's environment.
+  if execDir=$execDir DC=${DC:-$execDir/diag-collect.sh} sh "$_t" > $WORK/.out.$_name 2>&1; then
     _l=$(grep -E '^t[0-9]+:' $WORK/.out.$_name 2>/dev/null | tail -1)
     ok "${_name}  ${_l:-passed}"
   else

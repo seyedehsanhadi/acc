@@ -39,6 +39,44 @@ _se_esc() {
 }
 
 
+# rc23c: pull one KEY= value out of uevent text WITHOUT forking.
+#
+# The nine call sites this replaces each ran
+#     $(printf '%s\n' "$ue" | sed -n 's/^KEY=//p' | head -1)
+# which is a subshell plus three execs, about four processes, to search a string the shell was
+# already holding. write_state is 60-75% of an unplugged loop pass and runs on every pass (the
+# uiRefresh=60 gate against a 120s nap is always due), so that was roughly 36 of the ~158 processes
+# a Pixel 6a pass costs - a quarter of it, for zero I/O.
+#
+# Walks the text with parameter expansion only. Result lands in $_ueval rather than being echoed,
+# because $(_ue_get ...) would reintroduce the subshell this exists to remove.
+#
+# Semantics are the pipeline's, exactly: FIRST match wins (head -1), a missing key gives empty, a
+# value containing '=' survives whole (${_ueline#*=} strips only the leading KEY=), and a key never
+# matches a longer key that starts with it because the glob anchors on "$1=".
+_ue_get() {   # $1 = KEY, $2 = uevent text -> $_ueval
+  _ueval=
+  _uerest=$2
+  # The newline is defined HERE, not as a global. With an empty separator the glob *""* matches
+  # everything while ${var#*""} removes nothing, so the loop below would spin forever - a hung
+  # daemon, which is far worse than the forks this function saves. A local literal cannot go
+  # missing. (Caught by t82 executing the extracted function on its own, where a global would not
+  # have been in scope: the test hung instead of failing, which is exactly the bug.)
+  _uenl='
+'
+  while [ -n "$_uerest" ]; do
+    case "$_uerest" in
+      *"$_uenl"*) _ueline=${_uerest%%"$_uenl"*}; _uerest=${_uerest#*"$_uenl"} ;;
+      *)          _ueline=$_uerest; _uerest= ;;
+    esac
+    case "$_ueline" in
+      "$1"=*) _ueval=${_ueline#*=}; return 0 ;;
+    esac
+  done
+  return 0
+}
+
+
 # Echo a clean (optionally negative) integer, else "null". Rule S1: a failed/garbage
 # read becomes null, never 0.
 _se_num() {
@@ -186,6 +224,39 @@ _se_units() {
   case "${1:-null}" in null|''|0) echo unknown; return;; esac
   local a="${1#-}"
   if [ "$a" -gt 16000 ] 2>/dev/null; then echo uA; else echo mA; fi
+}
+
+
+# A current in mA, decided by the units the daemon already knows rather than by magnitude.
+#
+# _se_units had exactly this bug and was fixed in 6.4.1-rc3 by preferring the calibrated ampFactor,
+# which is anchored to the unambiguous voltage/design-capacity scale. That fix never reached the two
+# call sites that publish currents, and they kept deciding on `>= 100000` alone. A genuine uA reading
+# below that cutoff was therefore republished as if it were already mA - exactly 1000x high.
+#
+# The bad case is the ordinary one, not an edge: a phone HELD AT ITS CHARGE LIMIT draws well under
+# 100 mA, so both the current and the watts derived from it were wrong in the state every ACC user
+# spends most of their time in. Measured on a Mi A3: usb/input_current_now read 6163 uA (6.16 mA,
+# essentially nothing) and the app showed 6.16 A.
+#
+# Magnitude survives only as the fallback for when no factor has been calibrated yet, which is the
+# same precedence _se_units uses.
+# FORK-FREE: sets $_sema, never echoes, and never calls out. Written with `echo` + `$( )` first, which
+# put a subshell on both call sites plus one more for the units lookup - four forks per pass on a path
+# that runs every daemon loop. Measured on a Pixel 6a at 120s: ACC's own forks went 99 -> 671, a 6.8x
+# regression against the version this was meant to improve. That is exactly the cost the rest of this
+# file was rewritten to remove, and _ue_get above already documents the idiom that avoids it.
+#
+# The precedence is unchanged: the daemon's calibrated factor first, magnitude only as the fallback for
+# a device where no factor has been established yet.
+_se_ma() {
+  _sema=null
+  case "${1:-}" in ''|null|*[!0-9-]*) return 0;; esac
+  case "${ampFactor:-${ampFactor_:-}}" in
+    1000000) _sema=$(( $1 / 1000 )); return 0;;
+    1000)    _sema=$1; return 0;;
+  esac
+  if [ "${1#-}" -ge 100000 ] 2>/dev/null; then _sema=$(( $1 / 1000 )); else _sema=$1; fi
 }
 
 # polarity: learned from physics, cached with a confirmation streak, status cross-check only
@@ -400,22 +471,23 @@ _se_input() {
   for vf in /sys/class/power_supply/usb/voltage_now \
             /sys/class/power_supply/dc/voltage_now \
             /sys/class/power_supply/wireless/voltage_now; do
-    [ -r "$vf" ] && { v=$(cat "$vf" 2>/dev/null | head -1); break; }
+    # rc23c: builtin read, not $(cat|head -1). Each of those was a subshell plus two execs, three
+    # processes for one number, on a path that runs every daemon pass. Profiled unplugged on a
+    # Pixel 6a: one loop pass executed `head -1` 22 times and cost ~0.9s of forked-child CPU while
+    # the daemon's own shell work was a fraction of that. Same idiom online()/present() already use.
+    [ -r "$vf" ] && { { read -r v < "$vf"; } 2>/dev/null || :; break; }
   done
   for cf in /sys/class/power_supply/usb/input_current_now \
             /sys/class/power_supply/usb/current_now \
             /sys/class/power_supply/dc/current_now \
             /sys/class/power_supply/wireless/current_now; do
-    [ -r "$cf" ] && { c=$(cat "$cf" 2>/dev/null | head -1); break; }
+    [ -r "$cf" ] && { { read -r c < "$cf"; } 2>/dev/null || :; break; }
   done
   case "$v" in
     ''|*[!0-9-]*|-*) v=null;;
     *) va="$v"; [ "$va" -ge 100000 ] 2>/dev/null && v=$(( v / 1000 ));;
   esac
-  case "$c" in
-    ''|*[!0-9-]*) c=null;;
-    *) ca="${c#-}"; [ "$ca" -ge 100000 ] 2>/dev/null && c=$(( c / 1000 ));;
-  esac
+  _se_ma "$c"; c=$_sema
   printf '"input":{"voltageMv":%s,"currentMa":%s}' "$(_se_num "$v")" "$(_se_num "$c")"
 }
 
@@ -439,7 +511,7 @@ _se_charge() {
     if [ "$inmv" != null ] && [ "$inma" != null ] && [ "$inmv" -gt 1000 ] 2>/dev/null && [ "${inma#-}" -gt 50 ] 2>/dev/null; then
       w=$(( inmv * ${inma#-} / 1000000 ))
     elif [ "$bcur" != null ] && [ "$bvolt" != null ]; then
-      bma="${bcur#-}"; [ "$bma" -ge 100000 ] 2>/dev/null && bma=$(( bma / 1000 ))
+      _se_ma "${bcur#-}"; bma=$_sema
       bmv="$bvolt";    [ "$bmv" -ge 100000 ] 2>/dev/null && bmv=$(( bmv / 1000 ))
       if [ "$bma" -gt 50 ] 2>/dev/null && [ "$bmv" -gt 1000 ] 2>/dev/null; then
         w=$(( bmv * bma / 1000000 )); approx=true
@@ -454,7 +526,7 @@ _se_charge() {
       if [ -n "${maxChargingCurrent[0]-}" ]; then why='"user_limit"'
       elif [ "$tdc" != null ] && [ "$tdc" -ge 420 ] 2>/dev/null; then why='"thermal"'
       else
-        ct=$(cat /sys/class/power_supply/battery/charge_type 2>/dev/null | head -1)
+        ct=; { read -r ct < /sys/class/power_supply/battery/charge_type; } 2>/dev/null || :
         case "$ct" in Taper|taper|Trickle|trickle) why='"taper"';; *)
           [ "$cap" != null ] && [ "$cap" -ge 95 ] 2>/dev/null && why='"taper"';; esac
       fi
@@ -515,9 +587,9 @@ write_state() {
     _ue2=$(cat /sys/class/power_supply/battery/uevent 2>/dev/null)
     sleep 0.15 2>/dev/null || :
     _ue3=$(cat /sys/class/power_supply/battery/uevent 2>/dev/null)
-    _c1=$(printf '%s\n' "$_ue1" | sed -n 's/^POWER_SUPPLY_CURRENT_NOW=//p' | head -1)
-    _c2=$(printf '%s\n' "$_ue2" | sed -n 's/^POWER_SUPPLY_CURRENT_NOW=//p' | head -1)
-    _c3=$(printf '%s\n' "$_ue3" | sed -n 's/^POWER_SUPPLY_CURRENT_NOW=//p' | head -1)
+    _ue_get POWER_SUPPLY_CURRENT_NOW "$_ue1"; _c1=$_ueval
+    _ue_get POWER_SUPPLY_CURRENT_NOW "$_ue2"; _c2=$_ueval
+    _ue_get POWER_SUPPLY_CURRENT_NOW "$_ue3"; _c3=$_ueval
     ue=$_ue2
     # A non-numeric CURRENT_NOW must leave sample 2 selected WHOLE. `[ a -ge b ]` looks like it
     # errors out on garbage and the 2>/dev/null suffix looks like it handles that, but ksh/mksh
@@ -539,12 +611,12 @@ write_state() {
         || { [ "$_c3" -le "$_c1" ] && [ "$_c3" -ge "$_c2" ]; }; then ue=$_ue3
       fi
     fi
-    ue_st=$(printf '%s\n' "$ue"   | sed -n 's/^POWER_SUPPLY_STATUS=//p'      | head -1)
-    ue_cur=$(printf '%s\n' "$ue"  | sed -n 's/^POWER_SUPPLY_CURRENT_NOW=//p' | head -1)
-    ue_cap=$(printf '%s\n' "$ue"  | sed -n 's/^POWER_SUPPLY_CAPACITY=//p'    | head -1)
-    ue_volt=$(printf '%s\n' "$ue" | sed -n 's/^POWER_SUPPLY_VOLTAGE_NOW=//p' | head -1)
-    ue_temp=$(printf '%s\n' "$ue" | sed -n 's/^POWER_SUPPLY_TEMP=//p'        | head -1)
-    ue_cc=$(printf '%s\n' "$ue"   | sed -n 's/^POWER_SUPPLY_CHARGE_COUNTER=//p' | head -1)
+    _ue_get POWER_SUPPLY_STATUS         "$ue"; ue_st=$_ueval
+    _ue_get POWER_SUPPLY_CURRENT_NOW    "$ue"; ue_cur=$_ueval
+    _ue_get POWER_SUPPLY_CAPACITY       "$ue"; ue_cap=$_ueval
+    _ue_get POWER_SUPPLY_VOLTAGE_NOW    "$ue"; ue_volt=$_ueval
+    _ue_get POWER_SUPPLY_TEMP           "$ue"; ue_temp=$_ueval
+    _ue_get POWER_SUPPLY_CHARGE_COUNTER "$ue"; ue_cc=$_ueval
     [ -n "$ue_cc" ] || ue_cc=$(cat "${battCapacity%capacity}charge_counter" 2>/dev/null)
 
     lvl=$(_se_num "${ue_cap:-$(batt_cap 2>/dev/null)}")

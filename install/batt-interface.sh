@@ -67,7 +67,44 @@ idle_discharging() {
   # exists because some kernels lie about status, so this never overrides toward Discharging
   # and never touches an Idle verdict -- it only refuses to ignore a kernel that is actively
   # claiming Charging while we guessed the opposite.
-  if [ "$_status" = Discharging ] && [ "${_kstatus-}" = Charging ] && [ -z "${_ccd-}" ]; then
+  # rc23b: ...UNLESS ACC IS THE ONE THAT STOPPED IT. The tie-break rests on the kernel being an
+  # INDEPENDENT witness. When ACC has just commanded the switch off, it is not: this SoC does not
+  # update battery/status on an input-current cut, so the node still reads Charging and is
+  # reporting a state ACC deliberately ended. Believing it there is how ACC fails to see its own
+  # working switch.
+  #
+  # Field report, Pixel 6 Pro (raven). The user had a 90% limit set and NOTHING was enforcing it:
+  # config capacity=(5 0 89 90 false) against state.json "native":{"stopLevel":100,"startLevel":99}
+  # and chargingSwitch="". The native path was gone (charge_stop_level blacklisted after an
+  # unrelated kernel panic) and the switch path was empty because acc -t had rejected a switch that
+  # works -- `off (0, 0, 0)  -1012mA  Charging` for all 35 iterations, then "Switch doesn't work".
+  # The pack went +912mA to -1012mA, so the cut plainly worked; AMPS graded the identical four
+  # nodes class=cut ok=1. All three arbiters lined up wrong at once: the sign said Discharging
+  # (right), the counter abstained (state.json "ccDir":"unknown"), and the kernel said Charging, so
+  # this line promoted the verdict and ACC concluded charging never stopped.
+  #
+  # Gating on our own cut RESTORES the tie-break's premise rather than weakening it. The dangerous
+  # direction is untouched: a phone that reads negative while genuinely charging (the sweet, where
+  # this line exists to stop max_temp and pause_capacity going blind at 41C) has no ACC cut in
+  # force, so the kernel still wins there. And a cut that did NOT work leaves the current positive,
+  # so the sign never says Discharging and this line is never reached -- a broken switch is still
+  # graded broken.
+  #
+  # Two signals, because there are two ways ACC holds charging off: $switch is not_charging()'s
+  # local during a flip_sw test (the acc -t path), $chDisabledByAcc is the daemon's steady pause.
+  # Garbage in either fails toward firing the tie-break, which is the safe direction.
+  #
+  # They answer ONE question - is ACC holding charging off right now - so when a flip direction is
+  # under test that direction is the answer and the steady-pause flag is stale. It matters because
+  # chDisabledByAcc is still true throughout cycle_switches on: enable_charging calls the sweep at
+  # misc-functions.sh:944 and only clears the flag at :972. Letting it suppress the promotion there
+  # broke the on arm's early exit (misc-functions.sh:355, not_charging || break): on a sign-inverted
+  # phone the promotion is what makes status say Charging, so without it not_charging ran all
+  # _STI=35 one-second iterations and never broke, walking the whole candidate list at ~35s each
+  # with the daemon out of its loop. switch=off still suppresses; that is the case this exists for.
+  if [ "$_status" = Discharging ] && [ "${_kstatus-}" = Charging ] && [ -z "${_ccd-}" ] \
+    && [ "${switch-}" != off ] && { [ "${switch-}" = on ] || ! ${chDisabledByAcc:-false}; }
+  then
     _status=Charging
   fi
 

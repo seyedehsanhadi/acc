@@ -132,12 +132,30 @@ _cpu(){ set -- $(cat /proc/${1:-0}/stat 2>/dev/null); echo $(( ${14:-0} + ${15:-
 
 # THE LAW, learned by reverting a correct fix on a frozen-daemon measurement: acc.lock says "alive"
 # for a daemon that is wedged. Before trusting ANY A/B, prove the process actually advanced.
-daemon_looping() {  # $1 = seconds to observe (default 20)
+daemon_looping() {  # $1 = seconds to observe, as a CEILING (default 200)
+  # A FIXED SLEEP ON A CPU COUNTER IS THE WRONG SHAPE, and it produced a false failure.
+  #
+  # Unplugged and paused, rc19 parks the daemon in a fork-free nap; laurus measures ~146 s between
+  # passes at rest. Observing cpu ticks for 15 or 20 s therefore condemns a perfectly healthy daemon
+  # for doing exactly what that release was built to make it do. Seen live: "started after wipe but
+  # is not looping", on a daemon that was fine.
+  #
+  # flight.log is the honest heartbeat -- the daemon appends a record every pass, so the file grows
+  # even while it burns no measurable cpu. Poll both, return the moment either moves, and only spend
+  # the full budget on a daemon that really does look stopped. Fast when healthy, patient when idle.
   _p=$(daemon_pid); [ -n "${_p:-}" ] && [ -d /proc/$_p ] || return 1
-  _a=$(_cpu $_p); sleep ${1:-20}; _b=$(_cpu $_p)
-  _p2=$(daemon_pid)
-  [ "$_p" = "${_p2:-}" ] || return 1
-  [ $(( ${_b:-0} - ${_a:-0} )) -gt 0 ]
+  _fl=${FLIGHT:-/data/adb/vr25/acc-data/logs/flight.log}
+  _w=${1:-200}; _el=0
+  _a=$(_cpu $_p); _fa=$(wc -c < "$_fl" 2>/dev/null || echo 0)
+  while [ "$_el" -lt "$_w" ]; do
+    sleep 5; _el=$(( _el + 5 ))
+    _p2=$(daemon_pid); [ "$_p" = "${_p2:-}" ] || return 1
+    _fb=$(wc -c < "$_fl" 2>/dev/null || echo 0)
+    [ "${_fb:-0}" -gt "${_fa:-0}" ] 2>/dev/null && return 0
+    _b=$(_cpu $_p)
+    [ $(( ${_b:-0} - ${_a:-0} )) -gt 0 ] 2>/dev/null && return 0
+  done
+  return 1
 }
 
 # ---- hardware facts ------------------------------------------------------------------------------------

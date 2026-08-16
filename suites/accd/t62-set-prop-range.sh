@@ -42,7 +42,7 @@ SP=$execDir/set-prop.sh
 WC=$execDir/write-config.sh
 [ -f "$SP" ] || { no "set-prop.sh not found"; fin; }
 
-_sp=$(sed 's/#.*//' "$SP")
+_sp=$(sed 's/^[[:space:]]*#.*//' "$SP")
 
 # ---- 1: the -s path validates a capacity at all -------------------------------------------------------
 printf '%s' "$_sp" | grep -qE 'pause_capacity|resume_capacity|shutdown_capacity' \
@@ -86,7 +86,7 @@ fi
 # Deliberately NOT removed. It is what stops a corrupt config file (not a user command) producing an
 # unusable limit. The fix belongs in front of it, not instead of it.
 if [ -f "$WC" ]; then
-  sed 's/#.*//' "$WC" | grep -q 'pc=80' \
+  sed 's/^[[:space:]]*#.*//' "$WC" | grep -q 'pc=80' \
     && ok "write-config still clamps as a last resort for a corrupt config" \
     || no "the write-config clamp has been removed - a corrupt config file now has no backstop"
 fi

@@ -61,11 +61,11 @@ grep -q '! _temp_hold || return 0' "$SRC" \
 # A/B was confounded by the daemon being frozen in the generic switch prober; nothing was updating
 # the node in either build. sync_native_limit runs unconditionally BEFORE native_unlatch every loop,
 # so the guard cannot prevent a raised limit from being applied.
-sed -n '/native_unlatch() {/,/^  }/p' "$SRC" | sed 's/#.*//' | grep -q '_temp_hold'   && ok "native_unlatch consults it, so a hot pack is never pulsed to stop_level=100"   || no "native_unlatch pulses charge_stop_level=100 on a hot pack - the limit is off for a loopDelay"
+sed -n '/native_unlatch() {/,/^  }/p' "$SRC" | sed 's/^[[:space:]]*#.*//' | grep -q '_temp_hold'   && ok "native_unlatch consults it, so a hot pack is never pulsed to stop_level=100"   || no "native_unlatch pulses charge_stop_level=100 on a hot pack - the limit is off for a loopDelay"
 
 # It must read the node itself. temp_now() coerces an unreadable sensor to 250 (25.0C), which would
 # fabricate a hold on any phone whose max_temp is set below 25 and block a release forever.
-sed -n '/_temp_hold() {/,/^  }/p' "$SRC" | sed 's/#.*//' | grep -q 'temp_now' \
+sed -n '/_temp_hold() {/,/^  }/p' "$SRC" | sed 's/^[[:space:]]*#.*//' | grep -q 'temp_now' \
   && no "_temp_hold goes through temp_now - its 250 fallback invents a hold from a dead sensor" \
   || ok "_temp_hold reads the node directly, so an unreadable sensor cannot fabricate a hold"
 

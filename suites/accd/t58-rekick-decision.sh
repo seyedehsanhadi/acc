@@ -176,11 +176,11 @@ case_is "LATCH beats an unreadable voltage -> refuse" \
 
 # A sag is not one sample. The fallback must sample repeatedly, because the single window where it
 # runs (daemon stopped, or mid aim-high poll) is exactly where a wrong answer is unrecoverable.
-_fb=$(sed -n '/NO LATCH YET/,/^  fi$/p' "$MF" | sed 's/#.*//')
+_fb=$(sed -n '/NO LATCH YET/,/^  fi$/p' "$MF" | sed 's/^[[:space:]]*#.*//')
 printf '%s' "$_fb" | grep -q 'while'   && ok "the no-latch fallback SAMPLES rather than glancing once (the v3 failure mode)"   || no "the fallback still takes a single instantaneous read - one sag permits a contract-killing re-kick"
 
 # The latch must not be inherited across a daemon restart: tmpfs outlives `acca -D stop`.
-_ad=$(sed 's/#.*//' "$execDir/accd.sh")
+_ad=$(sed 's/^[[:space:]]*#.*//' "$execDir/accd.sh")
 printf '%s' "$_ad" | grep -q 'rm -f $TMPDIR/.hvcontract'   && ok "the latch is cleared somewhere (unplug and/or daemon start)"   || no "nothing clears the latch"
 _clears=$(printf '%s' "$_ad" | grep -c 'rm -f $TMPDIR/.hvcontract')
 [ "${_clears:-0}" -ge 2 ] 2>/dev/null   && ok "cleared in BOTH places - on unplug and at daemon start, so a stale latch cannot be inherited"   || no "the latch is cleared in only ${_clears:-0} place; a latch set by a previous daemon run survives a stop/start and blocks every repair"
@@ -189,7 +189,7 @@ _clears=$(printf '%s' "$_ad" | grep -c 'rm -f $TMPDIR/.hvcontract')
 # be gated on the latch AND on a physically observed unplug - `freshPlug` alone is driven by
 # `online`, which an input-cut switch zeroes on every capacity pause, so the block would re-run
 # charger detection on a live contract at every resume.
-_pl=$(sed -n '/AIM FOR THE BEST CONTRACT/,/^      fi$/p' "$execDir/accd.sh" | sed 's/#.*//')
+_pl=$(sed -n '/AIM FOR THE BEST CONTRACT/,/^      fi$/p' "$execDir/accd.sh" | sed 's/^[[:space:]]*#.*//')
 printf '%s' "$_pl" | grep -q 'hvcontract'   && ok "the aim-high block consults the latch before re-detecting"   || no "the aim-high block ignores the latch - it is the v3 bug in a second code path"
 printf '%s' "$_pl" | grep -q 'sawUnplug'   && ok "and it requires a physically observed unplug, not just an online transition"   || no "aim-high is gated on freshPlug alone; an input-cut pause/resume re-triggers it mid-plug"
 printf '%s' "$_ad" | grep -q 'sawUnplug=true'   && ok "sawUnplug is set from present(), the physical fact"   || no "sawUnplug is never set from present()"

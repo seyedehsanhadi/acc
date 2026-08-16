@@ -38,8 +38,8 @@ AD=$execDir/accd.sh
 # removed, so they quote `grep -q 0` and `$(online_f)` verbatim, and the rc19 note inside _nap_idle
 # literally contains the words "grep+cat". A test that greps a file for the name of a defect finds
 # the defect's own obituary.
-body() { sed -n "/^$1() {/,/^}/p" "$2" | sed 's/#.*//'; }
-body_indented() { sed -n "/^  $1() {/,/^  }/p" "$2" | sed 's/#.*//'; }
+body() { sed -n "/^$1() {/,/^}/p" "$2" | sed 's/^[[:space:]]*#.*//'; }
+body_indented() { sed -n "/^  $1() {/,/^  }/p" "$2" | sed 's/^[[:space:]]*#.*//'; }
 
 # A fork, for our purposes: a command substitution, a backtick, a pipeline, or an external binary
 # where a builtin would do. `read` and `case` are free; ls/grep/cat/sed/awk/stat are not.

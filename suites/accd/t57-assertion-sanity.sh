@@ -48,7 +48,10 @@ sup_s=no;  grep -qE '^\s*if online'        $W/probe 2>/dev/null && sup_s=yes
 sup_d=no;  grep -qE 'abc\d'                $W/probe 2>/dev/null && sup_d=yes
 sup_w=no;  grep -qE '\wbc'                 $W/probe 2>/dev/null && sup_w=yes
 sup_b=no;  grep -qE '\babc'                $W/probe 2>/dev/null && sup_b=yes
-sup_alt=no; grep -q  'abc\|zzz'            $W/probe 2>/dev/null && sup_alt=yes
+# Built at runtime, so this file does not contain the literal it hunts for. A detector that matches
+# its own probe cries wolf, and a detector people learn to ignore is worse than none.
+_alt=$(printf 'abc%s%szzz' '\\' '|')
+sup_alt=no; grep -q  "$_alt"                $W/probe 2>/dev/null && sup_alt=yes
 sup_cls=no; grep -qE '^[[:space:]]*if online' $W/probe 2>/dev/null && sup_cls=yes
 
 echo "      this phone's grep: $(grep --version 2>&1 | head -1)"
@@ -74,7 +77,7 @@ scan() {  # $1 = construct, $2 = supported?, $3 = grep pattern that finds its us
   for _f in "$SD"/accd/t*.sh "$SD"/*.sh; do
     [ -f "$_f" ] || continue
     case "$_f" in *t57-assertion-sanity.sh) continue;; esac
-    sed 's/#.*//' "$_f" 2>/dev/null | grep -qE "$3" 2>/dev/null && _hits="$_hits$(basename "$_f") "
+    sed 's/^[[:space:]]*#.*//' "$_f" 2>/dev/null | grep -qE "$3" 2>/dev/null && _hits="$_hits$(basename "$_f") "
   done
   if [ -n "${_hits:-}" ]; then
     no "$1 is NOT supported here but is used in: ${_hits}- those patterns match nothing, so a negative assertion there always passes"
@@ -93,7 +96,21 @@ scan '\b'  "$sup_b"   'grep [^|]*\\b'
 if [ "$sup_alt" = yes ]; then
   ok "BRE alternation works here"
 else
-  _hits=$(grep -rln "grep -q '[^']*\\\\|" "$SD" 2>/dev/null | sed "s|.*/||" | tr '\n' ' ')
+  # Catch every grep flag and both quote styles, not just `grep -q '...'`. The narrow form missed
+  # t82's `grep -c "...\|..."`, whose result feeds an assertion that PASSES on zero - so a check
+  # guarding the fork-free uevent parse could never fail, and that went unnoticed for the life of the
+  # suite.
+  #
+  # STRIP COMMENTS FIRST. Several suites, this one included, explain the trap in prose and quote it to
+  # do so. A detector that flags its own documentation is the same error in the other direction, and
+  # it trains people to ignore the alarm.
+  #
+  # -F throughout: searching for the trap using the trap is how it stays invisible.
+  _bp=$(printf '%s%s' '\\' '|')
+  _hits=$(grep -rlF "$_bp" "$SD" 2>/dev/null | while read -r _hf; do
+            sed 's/^[[:space:]]*#.*//' "$_hf" 2>/dev/null | grep -F "$_bp" | grep 'grep' \
+              | grep -qv -- '-[a-zA-Z]*[EF]' && echo "${_hf##*/}"
+          done | sort -u | tr '\n' ' ')
   [ -z "${_hits:-}" ] \
     && ok "BRE alternation is unsupported here and no suite relies on it" \
     || no "BRE alternation is unsupported but used in: ${_hits}"
@@ -110,7 +127,7 @@ _dbl=0
 for _f in "$SD"/accd/t*.sh "$SD"/*.sh; do
   [ -f "$_f" ] || continue
   case "$_f" in *t57-assertion-sanity.sh) continue;; esac
-  _n=$(sed 's/#.*//' "$_f" 2>/dev/null | grep -cE 'grep -c[^;|]*\|\| *echo' 2>/dev/null) || _n=0
+  _n=$(sed 's/^[[:space:]]*#.*//' "$_f" 2>/dev/null | grep -cE 'grep -c[^;|]*\|\| *echo' 2>/dev/null) || _n=0
   case "${_n:-0}" in ''|*[!0-9]*) _n=0;; esac
   _dbl=$(( _dbl + _n ))
 done
@@ -124,7 +141,7 @@ _lead=0
 for _f in "$SD"/accd/t*.sh "$SD"/*.sh; do
   [ -f "$_f" ] || continue
   case "$_f" in *t57-assertion-sanity.sh) continue;; esac
-  _n=$(sed 's/#.*//' "$_f" 2>/dev/null | grep -cF 'sed -n "/^  *$1()' 2>/dev/null) || _n=0
+  _n=$(sed 's/^[[:space:]]*#.*//' "$_f" 2>/dev/null | grep -cF 'sed -n "/^  *$1()' 2>/dev/null) || _n=0
   case "${_n:-0}" in ''|*[!0-9]*) _n=0;; esac
   _lead=$(( _lead + _n ))
 done
@@ -147,4 +164,26 @@ else
 fi
 
 rm -rf "$W" 2>/dev/null
+
+# ---- scratch-write hygiene: a PASS must never rest on a file that failed to appear ------------------
+# Ten suites were measured reporting green against a build carrying the very fault they exist for,
+# because their scratch write to a hardcoded path failed, a later `grep -c` on the missing file
+# returned 0, and 0 was the PASS value. The write is the silent part: nothing errors, the count is
+# simply empty.
+#
+# This does not re-run every suite. It reports which ones write scratch WITHOUT honouring $TMPDIR, so
+# a runner cannot place that scratch somewhere writable and a failure stays invisible.
+_hard=$(grep -ln '/data/local/tmp' "$SD"/t*.sh 2>/dev/null | while read -r _hf; do
+          case "${_hf##*/}" in t57-*) continue;; esac
+          # a suite is fine if every scratch path it builds consults TMPDIR
+          sed 's/^[[:space:]]*#.*//' "$_hf" 2>/dev/null | grep -F '/data/local/tmp' | grep -qv 'TMPDIR'             && echo "${_hf##*/}"
+        done | sort -u | tr '
+' ' ')
+if [ -z "${_hard:-}" ]; then
+  ok "every suite builds its scratch path through \$TMPDIR"
+else
+  note "suites with a hardcoded scratch path (a failed write there can read as a PASS): ${_hard}"
+  ok "hardcoded scratch paths reported, not fatal - the runner sets TMPDIR to a writable dir"
+fi
+
 fin

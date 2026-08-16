@@ -46,14 +46,39 @@ MAN="$STAGE/_MANIFEST.txt"; SUM="$STAGE/_SUMMARY.txt"; FS="$STAGE/_FILTERSTATS.t
 : > "$MAN"; : > "$SUM"; : > "$FS"
 
 man(){ echo "$1" >> "$MAN"; }
+
+# EVERY COLLECTOR IS BOUNDED. Measured on a Mi A3: the whole collector ran 55s on one invocation and
+# 456s on the next, same build, same phone, an eight-fold spread with no pattern. `find /sys /proc`
+# alone measured 17-18s every time; the rest of the tail is dumpsys and logcat, which block for as
+# long as the system makes them. There were ZERO timeout guards in this file.
+#
+# This is user-facing. It is the one-tap diagnostic, and a user who runs it waits seven and a half
+# minutes with nothing on screen to say it is not hung. A bundle that is missing one slow source is
+# strictly better than a bundle that never arrives, so a source that overruns is recorded as TIMEOUT
+# and the collector moves on.
+#
+# timeout(1) is not guaranteed present (it is a toybox/busybox applet), so degrade to running bare
+# rather than losing the source entirely - the old behaviour, kept only where the tool is absent.
+DIAG_TMO=${DIAG_TMO:-30}
+if command -v timeout >/dev/null 2>&1; then
+  _tmo(){ _t=$1; shift; timeout "$_t" "$@"; }
+  _HAVE_TMO=yes
+else
+  _tmo(){ shift; "$@"; }
+  _HAVE_TMO=no
+fi
 # grab CMD... into a staged file
 # _n holds the destination because `shift 2` has already moved it out of $1 by the time the manifest
 # line is written. Without it every grab entry named the COMMAND it ran - 22 of the 45 lines in a
 # bluejay bundle read "-> sh" - so a responder looking for those files had nothing to look for.
-grab(){ _o="$STAGE/$1"; _n="$1"; _l="$2"; shift 2; "$@" > "$_o" 2>/dev/null
+grab(){ _o="$STAGE/$1"; _n="$1"; _l="$2"; shift 2
+  _tmo "$DIAG_TMO" "$@" > "$_o" 2>/dev/null; _rc=$?
+  if [ "$_rc" = 124 ]; then man "TIMEOUT $_l (over ${DIAG_TMO}s; partial output kept if any)"; fi
   if [ -s "$_o" ]; then man "OK     $_l -> ${_n} ($(wc -c <"$_o")b)"; else man "EMPTY  $_l"; rm -f "$_o"; fi; }
 # FILTERED grab: keep only lines matching PATTERN; record raw->kept in _FILTERSTATS (loss accounting)
-grabf(){ _o="$STAGE/$1"; _l="$2"; _pat="$3"; _nm="$1"; shift 3; _raw="$STAGE/.raw$$"; "$@" > "$_raw" 2>/dev/null
+grabf(){ _o="$STAGE/$1"; _l="$2"; _pat="$3"; _nm="$1"; shift 3; _raw="$STAGE/.raw$$"
+  _tmo "$DIAG_TMO" "$@" > "$_raw" 2>/dev/null; _rc=$?
+  [ "$_rc" = 124 ] && man "TIMEOUT $_l (over ${DIAG_TMO}s; filtering whatever landed)"
   grep -iE "$_pat" "$_raw" > "$_o" 2>/dev/null
   _rb=$(wc -c <"$_raw" 2>/dev/null); _kb=$(wc -c <"$_o" 2>/dev/null); _rl=$(wc -l <"$_raw" 2>/dev/null); _kl=$(wc -l <"$_o" 2>/dev/null)
   rm -f "$_raw"
@@ -109,10 +134,34 @@ CRASH_SIGNAL=false
 logcat -d -b crash 2>/dev/null | grep -q "$PKG" && CRASH_SIGNAL=true
 REBOOT_SIGNAL=false
 _BR="$(getprop sys.boot.reason)|$(getprop ro.boot.bootreason)|$(getprop sys.boot.reason.last)|$(getprop persist.sys.boot.reason.history)"
-echo "$_BR" | grep -iqE 'panic|watchdog|wdog|oom|thermal|kernel|hw_reset|hard_reset|undervolt|err_fatal|dog_ba|dog_bi|tz_err|rpm_err' && REBOOT_SIGNAL=true
+# rc23: this gate decides whether the pstore, last_kmsg and the full dmesg are attached at all -- the
+# only three things that can explain a phone going down. Both crashes actually reported from the
+# field fell straight through it:
+#   - a Motorola kansas (MT6835) hung and came back with ro.boot.bootreason=hang_detect. MediaTek's
+#     userspace-hang watchdog is not a panic and matched nothing here.
+#   - a OnePlus hung during boot after a dirty module update. The user escaped it by holding the
+#     power key, which produces reboot,longkey / cold,powerkey -- a perfectly ordinary-looking
+#     reason. Signal false, evidence deferred, on the one report that needed it most.
+# It is the LONG-press that is the signal, not the power key. Measured on a Mi A3: an ordinary cold
+# boot from the power button reports cold,powerkey, so matching bare powerkey fired on every healthy
+# phone and attached the heavy dumps to every bundle -- which is the adaptive gate not existing.
+# longkey / keys_clear / hard_reset are the forced resets, and a healthy phone does not do those.
+echo "$_BR" | grep -iqE 'panic|watchdog|wdog|wdt|hwt|hang|oom|thermal|kernel|hw_reset|hard_reset|undervolt|err_fatal|dog_ba|dog_bi|tz_err|rpm_err|longkey|keys_clear' && REBOOT_SIGNAL=true
+# ACC's own bootloop backstop is the most direct evidence there is: post-fs-data counts boots that
+# never reach late_start_service and latches .no-early-cap at three. It is only ever cleared by hand
+# (acc -s early_cap on), so its presence means this phone HAS bootlooped with ACC installed --
+# regardless of what the reset reason says. reboot-history.log carries the same counter per boot,
+# recorded before service.sh clears it, and survives long after.
+[ -f "$DD/.no-early-cap" ] && REBOOT_SIGNAL=true
+grep -qE 'early-boot-count: [1-9]' "$DD/reboot-history.log" 2>/dev/null && REBOOT_SIGNAL=true
 _PS=/sys/fs/pstore/console-ramoops-0; [ -f "$_PS" ] || _PS=/sys/fs/pstore/console-ramoops
 if [ -f "$_PS" ]; then _pl=$(wc -l <"$_PS" 2>/dev/null); _pp=$(grep -icE 'panic|die |fatal|watchdog|hardware|BUG|Oops' "$_PS" 2>/dev/null)
-  [ "${_pl:-0}" -gt 0 ] && [ $(( _pp * 100 / _pl )) -ge 2 ] && REBOOT_SIGNAL=true; fi
+  # Both operands have to be numeric before the arithmetic: an unreadable or killed grep leaves _pp
+  # empty, and `$(( * 100 / _pl ))` is a syntax error that takes the whole collector down with it --
+  # in the middle of gathering a crash report.
+  case ${_pl:-x} in ''|*[!0-9]*) _pl=0;; esac
+  case ${_pp:-x} in ''|*[!0-9]*) _pp=0;; esac
+  [ "$_pl" -gt 0 ] && [ $(( _pp * 100 / _pl )) -ge 2 ] && REBOOT_SIGNAL=true; fi
 case "$MODE" in full) CRASH_SIGNAL=true; REBOOT_SIGNAL=true ;; min) CRASH_SIGNAL=false; REBOOT_SIGNAL=false ;; esac
 
 # ---- current-state verdict inputs (turn the captured config+state into a plain-language read) ----
@@ -186,6 +235,30 @@ case "${_V_batt:-}" in ''|*[!0-9]*) _V_batt= ;; esac
       _vn=$((_vn+1))
     fi
   ;; esac
+  # Vendor battery authentication. On Xiaomi the kernel gates HIGH-VOLTAGE charging on a battery
+  # check; fail it and the phone holds a 5V contract forever no matter what the charger offers, and
+  # nothing in userspace can override that. It looks exactly like throttling, so it gets reported as
+  # one -- and ACC gets the blame for a decision made below it.
+  #
+  # Field report, curtana/Redmi Note 9S: "still not getting fast charge". The charger advertised
+  # 9V/3A, 15V/3A and 20V/4.5A and negotiated Type-C high (3.0A); the phone sat at 4.75V/1.43A =
+  # 6.75W. The reason was three lines of dmesg the bundle already carried and never surfaced:
+  #     usbpd0: batterysecret verify process :0
+  #     usbpd0: batterysecret set usbpd verifed :0
+  # ACC's write ledger for that whole session was one line, a plug-time re-kick that RAISED the
+  # contract 4732mV -> 4785mV. It had capped nothing.
+  #
+  # Only the verified=0 verdict is reported, never the absence of the service: a phone without
+  # batterysecret at all is not failing anything.
+  _V_bs=$(grep -aoE 'batterysecret[^:]*verifed[[:space:]]*:[0-9]' /data/local/tmp/.acc-dmesg 2>/dev/null | tail -1)
+  [ -n "$_V_bs" ] || _V_bs=$(dmesg 2>/dev/null | grep -aoE 'batterysecret[^:]*verifed[[:space:]]*:[0-9]' | tail -1)
+  case "${_V_bs:-}" in
+    *:0)
+      _V_pdv=$(cat /sys/class/power_supply/usb/voltage_now 2>/dev/null | head -1)
+      [ -n "$_V_pdv" ] && [ "$_V_pdv" -gt 100000 ] 2>/dev/null && _V_pdv=$(( _V_pdv / 1000 ))
+      echo "  (!) battery authentication FAILED (kernel: '${_V_bs}')${_V_pdv:+, port at ${_V_pdv}mV} -> this phone's kernel gates high-voltage fast charging on a battery check, and the check said no. It will hold a 5V contract whatever the charger offers. NOT ACC (ACC never touches this). Usual causes: a replaced/aftermarket battery, or a handshake that failed this plug -- reboot and replug to re-run it."
+      _vn=$((_vn+1)) ;;
+  esac
   $CRASH_SIGNAL && { echo "  (!) fresh crash/ANR/native captured -> see crash/"; _vn=$((_vn+1)); }
   $REBOOT_SIGNAL && { echo "  (!) abnormal reboot signalled (sys.boot.reason=$(getprop sys.boot.reason)) -> see reboot/"; _vn=$((_vn+1)); }
   # all-clear ONLY if we actually verified daemon UP and read the limit -- never a blind reassurance
@@ -277,7 +350,7 @@ grab charging/dumpsys-battery.txt "dumpsys battery (HAL snapshot)" sh -c 'dumpsy
 # --- reboot (persistent record always; raw dumps are CONDITIONAL) ---
 grab reboot/bootreason.txt "boot/reset reason: canonical + raw + history + PON/POFF latch + bootstat" sh -c '
   getprop | grep -iE "boot.?reason"; echo "---- PON/POFF (Qualcomm PMIC latch, if exposed) ----"
-  for f in $(find /sys /proc -iname "*pon*reason*" -o -iname "*poff*reason*" 2>/dev/null | head -6); do echo "$f = $(cat "$f" 2>/dev/null | head -1)"; done
+  for f in $(timeout 20 find /sys /proc -iname "*pon*reason*" -o -iname "*poff*reason*" 2>/dev/null | head -6); do echo "$f = $(timeout 5 cat "$f" 2>/dev/null | head -1)"; done
   echo "---- bootstat (OS cross-boot reboot record; corroborates a bootloop) ----"; dumpsys bootstat 2>/dev/null | head -40'
 cpf reboot/reboot-history.txt "reboot archive (PERSISTENT, per-boot; the reliable reboot record)" "$DD/reboot-history.log"
 
