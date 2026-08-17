@@ -14,6 +14,7 @@ Fixed
 - Charging no longer resumes a tenth of a degree under your maximum temperature: on firmware-limit phones the hold now stays on down to your resume temperature, as the switch path already did.
 - Every busybox tool could silently vanish from the daemon's PATH, leaving a phone with no daemon and charging uncapped after a switch scan.
 - The charger's input current no longer stays collapsed after a firmware pause, where the firmware handed it back at a fraction of what it took.
+- The pack's own current limit is no longer written while ACC probes the charger. It was meant to be left alone, but the check that protected it never matched, so it had never once run. On phones whose fast charging uses a charge pump, the value written sits below what the pump needs, and firmware falls back to slow charging until the next reboot.
 - `acc -t` can no longer leave your phone with no daemon and charging uncapped, whether it is piped, interrupted, or simply finishes.
 - `acc -t` no longer waits forever for a cable: it reports how long it has waited and gives up after three minutes.
 - Switch discovery runs at all: every invocation used to abort claiming a scan was already running, so all three of AccA's scan buttons did nothing.
