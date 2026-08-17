@@ -1248,7 +1248,14 @@ if ! $_INIT; then
               # the driver clamp - the same rule the restore path uses.
               for _mcf in */current_max */input_current_limit */input_current_settled; do
                 [ -w "$_mcf" ] || continue
-                case "$_mcf" in */battery/*|*/bms/*) continue;; esac
+                # Match on the SUPPLY NAME, not the whole path. The daemon is cd'd into
+                # /sys/class/power_supply, so this glob yields one-slash paths (battery/current_max)
+                # and the old */battery/* needed a component on both sides of "battery" - it matched
+                # nothing here and the exclusion had never once fired. These nodes are a battery-side
+                # FCC, the same quantity as maxChargingCurrent: 5000000 sets the pack limit to 5000mA,
+                # inside the 3000-5499 pump dead zone that makes firmware refuse pump mode. The
+                # absolute forms are kept so this cannot go dead again if the cwd ever changes.
+                case "${_mcf%/*}" in battery|bms|maxfg|*fuelgauge*|*/battery|*/bms|*/maxfg) continue;; esac
                 echo 5000000 > "$_mcf" 2>/dev/null || :
               done
               for _mcf in */apsd_rerun; do
