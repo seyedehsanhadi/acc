@@ -958,17 +958,18 @@ if ! $_INIT; then
       # which is exactly the cadence it had before for the generic path.
       [ "$(du -k $log 2>/dev/null | cut -f 1)" -lt 256 ] 2>/dev/null || : > $log
 
-      # rc24: shared plug-transition tracker. freshPlug is true on the loop where the
-      # charger goes offline->online; it drives native_unlatch (Pixel) and generic_rearm
-      # (everything else) so a real re-plug re-arms charging exactly once -- no sawtooth,
-      # and wasOnline clears on unplug.
-      # rc24 (B1): PRESENT, not online. An input-cut switch (input_suspend, */current_max 0)
-      # masks */online to 0 while the cable is physically in - the file says so at :998-1004 and
-      # aim-high was moved to present/sawUnplug for exactly this reason. Deriving the plug edge
-      # from online meant generic_rearm, whose entire purpose is those switches, could never see
-      # a replug: freshPlug stayed false for the whole pause. present() is the physical question.
+      # rc24: plug-transition trackers. Two of them, on purpose (rc24.1, B1 follow-up): a single
+      # online-derived edge let generic_rearm miss an input-cut replug (B1 itself), but collapsing
+      # it onto present() the other way narrows native_unlatch's window instead -- a loop that saw
+      # present=1/online=0 already counts as "was", so a later online 0->1 flip stops looking fresh
+      # even though the Tensor firmware needs exactly that transition to know a real replug just
+      # happened. So: freshPlug (present-derived) drives generic_rearm and the aim-high path, and
+      # freshPlugOnline (online-derived, rc23's original edge) drives native_unlatch alone. Each
+      # variable is named for the signal it actually reads.
       freshPlug=false
-      if present; then $wasOnline || freshPlug=true; wasOnline=true; else wasOnline=false; fi
+      if present; then $wasPresent || freshPlug=true; wasPresent=true; else wasPresent=false; fi
+      freshPlugOnline=false
+      if online; then $wasOnline || freshPlugOnline=true; wasOnline=true; else wasOnline=false; fi
 
       # THE HIGH-VOLTAGE CONTRACT LATCH.
       #
@@ -2261,7 +2262,9 @@ if ! $_INIT; then
     # firmware -- a phone whose driver resumes correctly is left completely untouched).
     # Fail-safe: a spurious pulse can only let the cell charge a little toward the limit
     # that sync_native_limit still enforces -- it can never overcharge or disable the cap.
-    # rc24: $freshPlug is computed once per loop by the shared plug-transition tracker.
+    # rc24: $freshPlugOnline is computed once per loop by the online-derived plug-transition
+    # tracker -- native_unlatch keeps rc23's exact edge, not the present-derived one B1 added for
+    # generic_rearm, so a loop that already saw present=1/online=0 does not shrink this window.
     online || return 0
     # rc21: skip entirely when the firmware nodes are on the crash blacklist. These two writes are
     # raw echoes, so like sync_native_limit they never pass through write() and never saw the list.
@@ -2312,7 +2315,7 @@ if ! $_INIT; then
     # raised limit: sync_native_limit runs unconditionally on the line BEFORE native_unlatch every
     # loop, so a config change is already applied by the time this is reached.
     ! _temp_hold || return 0
-    if { $freshPlug && _lt_pause_cap; } || _le_resume_cap; then
+    if { $freshPlugOnline && _lt_pause_cap; } || _le_resume_cap; then
       [ "$(read_status)" = Charging ] && return 0 || :
       # rc(6.4-rc2): stop=100 ALONE re-arms the Tensor FET only SLOWLY (1-3 min via the
       # charger state machine + PD renegotiation -- measured on Pixel 9a/tegu, where the
@@ -2862,8 +2865,10 @@ if ! $_INIT; then
   restrictCurr=false
   shutdownWarnings=true
   unsolicitedResumes=0
-  wasOnline=false  # rc23: native_unlatch plug-transition tracker (false at start so a
-                   # latched-from-before state is recovered on the first loop)
+  wasOnline=false  # rc23: native_unlatch plug-transition tracker, online-derived (false at
+                   # start so a latched-from-before state is recovered on the first loop)
+  wasPresent=false # rc24 (B1): generic_rearm/aim-high plug-transition tracker, present-derived --
+                   # see the per-loop block above for why native_unlatch needs the separate edge
   versionCode=$(sed -n s/versionCode=//p $execDir/module.prop 2>/dev/null || :)
 
 

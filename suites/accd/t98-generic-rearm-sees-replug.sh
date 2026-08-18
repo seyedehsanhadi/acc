@@ -80,4 +80,50 @@ generic_rearm
 EOF
 rm -f $W/fired; /system/bin/sh $W/run3.sh >/dev/null 2>&1 || :
 [ -f $W/fired ] && no "re-armed during the boot loop (.minCapMax present)" || ok "the boot loop is still excluded"
+
+# ---------------------------------------------------------------------------
+# native_unlatch: the online-derived edge must be its own variable, distinct
+# from generic_rearm's present-derived freshPlug. THE FINDING 3 CASE: a loop
+# where present was already 1 last time (so freshPlug, present-derived, is
+# false this loop) but online just flipped 0->1 (so freshPlugOnline is true)
+# must still fire. A build that collapsed both paths onto one present-derived
+# edge would miss exactly this -- a smaller re-arm window on the native path,
+# the same class of bug as B1 itself.
+sed -n '/^  native_unlatch() {/,/^  }/p' $execDir/accd.sh > $W/nat.sh
+[ -s $W/nat.sh ] || { no "native_unlatch not found in $execDir/accd.sh"; fin; }
+
+grep -v '^[[:space:]]*#' $W/nat.sh | grep -qF '$freshPlug &&' \
+  && no "native_unlatch still reads the present-derived \$freshPlug, not its own online-derived edge" \
+  || ok "native_unlatch does not read the present-derived \$freshPlug"
+
+mkharnessNative() {  # $1=freshPlug $2=freshPlugOnline $3=online $4=expect(fire|skip)
+  cat > $W/runnat.sh <<EOF
+freshPlug=$1
+freshPlugOnline=$2
+online(){ [ "$3" = 1 ]; }
+_lt_pause_cap(){ return 0; }
+_le_resume_cap(){ return 1; }
+_temp_hold(){ return 1; }
+read_status(){ echo "Not charging"; }
+sync_native_limit(){ :; }
+loopDelay=(0)
+gcsl=$W/gcsl; gcst=$W/gcst
+. $W/nat.sh
+native_unlatch
+EOF
+  rm -f $W/gcst
+  /system/bin/sh $W/runnat.sh >/dev/null 2>&1 || :
+  if [ "$4" = fire ]; then
+    [ -f $W/gcst ] && ok "freshPlug=$1 freshPlugOnline=$2 online=$3 -> native re-armed" \
+      || no "freshPlug=$1 freshPlugOnline=$2 online=$3 -> NO native re-arm (narrowed window)"
+  else
+    [ -f $W/gcst ] && no "freshPlug=$1 freshPlugOnline=$2 online=$3 -> native re-armed when it must not" \
+      || ok "freshPlug=$1 freshPlugOnline=$2 online=$3 -> correctly skipped"
+  fi
+}
+mkharnessNative false true  1 fire   # THE FINDING 3 CASE: present already latched, online edge alone must still fire
+mkharnessNative true  false 1 skip   # present edge fired earlier plug, no online edge this loop -> must not fire on freshPlug alone
+mkharnessNative false false 1 skip   # neither edge this loop
+mkharnessNative true  true  1 fire   # ordinary simultaneous replug
+mkharnessNative false true  0 skip   # online() itself false -> entry gate still wins regardless of the edge
 fin
