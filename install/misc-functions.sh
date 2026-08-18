@@ -1432,15 +1432,22 @@ write() {
     fi
   }
 
-  [ $i = x ] && return ${3-1} || {
+  # rc24 (B8): the retry belongs to FAILURE, not success. This block used to run when the
+  # readback had already proved the value landed, issuing five more identical echos with
+  # usleep spacing. On input nodes (usb/current_max, input_current_limit) every one of them
+  # re-runs AICL and the charge-pump FSM - exactly what the rc14 idempotent gate at the top
+  # of this function exists to prevent, undone forty lines lower. A node that did not take
+  # the value still gets the full retry budget below.
+  [ $i = x ] && {
     for i in $(seq $seq); do
-      if eval "echo $1 > $2" 2>/dev/null; then
-        [ $i -eq $seq ] || usleep $((1000000 / $seq))
-      else
-        return 1
-      fi
+      eval "echo $1 > $2" 2>/dev/null || { [ $i -eq $seq ] && return ${3-1} || : ; }
+      f="$(cat $2 2>/dev/null)" || :
+      [ "$f" = "$one" ] && return 0
+      usleep $((1000000 / $seq))
     done
+    return ${3-1}
   }
+  return 0
 }
 
 

@@ -188,6 +188,13 @@ mutate "the daemon check back to a bare pgrep (reports 'restarted' with no daemo
   acc-switch-scan.sh \
   's|^      daemon_alive \&\& { up=1; break; }|      pgrep -f accd.sh >/dev/null 2>\&1 \&\& { up=1; break; }|'
 
+# 14. Put write()'s post-verify hammer back: retry on the SUCCESS branch instead of the failure
+#     branch, so a value that already verified gets five more redundant echos (each re-triggers
+#     AICL on an input node) while a node that never took the value gets none.
+mutate "write() retries on SUCCESS again (5 redundant echos re-trigger AICL)" \
+  misc-functions.sh \
+  's|^  \[ \$i = x \] && {|  [ $i != x ] \&\& {|'
+
 rm -rf $MUT 2>/dev/null
 
 # ---- the score -------------------------------------------------------------------------------------
