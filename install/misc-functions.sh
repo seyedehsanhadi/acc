@@ -1372,7 +1372,7 @@ write() {
   local seq=5
   local one="$(eval echo $1)"
   local f=$dataDir/logs/write.log
-  local _cur _tgt
+  local _cur _tgt _unverified
   blacklisted=false
 
   # 6.5.1-rc14 DEEP FIX (fast charge): IDEMPOTENT write. If the node already holds the target
@@ -1410,10 +1410,10 @@ write() {
   # still rejects the write, e.g. a value-clamping node) so no denial ever leaks to the user.
   if [ -f "$2" ] && chmod a+w $2 2>/dev/null; then
     case "$(grep -E "^(#$2|$2)$" $f 2>/dev/null || :)" in
-      \#*) [ -z "${lastNode-}" ] && { blacklisted=true; i=x; } || { eval "echo $1 > $2" 2>/dev/null || i=x; };;
-      */*) eval "echo $1 > $2" 2>/dev/null || i=x;;
+      \#*) [ -z "${lastNode-}" ] && { blacklisted=true; i=x; } || { eval "echo $1 > $2" 2>/dev/null || { i=x; _unverified=1; }; };;
+      */*) eval "echo $1 > $2" 2>/dev/null || { i=x; _unverified=1; };;
       *) echo $2 >> $f
-         eval "echo $1 > $2" 2>/dev/null || i=x;;
+         eval "echo $1 > $2" 2>/dev/null || { i=x; _unverified=1; };;
     esac
   else
     i=x
@@ -1426,19 +1426,21 @@ write() {
     ! [[ -n "$f" && "$f" != "$one" ]] || {
       touch $TMPDIR/.nowrite
       i=x
+      _unverified=1
     }
     if [ -n "${exitCode_-}" ]; then
       [ -n "${swValue-}" ] && swValue="$swValue, $f" || swValue="$f"
     fi
   }
 
-  # rc24 (B8): the retry belongs to FAILURE, not success. This block used to run when the
-  # readback had already proved the value landed, issuing five more identical echos with
-  # usleep spacing. On input nodes (usb/current_max, input_current_limit) every one of them
-  # re-runs AICL and the charge-pump FSM - exactly what the rc14 idempotent gate at the top
-  # of this function exists to prevent, undone forty lines lower. A node that did not take
-  # the value still gets the full retry budget below.
-  [ $i = x ] && {
+  # rc24 (B8): the retry belongs to a write that was ATTEMPTED and did NOT verify -- a readback
+  # mismatch, or the echo itself failing ($_unverified). It does not belong to every i=x: a chmod
+  # failure (the node was never opened) and the blacklist marker (deliberately never echoed, see
+  # the rc21 comment above) both set i=x without setting $_unverified and must fast-fail here
+  # exactly as before rc24 -- retrying or echoing into either case defeats the write-blacklist
+  # ACC's own ledger depends on, and turns a fast daemon-loop bail into five slow ones. Only the
+  # unverified case gets the retry budget below; a value that already verified never reaches here.
+  [ "${_unverified-}" = 1 ] && {
     for i in $(seq $seq); do
       eval "echo $1 > $2" 2>/dev/null || { [ $i -eq $seq ] && return ${3-1} || : ; }
       f="$(cat $2 2>/dev/null)" || :
@@ -1447,6 +1449,7 @@ write() {
     done
     return ${3-1}
   }
+  [ $i = x ] && return ${3-1}
   return 0
 }
 
