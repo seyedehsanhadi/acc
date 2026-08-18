@@ -16,12 +16,17 @@ sed -n '/^  generic_rearm() {/,/^  }/p' $execDir/accd.sh > $W/fn.sh
 [ -s $W/fn.sh ] || { no "generic_rearm not found in $execDir/accd.sh"; fin; }
 
 # Source-level guard first: the plug tracker must not be online-derived.
-if grep -qE '^\s+if online; then \$wasOnline \|\| freshPlug=true' $execDir/accd.sh; then
+# grep -F (fixed string) on purpose: toybox grep has no \s and no \| in -E mode, so a plain
+# substring match is the only thing guaranteed to work identically on both test phones.
+# Comment lines are stripped first: the rc24 fix comment quotes the old `online || return 0`
+# code verbatim as its own rationale, and a bare substring match would trip on that quote.
+grep -v '^[[:space:]]*#' $execDir/accd.sh > $W/nocomment.sh
+if grep -qF 'if online; then $wasOnline || freshPlug=true' $W/nocomment.sh; then
   no "freshPlug is still derived from online() - an input-cut replug never sets it"
 else
   ok "freshPlug is not derived from online()"
 fi
-grep -qE '^\s+online \|\| return 0' $W/fn.sh \
+grep -v '^[[:space:]]*#' $W/fn.sh | grep -qF 'online || return 0' \
   && no "generic_rearm still returns early on ! online" \
   || ok "generic_rearm does not gate on online()"
 
