@@ -141,7 +141,14 @@ case "$@" in
 
   # print default config
   -s\ d*|-s\ --print-default*|--set\ d*|--set\ --print-default*|-sd*)
-    [ $1 = -sd ] && shift || shift 2
+    # The glob accepts a glued filter (-sdcapacity), so the shift must handle one. It used to test
+    # for exactly -sd and otherwise `shift 2`, which under set -eu aborts on a single argument:
+    # "acca.sh: shift: nothing to shift". Measured exit 1 for -sdcapacity, 0 for '-sd capacity'.
+    case "$1" in
+      -sd)   shift;;
+      -sd?*) set -- "${1#-sd}";;
+      *)     [ $# -ge 2 ] && shift 2 || shift;;
+    esac
     . $defaultConfig
     one="${1-}"; one="${one//,/|}"   # rc7 (F7): guard unset $1 -- after the shift, `acca -s p` / `-s d` with no filter left $1 unset, and `${1//,/|}` aborts under set -u (the app's "show config" refresh hard-fails)
     . $execDir/print-config.sh ns | grep -E "${one:-.}" | sed 's/^$//' || :
@@ -150,7 +157,12 @@ case "$@" in
 
   # print current config
   -s\ p*|-s\ --print|-s\ --print\ *|--set\ p|--set\ --print|--set\ --print\ *|-sp*)
-    [ $1 = -sp ] && shift || shift 2
+    # Same defect as the -sd branch above; see the note there.
+    case "$1" in
+      -sp)   shift;;
+      -sp?*) set -- "${1#-sp}";;
+      *)     [ $# -ge 2 ] && shift 2 || shift;;
+    esac
     . $config
     one="${1-}"; one="${one//,/|}"   # rc7 (F7): guard unset $1 -- after the shift, `acca -s p` / `-s d` with no filter left $1 unset, and `${1//,/|}` aborts under set -u (the app's "show config" refresh hard-fails)
     . $execDir/print-config.sh | grep -E "${one:-.}" | sed 's/^$//' || :

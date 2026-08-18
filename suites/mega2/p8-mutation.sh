@@ -118,7 +118,7 @@ setup_mut && build_eligible || no "could not establish an eligible detector set 
 # 1. The stuck-cut bug: re-gate the switch release on the cable being attached.
 mutate "the switch release gated on present() again (acc -e strands an unplugged phone)" \
   misc-functions.sh \
-  's#^      flip_sw on || cycle_switches on#      if present; then flip_sw on || cycle_switches on; fi#'
+  's#^      flip_sw on ||.*#      if present; then flip_sw on || cycle_switches on; fi#'
 
 # 2. Remove the per-plug contract latch, so a sagging supply reads as "no contract".
 mutate "contract latch removed from the re-kick guard (a load sag permits a contract-killing re-kick)" \

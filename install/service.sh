@@ -45,4 +45,38 @@ export dataDir domain execDir id TMPDIR
 # archiver outlived the boot. An undeferrable SIGKILL 3s later closes it on every device.
 [ -f $execDir/reboot-archive.sh ] && ( timeout -k 3 8 sh $execDir/reboot-archive.sh >/dev/null 2>&1 & ) 2>/dev/null || :
 [ ".$1" = .-x ] && touch $dataDir/disable
-exec start-stop-daemon -bx $execDir/${id}d.sh -S -- "$@" || exit 12
+# VERIFY, do not assume. start-stop-daemon FORKS and only then execs, so its exit code reports the
+# fork, not the daemon. A field report from a SuperSU tarball install showed service.sh exiting 0
+# with no daemon and nothing logged; reproduced here as accd.sh at mode 0644, where the exec fails
+# inside a child nobody is watching. Measured: 3/3 starts at 0755, 0/3 at 0644, exit 0 in both.
+# This was `exec ... || exit 12`, and the exec is precisely what made the failure unobservable -
+# it replaced the shell, so no check could run afterwards. Dropping it costs one short-lived
+# process and turns a silent no-charge-limit into a self-repair.
+start-stop-daemon -bx $execDir/${id}d.sh -S -- "$@" 2>/dev/null || :
+
+_svcw=0
+while [ $_svcw -lt 10 ]; do
+  pgrep -f "$execDir/${id}d.sh" >/dev/null 2>&1 && exit 0
+  sleep 1
+  _svcw=$((_svcw + 1))
+done
+
+# Nothing came up. Repair the one cause seen in the field, then launch without the applet at all:
+# `/system/bin/sh <script>` does not need the executable bit, so it works even if the chmod is
+# refused. The interpreter is spelled out: setup-busybox.sh has put busybox ahead of /system/bin on
+# PATH by this point, and busybox ash cannot parse accd.sh (mksh arrays, line 518) - measured as
+# "syntax error: unexpected (" and no daemon, on both phones.
+chmod 0755 $execDir/${id}d.sh 2>/dev/null || :
+if command -v setsid >/dev/null 2>&1; then
+  setsid /system/bin/sh $execDir/${id}d.sh "$@" </dev/null >/dev/null 2>&1 &
+else
+  nohup /system/bin/sh $execDir/${id}d.sh "$@" </dev/null >/dev/null 2>&1 &
+fi
+
+_svcw=0
+while [ $_svcw -lt 15 ]; do
+  pgrep -f "$execDir/${id}d.sh" >/dev/null 2>&1 && exit 0
+  sleep 1
+  _svcw=$((_svcw + 1))
+done
+exit 12

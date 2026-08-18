@@ -36,7 +36,7 @@ hdr "P3 BUILD BASELINE"
 
 plugged && { no "cable attached - baseline measurement requires it out"; return 0 2>/dev/null || exit 0; }
 
-RC21=/data/local/tmp/rc21
+RC21=${PREV:-/data/local/tmp/rc21}
 VR25=/data/local/tmp/vr25
 RC22=/data/local/tmp/rc22
 MEAS=${MEAS:-120}
@@ -239,7 +239,7 @@ arm rc22 "rc22"
 # log path from an unset dataDir and dies with `mkdir: /logs: Read-only file system` on both phones,
 # before it can be measured. Three attempts produced 0 valid readings each time. Keeping a permanently
 # skipped arm in the sweep costs 4 minutes per run and tells nobody anything.
-arm rc21 "rc21"
+arm rc21 "${PREVLBL:-rc21}"
 
 end_measure
 

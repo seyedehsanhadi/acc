@@ -126,6 +126,10 @@ def verify(path):
             if (i.filename.endswith('.sh') or i.filename.endswith('update-binary')) \
                and not ((i.external_attr >> 16) & 0o111):
                 bad.append(f'{i.filename}: not executable')
+        for i in infos:
+            if i.filename.endswith(('.sh', '.prop', '.txt', 'update-binary', 'updater-script')) \
+               and b'\r' in z.read(i.filename):
+                bad.append(f'{i.filename}: CRLF line endings (mksh rejects them; versionCode parses as non-numeric)')
         execs = sum(1 for i in infos if (i.external_attr >> 16) & 0o111 and not i.filename.endswith('/'))
         ver = [l for l in z.read('module.prop').decode().splitlines() if l.startswith('version')]
         print(f'VERIFY entries={len(infos)} exec={execs} {ver}')
