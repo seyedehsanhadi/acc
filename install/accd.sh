@@ -962,8 +962,13 @@ if ! $_INIT; then
       # charger goes offline->online; it drives native_unlatch (Pixel) and generic_rearm
       # (everything else) so a real re-plug re-arms charging exactly once -- no sawtooth,
       # and wasOnline clears on unplug.
+      # rc24 (B1): PRESENT, not online. An input-cut switch (input_suspend, */current_max 0)
+      # masks */online to 0 while the cable is physically in - the file says so at :998-1004 and
+      # aim-high was moved to present/sawUnplug for exactly this reason. Deriving the plug edge
+      # from online meant generic_rearm, whose entire purpose is those switches, could never see
+      # a replug: freshPlug stayed false for the whole pause. present() is the physical question.
       freshPlug=false
-      if online; then $wasOnline || freshPlug=true; wasOnline=true; else wasOnline=false; fi
+      if present; then $wasOnline || freshPlug=true; wasOnline=true; else wasOnline=false; fi
 
       # THE HIGH-VOLTAGE CONTRACT LATCH.
       #
@@ -2433,7 +2438,11 @@ if ! $_INIT; then
     # max_temp. Without this, re-plugging a hot phone re-arms the switch and the thermal pause has
     # to fight it back off on the next loop. See _temp_hold.
     ! _temp_hold || return 0
-    online || return 0
+    # rc24 (B1): was `online || return 0`, which re-asked the question freshPlug had already
+    # answered wrongly. enable_charging writes the switch ON value and is safe with no charger:
+    # the rc22 release-gate fix removed present() from the flip precisely so an unplugged phone
+    # is never left unable to charge. Re-arming with a cable in and online masked is the point.
+    present || return 0
     enable_charging
   }
 
