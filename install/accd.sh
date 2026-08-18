@@ -1232,7 +1232,12 @@ if ! $_INIT; then
       # The freshPlug arm keeps BOTH of its original guards. _aimStall already proved them itself,
       # but restating them here means neither arm can ever reach the aim without them - an OR gate
       # that drops a guard on one side is how a re-detect gets fired at a live 9V contract.
+      # rc24 (B2): never negotiate while ACC is holding the limit, and never at/above the pause.
+      # This block ran at the TOP of the loop, before the pause at :1304/:1425, with no idea
+      # whether a cut was in force - so a replug at 79% with the limit at 80% could undo a
+      # current-cap pause and then spend up to 17s (sleep 2 + a 15s poll) with nothing enforced.
       if { { $freshPlug && ${sawUnplug:-false}; } || ${_aimStall:-false}; } \
+         && ! $chDisabledByAcc && _lt_pause_cap \
          && [ ! -f $TMPDIR/.hvcontract ] && [ ! -f $dataDir/.rekick-off ]; then
         sawUnplug=false
         # Once per plug, whichever entry got here. Cleared beside .hvcontract on unplug.
@@ -1252,17 +1257,16 @@ if ! $_INIT; then
             if [ "$_mcv" -lt 6000000 ] 2>/dev/null; then
               # Release the input ceiling so detection is not measuring our own cap. High, and let
               # the driver clamp - the same rule the restore path uses.
+              # Match on the SUPPLY NAME, not the whole path. The daemon is cd'd into
+              # /sys/class/power_supply, so this glob yields one-slash paths (battery/current_max).
+              # rc24 (B2): ALLOW-list, not deny-list, and through write(). The deny-list named
+              # battery/bms/gauge only, so usb/, dc/ and tcpm-* were written - and :2815-2818
+              # already measured one write to usb/current_max dropping a Pixel port to 100mA.
+              # These are the same nodes _iclNodes selects at :2821; one rule, one place.
               for _mcf in */current_max */input_current_limit */input_current_settled; do
                 [ -w "$_mcf" ] || continue
-                # Match on the SUPPLY NAME, not the whole path. The daemon is cd'd into
-                # /sys/class/power_supply, so this glob yields one-slash paths (battery/current_max)
-                # and the old */battery/* needed a component on both sides of "battery" - it matched
-                # nothing here and the exclusion had never once fired. These nodes are a battery-side
-                # FCC, the same quantity as maxChargingCurrent: 5000000 sets the pack limit to 5000mA,
-                # inside the 3000-5499 pump dead zone that makes firmware refuse pump mode. The
-                # absolute forms are kept so this cannot go dead again if the cwd ever changes.
-                case "${_mcf%/*}" in battery|bms|maxfg|*fuelgauge*|*/battery|*/bms|*/maxfg) continue;; esac
-                echo 5000000 > "$_mcf" 2>/dev/null || :
+                case "${_mcf%/*}" in main|main-charger|mainchg|charger|gccd|bbc) :;; *) continue;; esac
+                write 5000000 "$_mcf" 0 || :
               done
               for _mcf in */apsd_rerun; do
                 [ -w "$_mcf" ] && echo 1 > "$_mcf" 2>/dev/null || :
