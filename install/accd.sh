@@ -1403,6 +1403,53 @@ if ! $_INIT; then
         native_unlatch || :
         native_icl_restore || :
         native_verify_backstop || :
+        # rc25: the charging-current and charging-voltage limits, which this branch has never
+        # reached. They live inside is_charging(), and this branch `continue`s before is_charging()
+        # is ever called -- the same hole that already swallowed allowIdleAbovePcap (rc21),
+        # idleApps (rc22c), mask_capacity and auto_shutdown (rc23c). Nobody had checked these two.
+        #
+        # Measured on two Pixels with a firmware limit: maxChargingCurrent was accepted, stored,
+        # displayed by acc -i and AccA, and enforced by nothing. A reporter's Pixel 4a 5G (SM7250)
+        # carried maxChargingCurrent=(925) that never expanded to node entries, its write-ledger
+        # holding 22 voltage writes and ZERO current writes; a Pixel 6a (Tensor) here left the pack
+        # at 1.9A against a 500mA cap and wrote no node. A Mi A3, whose switch is not native,
+        # applies the same cap correctly -- so this is the branch, not the hardware.
+        #
+        # Gated on a live charging supply for the same reason the discovery script states in its own
+        # header: it reads each node's DEFAULT, and off-charge most of them read zero, which would
+        # record a garbage default and cap the phone at it forever.
+        if present 2>/dev/null && [ "$(cat $battStatus 2>/dev/null)" = Charging ]; then
+          if [ -f $TMPDIR/.mcc-read ]; then
+            if [ -n "${maxChargingCurrent[0]-}" ]               && { [ -z "${maxChargingCurrent[1]-}" ] || [[ "${maxChargingCurrent[1]-}" = -* ]]; }               && grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null
+            then
+              set_ch_curr ${maxChargingCurrent[0]} || :
+              . $execDir/write-config.sh
+            fi
+          else
+            . $execDir/read-ch-curr-ctrl-files-p2.sh
+          fi
+          if [ -n "${maxChargingVoltage[0]-}" ]             && { [ -z "${maxChargingVoltage[1]-}" ] || [[ "${maxChargingVoltage[1]-}" = -* ]]; }             && grep -q / $TMPDIR/ch-volt-ctrl-files 2>/dev/null
+          then
+            set_ch_volt ${maxChargingVoltage[0]} || :
+            . $execDir/write-config.sh
+          fi
+        fi
+        # Cool-down cycling is the one feature lost to this branch that is NOT being restored here.
+        # It works by repeatedly pausing and resuming charging to shed heat, and on a phone whose
+        # limit is held by firmware that means fighting the firmware every cycle -- the daemon
+        # lowering a level the charger is simultaneously enforcing. Implementing it blind would risk
+        # the thing this branch exists to protect. max_temp still pauses correctly here, through
+        # sync_native_limit's own hysteresis, so the pack is not left unprotected; only the
+        # ratio-based cycling is unavailable. Say so once instead of pretending.
+        if [ -n "${cooldownCurrent-}" ] || [ -n "${cooldownRatio[0]-}" ]; then
+          warn_once_per nativecooldown 86400 "ACC: cool-down cycling is not applied on this phone. Its charge limit is held by the firmware, and cycling against it is not safe. Your temperature limit is still enforced -- charging still pauses at max_temp and resumes at resume_temp." || :
+        fi
+        # Same category, same honesty: force_off drives flip_sw, and this branch deliberately refuses
+        # to hand a firmware-limit phone to the generic switch logic because none of those candidates
+        # hold here. The setting cannot work on this hardware, so say so rather than accept it.
+        if ${forceOff:-false}; then
+          warn_once_per nativeforceoff 86400 "ACC: 'force off' cannot be applied on this phone. It works by driving a charging switch, and this phone's limit is held by the firmware instead. Your charge limit is still being enforced." || :
+        fi
         # The Capacity Mask has to run here too. It is a DISPLAY feature and has
         # nothing to do with how charging is held, but it lives inside
         # is_charging(), and this branch continues before is_charging() is ever
