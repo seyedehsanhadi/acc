@@ -4,9 +4,27 @@
 
 (set +e
 
+# ls_curr_ctrl_files is almost entirely RELATIVE globs (*/current_max, */constant_charge_current*),
+# so this file only resolves anything when the caller happens to be sitting in power_supply. Every
+# current caller does happen to be -- the daemon's cwd is /sys/class/power_supply, verified live on
+# two phones -- so this is robustness, not a bug fix: a sourced helper should not depend on where
+# its caller stood. Measured from / it finds 0 nodes on a Pixel 6a and 1 on a Mi A3 (that one being
+# its single ABSOLUTE candidate, /sys/class/qcom-battery/restrict_cur, which resolves anywhere).
+#
+# Safe because everything below runs inside this subshell, so the caller's cwd is untouched, and
+# every write here targets $TMPDIR by absolute path.
+cd /sys/class/power_supply 2>/dev/null || exit 0
+
 currCtrl=$TMPDIR/ch-curr-ctrl-files
 
-if [ ! -f $TMPDIR/.mcc-read ]; then
+# ...and never while a CURRENT cap is applied, for the same reason the voltage side now guards:
+# every entry ends in the node's DEFAULT, taken as whatever it reads right now. Re-record that while
+# a cap is in force and the cap becomes the default, so releasing it writes the cap straight back.
+# Measured on a Mi A3 whose voltage snapshot was poisoned exactly this way, leaving two of three
+# nodes pinned at the test cap with a config that read "no limit".
+if [ -n "${maxChargingCurrent[0]-}" ] && [ -s $TMPDIR/ch-curr-ctrl-files ]; then
+  :
+elif [ ! -f $TMPDIR/.mcc-read ]; then
 
   rm $currCtrl ${currCtrl}_ 2>/dev/null || :
   . $execDir/ctrl-files.sh

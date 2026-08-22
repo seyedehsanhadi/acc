@@ -1434,6 +1434,17 @@ if ! $_INIT; then
             . $execDir/write-config.sh
           fi
         fi
+        # ...and the RELEASE, which the apply above is useless without. is_charging() carries both
+        # (an apply, and a `set_ch_curr -` when the config no longer holds a cap); adding only the
+        # apply meant a native-limit phone could take a cap and never give it back. Measured on a
+        # Pixel 6a: `acc -s maxChargingCurrent=` left usb/current_max and main-charger/current_max
+        # pinned at 500000 while the config and the UI both reported no limit.
+        #
+        # Deliberately OUTSIDE the charging gate above: releasing a node needs no live reading, and
+        # the daemon spends most of its life here not charging. Same reasoning the voltage release
+        # carries in is_charging().
+        [ -n "${maxChargingCurrent[0]-}" ] || [ -f $TMPDIR/.mcc-settling ] || (_accdRelease=true; set_ch_curr - || :)
+        [ -n "${maxChargingVoltage[0]-}" ] || (set_ch_volt - || :)
         # Cool-down cycling is the one feature lost to this branch that is NOT being restored here.
         # It works by repeatedly pausing and resuming charging to shed heat, and on a phone whose
         # limit is held by firmware that means fighting the firmware every cycle -- the daemon
@@ -3446,6 +3457,29 @@ else
 
 
   # read charging voltage control files
+  #
+  # NEVER RE-RECORD DEFAULTS WHILE A CAP IS APPLIED. Each entry is node::marker::DEFAULT, and the
+  # default is simply whatever the node reads at this moment. Run this while a voltage cap is in
+  # force and the CAP is recorded as the default -- after which "restore to default" writes the cap
+  # back, forever, and no clear can ever release it.
+  #
+  # Measured on a Mi A3 after a run that set 4150mV and restarted the daemon:
+  #     battery/voltage_max::v000::4150000     <- the cap, recorded as the default
+  #     bms/voltage_max::v000::4400000         <- the one node discovered before the cap
+  #     main/voltage_max::v000::4150000
+  # Two of three poisoned, and the pack then floated at 4.15V on a 4.4V cell with a config and a UI
+  # that both read "no limit". The same mechanism is what left that phone at a 3.9V float earlier:
+  # the default had been snapshotted at 3900000.
+  #
+  # This is the voltage twin of a hazard the current path already documents -- a default snapshotted
+  # on a laptop port is 500000, and replaying it later holds the phone at 500mA for the session.
+  # There the snapshot is merely unhelpful; here it is self-perpetuating, because the value being
+  # recorded is the very one the user asked to remove.
+  #
+  # So: if a cap is configured, keep whatever snapshot we already have and re-record nothing.
+  if [ -n "${maxChargingVoltage[0]-}" ] && [ -f $TMPDIR/ch-volt-ctrl-files ]; then
+    _wlog "volt ctrl-files: keeping the existing defaults, a ${maxChargingVoltage[0]}mV cap is applied" 2>/dev/null || :
+  else
   rm $TMPDIR/.mcc-read 2>/dev/null
   : > $TMPDIR/ch-volt-ctrl-files_
   ls -1 $(ls_volt_ctrl_files | grep -Ev '^#|^$') 2>/dev/null | \
@@ -3456,6 +3490,7 @@ else
         >> $TMPDIR/ch-volt-ctrl-files_
     done
   grep -q / $TMPDIR/ch-volt-ctrl-files_ || rm $TMPDIR/ch-volt-ctrl-files_
+  fi
 
 
   # exclude troublesome ctrl files

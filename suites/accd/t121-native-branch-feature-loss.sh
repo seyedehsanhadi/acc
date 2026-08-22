@@ -58,7 +58,7 @@ _l23=$(wc -l < $W/rc23tree.branch); _l24=$(wc -l < $W/rc24tree.branch)
 
 echo
 echo "-- 1  the current limit must be applied on the firmware-limit path"
-_a=$(grep -c 'set_ch_curr' $W/rc23tree.branch); _b=$(grep -c 'set_ch_curr' $W/rc24tree.branch)
+_a=$(grep -c 'set_ch_curr ${maxChargingCurrent' $W/rc23tree.branch); _b=$(grep -c 'set_ch_curr ${maxChargingCurrent' $W/rc24tree.branch)
 echo "     rc23 has $_a   current has $_b"
 if [ "$_a" -eq 0 ] && [ "$_b" -ge 1 ]; then
   ok "set_ch_curr now runs on the firmware-limit path, where rc23 never called it"
@@ -77,7 +77,7 @@ echo "     rc23 has $_a   current has $_b"
 
 echo
 echo "-- 3  the voltage limit likewise"
-_a=$(grep -c 'set_ch_volt' $W/rc23tree.branch); _b=$(grep -c 'set_ch_volt' $W/rc24tree.branch)
+_a=$(grep -c 'set_ch_volt ${maxChargingVoltage' $W/rc23tree.branch); _b=$(grep -c 'set_ch_volt ${maxChargingVoltage' $W/rc24tree.branch)
 [ "$_a" -eq 0 ] && [ "$_b" -ge 1 ] && ok "set_ch_volt now runs on the firmware-limit path" \
   || no "set_ch_volt absent (rc23=$_a now=$_b)"
 
@@ -95,6 +95,22 @@ echo "-- 5  cool-down must be declared, not silently dropped"
 grep -q 'nativecooldown' $W/rc24tree.branch \
   && ok "cool-down cycling is reported as unavailable instead of pretending" \
   || no "cool-down is still silently dropped on this path"
+
+echo
+echo "-- 4b  a cap must be RELEASABLE, not just applicable"
+# An apply without a release leaves the phone capped with a UI that says no limit. Measured on a
+# Pixel 6a before this: clearing the cap left usb/current_max pinned at 500000 and the config
+# holding a malformed maxChargingCurrent=( node::... ) with the scalar gone.
+_rc=$(grep -c 'set_ch_curr -' $W/rc24tree.branch)
+_rv=$(grep -c 'set_ch_volt -' $W/rc24tree.branch)
+echo "     release calls in the branch: current=$_rc voltage=$_rv"
+[ "$_rc" -ge 1 ] && [ "$_rv" -ge 1 ] && ok "the branch releases both limits when the config no longer holds one"                                      || no "release missing (current=$_rc voltage=$_rv) - a cap could never be cleared here"
+# and it must NOT be trapped behind the charging gate
+if awk '/if present 2>\/dev\/null && \[ "\$\(cat \$battStatus/{g=1} g&&/^        fi$/{g=0} {if(!g && /set_ch_curr -/) print "outside"}' $W/rc24tree.branch | grep -q outside; then
+  ok "the release runs regardless of charging state"
+else
+  no "the release is trapped inside the charging gate - an unplugged phone could never clear a cap"
+fi
 
 echo
 echo "-- 5b  force-off must be declared too"
@@ -124,7 +140,7 @@ sed '/set_ch_curr ${maxChargingCurrent\[0\]} || :/d' "$ARM24/accd.sh" > $W/mut/a
 if cmp -s "$ARM24/accd.sh" $W/mut/accd.sh; then
   sk "could not mutate the new call"
 else
-  _m=$(cut_native "$W/mut" | grep -c 'set_ch_curr')
+  _m=$(cut_native "$W/mut" | grep -c 'set_ch_curr ${maxChargingCurrent')
   [ "$_m" -eq 0 ] && ok "mutation caught: removing the call empties the branch again" \
                   || no "mutation NOT caught: case 1 cannot fail"
 fi

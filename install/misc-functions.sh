@@ -12,7 +12,21 @@ apply_on_boot() {
 
   [[ "${applyOnBoot[*]-}${maxChargingVoltage[*]-}" != *--exit* ]] || exitCmd=true
 
-  for entry in ${applyOnBoot[@]-} ${maxChargingVoltage[@]-}; do
+  # RESTORE NEEDS A SOURCE OF ENTRIES, and the array is empty by the time it is asked for one.
+  # set_ch_volt's clear calls this to put the voltage nodes back, but the daemon reaches that clear
+  # only after the config has been re-read with maxChargingVoltage=() -- so this loop iterated
+  # nothing and restored nothing. A 4150mV cap stayed on the nodes with a config and a UI that both
+  # said no limit; on a Mi A3 that is what left the pack floating at 3.9V against a 4.4V default.
+  #
+  # apply_on_plug already solves this for the current side by falling back to the resolved control
+  # files when its array is empty and the caller asked for defaults. The voltage side never got the
+  # same fallback. Same idiom, same guard: only on a `default` restore, so an APPLY still needs real
+  # entries and can never be conjured out of the ctrl-files list.
+  #
+  # This surfaced only after the config clear was fixed. Previously the stale node entries survived a
+  # clear, which meant the cap could not be released but this loop always had data -- the two faults
+  # hid each other, and fixing the first exposed the second.
+  for entry in ${applyOnBoot[@]-} ${maxChargingVoltage[@]:-$([ .$arg != .default ] || cat $TMPDIR/ch-volt-ctrl-files 2>/dev/null || :)}; do
     set -- ${entry//::/ }
     [ -f ${1-//} ] || continue
     file=${1-}
