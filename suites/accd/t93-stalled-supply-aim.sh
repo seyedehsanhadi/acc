@@ -39,6 +39,7 @@ fin(){ echo "$ID: $P passed, $F failed"; [ "$F" -eq 0 ] && exit 0 || exit 1; }
 
 execDir=${execDir:-/data/adb/vr25/acc}
 AD=$execDir/accd.sh
+MF=$execDir/misc-functions.sh
 [ -f "$AD" ] || { no "accd.sh not found"; fin; }
 W=${TMPDIR:-/data/local/tmp}/.t93.$$
 rm -rf "$W" 2>/dev/null; mkdir -p "$W" 2>/dev/null
@@ -60,6 +61,10 @@ if [ -z "$_blk" ]; then
   fin
 fi
 
+T93RD=${T93RD:-/data/local/tmp/t93-readers.sh}
+{ sed -n '/^_mv() {/,/^}/p' "$MF"
+  sed -n '/^_ma() {/,/^}/p' "$MF"; } > "$T93RD" 2>/dev/null
+
 _gate(){ # $1 hvaim  $2 hvcontract  $3 chDisabledByAcc  $4 ge_pause_cap  $5 present  $6 vbus  $7 count-so-far
   ( set +u
     TMPDIR=$W/t; dataDir=$W/d
@@ -70,6 +75,14 @@ _gate(){ # $1 hvaim  $2 hvcontract  $3 chDisabledByAcc  $4 ge_pause_cap  $5 pres
     printf '%s' "${6}" > $W/psy/usb/voltage_now
     chDisabledByAcc=$3
     _gpcv=$4; _ge_pause_cap(){ $_gpcv; }
+    # rc24 (B2) also gates the aim on being BELOW the pause and on ACC not holding a cut. An
+    # unstubbed _lt_pause_cap is a command-not-found, which reads as "the aim declined" and would
+    # make every case here pass for the wrong reason.
+    _lt_pause_cap(){ ! $_gpcv; }
+    # rc24 compares normalised millivolts, so the block calls _mv. Unstubbed it is a
+    # command-not-found and every voltage test silently evaluates to false - which looks like
+    # "the aim declined" for every input, including the ones that should aim.
+    . "$T93RD"
     # PRESENT, not online: a collapse can take the online flag down with it, and requiring online
     # made the repair unreachable on a Mi A3 whose contract had died (present=1, online=0, icl=0,
     # vbus 5.9V) - the exact state this exists to fix.
@@ -103,7 +116,12 @@ _gate(){ # $1 hvaim  $2 hvcontract  $3 chDisabledByAcc  $4 ge_pause_cap  $5 pres
 
 # the SUSTAIN requirement: one low read must not be enough
 [ "$(_gate absent absent false false true 5175000 0)" = false ]   && ok "a single floor reading does NOT aim - a negotiation in progress reads low for a few seconds"   || no "one low read reaches the aim; interrupting a live negotiation is how a good contract is lost"
-[ "$(_gate absent absent false false true 8825000 9)" = false ]   && ok "8825mV (the contract tegu eventually won) is above the ceiling and never aims"   || no "a won contract still reaches the aim"
+# "did not aim" is either false or unset depending on where the extracted block starts, and both
+# mean the same thing. Assert the meaning, not one of its two spellings.
+case "$(_gate absent absent false false true 8825000 9)" in
+  true) no "a won contract still reaches the aim" ;;
+  *)    ok "8825mV (the contract tegu eventually won) is above the ceiling and never aims" ;;
+esac
 [ "$(_gate absent absent false false true '' 9)" = false ]   && ok "an unreadable vbus does not aim - absence of a reading is not evidence of a bad contract"   || no "an unreadable vbus reaches the aim"
 
 # ---- 2b: THE LATCH RELEASE, driven by measured states --------------------------------------------
@@ -128,13 +146,23 @@ else
       printf '%s' "$2" > $W/psy/usb/input_current_now
       chDisabledByAcc=false
       _ge_pause_cap(){ false; }
+      _lt_pause_cap(){ true; }
       present(){ true; }
       cd $W/psy || exit 1
       eval "$_rel" >/dev/null 2>&1
       [ -f $TMPDIR/.hvcontract ] && printf held || printf released ) 2>/dev/null
   }
-  [ "$(_lost 0 0)" = released ]     && ok "(the 9a state) 0mV with nothing flowing releases the latch, so the repair becomes reachable"     || no "0mV with no input does NOT release the latch - the 9a bug is not fixed"
-  [ "$(_lost 5904496 5190)" = released ]     && ok "(the A3 collapse) 5904mV delivering 5190uA releases the latch"     || no "a measured collapse does not release the latch"
+  # rc24 CONTRACT POLICY. These two used to require the latch to be RELEASED, because in rc23 the
+  # only way to repair a collapsed supply was to re-detect it, and re-detection needs the latch gone.
+  # rc24 answers a collapse by lifting the input CURRENT limit instead, which cannot disturb the
+  # voltage contract - so the repair no longer needs the latch released, and releasing it is exactly
+  # what let an apsd_rerun fire at a live plug and take a Mi A3 from 9V to 4.4V.
+  #
+  # The 9a case these were written for is still fixed, by the lift rather than by re-detection; t91
+  # asserts the lift fires on the same input. What must be true here is that the cable is the only
+  # thing that clears the latch.
+  [ "$(_lost 0 0)" = held ]     && ok "(the 9a state) 0mV with nothing flowing HOLDS the latch - the repair is the lift, not a re-detect"     || no "0mV released the contract latch - rc23 behaviour is back, and an apsd_rerun can now fire at a live plug"
+  [ "$(_lost 5904496 5190)" = held ]     && ok "(the A3 collapse) 5904mV delivering 5190uA HOLDS the latch"     || no "a measured collapse released the latch - this is the 9V to 4.4V path"
   # THE SAG THAT MUST NEVER RELEASE - a real contract 26mV under the line, charging at 1.5A
   [ "$(_lost 5974048 1500000)" = held ]     && ok "(the measured sag) 5974mV while drawing 1.5A KEEPS the latch - voltage alone cannot tell a sag from a collapse, and this one is 26mV under the threshold"     || no "a healthy 5974mV/1.5A supply releases the latch - that re-detects a WORKING contract, the curtana 9V -> 4860mV fault"
   [ "$(_lost 8300000 2000000)" = held ]     && ok "a healthy 8300mV contract keeps the latch"     || no "a healthy high-voltage contract releases the latch"
@@ -153,6 +181,7 @@ else
       printf '%s' "$2" > $W/psy/usb/input_current_now
       chDisabledByAcc=false
       _ge_pause_cap(){ false; }
+      _lt_pause_cap(){ true; }
       present(){ true; }
       cd $W/psy || exit 1
       eval "$_rel" >/dev/null 2>&1

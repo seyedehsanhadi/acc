@@ -47,7 +47,7 @@ else
   echo "  (found: $_line)"
   case "$_line" in
     *present*) ok "the cycle_switches fallback is gated on present()" ;;
-    *cycle_switches*) no "the fallback runs cycle_switches with NO present() gate - an unplugged phone with no configured switch sweeps forever (the shipped bug)" ;;
+    *cycle_switches*|*_rearm_sweep*) no "the fallback sweeps with NO present() gate - an unplugged phone with no configured switch sweeps forever (the shipped bug)" ;;
     *) no "unrecognised fallback form: $_line" ;;
   esac
 fi
@@ -65,6 +65,11 @@ case "${_sw:-0}" in ''|*[!0-9]*) _sw=0;; esac
 _run(){ # $1 present-rc  $2 chargingSwitch value
   ( flip_sw(){ set -- ${chargingSwitch[@]-}; [ -f "${1:-//}" ] || return 2; echo FLIPPED; }
     cycle_switches(){ echo SWEEP; }
+    # rc24 routes the fallback through _rearm_sweep, which is cycle_switches with a budget. Stub
+    # BOTH names: a stub that only covers the old one makes an undefined-command failure look
+    # exactly like "discovery was lost", and this suite reported precisely that against a build
+    # whose discovery was intact.
+    _rearm_sweep(){ echo SWEEP; }
     eval "present(){ return $1; }"
     chargingSwitch="$2"
     # the line under test, as it appears in enable_charging

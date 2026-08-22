@@ -46,12 +46,24 @@ rm -rf "$W" 2>/dev/null
 
 # The function under test, lifted verbatim from what ships.
 _body=$(sed -n '/^rekick_usb()/,/^}/p' "$MF")
+# rc24 moved the whole decision into _hv_may_kick and gave rekick_usb a lift to fall back on. Those
+# helpers have to be REAL here, not stubbed: an undefined _hv_may_kick makes `! _hv_may_kick` true,
+# so every case in this file took the withhold branch and reported rc=1 fired=0 - which reads as
+# "the guard refuses everything" and is really "the harness never loaded the guard".
+_helpers=$(
+  for _fn in _mv _ma _vbus_mv _iin_scale _iin_ma _hv_may_kick _hv_lift; do
+    sed -n "/^${_fn}() {/,/^}/p" "$MF"
+  done
+  sed -n '/^: \${hvLatchMv/,/^: \${hvDeadMa/p' "$MF"
+)
 [ -n "$_body" ] || { no "could not extract rekick_usb"; fin; }
 
 # ---- the rig -------------------------------------------------------------------------------------
 # Each case gets a clean synthetic tree. Fires are recorded by the fake nodes themselves, so the
 # check is "did the write happen", not "did the function say it would not".
-setup() {  # $1 vbus (empty = node absent), $2 icl, $3 latch(yes/no), $4 rekick-off(yes/no)
+setup() {  # $1 vbus (empty = node absent), $2 icl, $3 latch(yes/no), $4 rekick-off(yes/no),
+           # $5 input current in uA (default 0 = the supply is delivering nothing), "none" = no node
+
   rm -rf "$W" 2>/dev/null
   mkdir -p "$W/ps/usb" "$W/ps/battery" "$W/tmp" "$W/data" 2>/dev/null
   [ -n "${1-}" ] && printf '%s\n' "$1" > "$W/ps/usb/voltage_now"
@@ -59,6 +71,13 @@ setup() {  # $1 vbus (empty = node absent), $2 icl, $3 latch(yes/no), $4 rekick-
   : > "$W/ps/usb/apsd_rerun"
   : > "$W/ps/battery/rerun_aicl"
   printf 'usb/current_max::v000::1800000\n' > "$W/tmp/ch-curr-ctrl-files"
+  # The rc24 gate will not authorise a re-detection against a supply it cannot prove dead, so the
+  # world it reads has to be stated. Default: a node present reading zero, which is a dead supply.
+  # Pass "none" to remove the node and exercise the fail-closed rule.
+  case "${5-}" in
+    none) : ;;
+    *)    printf "%s" "${5:-0}" > "$W/ps/usb/input_current_now" ;;
+  esac
   [ "${3-}" = yes ] && : > "$W/tmp/.hvcontract"
   [ "${4-}" = yes ] && : > "$W/data/.rekick-off"
   return 0
@@ -69,6 +88,8 @@ run_guard() {  # $1 = _rekick_due result (0 = due, 1 = too soon)
   ( cd "$W/ps" 2>/dev/null || exit 9
     TMPDIR="$W/tmp"
     dataDir="$W/data"
+    eval "$_helpers"
+    present(){ return 0; }
     _rekick_due(){ return ${1:-0}; }
     eval "_rekick_due(){ return $1; }"
     _wlog(){ :; }
@@ -147,15 +168,21 @@ case_is "RATE: too soon refuses even with no latch and a dead supply" \
 _due=0
 
 # ---- 5: boundary and malformed input ------------------------------------------------------------------
-# The threshold is 6000000. A 5V supply drifting under load (5.0-5.2V measured) must never trip it,
-# and the lowest real negotiated step is 9V, so the exact edge matters less than the direction of
-# failure: an unreadable value must PERMIT (fail toward repairing a phone that will not charge).
+# The bar is hvLatchMv, 6500 mV, and rc24 raised it there from 6000 on purpose: a QC3 contract
+# under about 2 A load was measured at 6433-6712 mV on a Mi A3, so 6.0 V sits INSIDE the operating
+# band of a healthy supply and treating it as the contract line meant a loaded contract could read
+# as unnegotiated. A 5 V supply drifting under load (5.0-5.2 V measured) must never trip it, and a
+# real high-voltage contract must, sag and all.
+case_is "EDGE: exactly 6500000 counts as a contract -> refuse" \
+        1 0 6500000 2000000 no no
 
-case_is "EDGE: exactly 6000000 counts as a contract -> refuse" \
-        1 0 6000000 2000000 no no
+case_is "EDGE: 6499999 is below the bar -> permit" \
+        0 1 6499999 2000000 no no
 
-case_is "EDGE: 5999999 is below the bar -> permit" \
-        0 1 5999999 2000000 no no
+# And the value that used to be the bar is now firmly below it, which is the whole point of the
+# change: 6.0 V is a sagging QC3 contract, not a 5 V supply.
+case_is "EDGE: 6000000 is a loaded contract sagging, not the contract line -> permit" \
+        0 1 6000000 2000000 no no
 
 case_is "MALFORMED: garbage in voltage_now -> permit (fail toward repair)" \
         0 1 "not-a-number" 2000000 no no

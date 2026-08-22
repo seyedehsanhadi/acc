@@ -102,7 +102,11 @@ idle_discharging() {
   # phone the promotion is what makes status say Charging, so without it not_charging ran all
   # _STI=35 one-second iterations and never broke, walking the whole candidate list at ~35s each
   # with the daemon out of its loop. switch=off still suppresses; that is the case this exists for.
-  if [ "$_status" = Discharging ] && [ "${_kstatus-}" = Charging ] && [ -z "${_ccd-}" ] \
+  # rc24: _acc_nopromo suppresses the kernel-status promotion WITHOUT claiming a switch test is
+  # running. acc -t used flip=off for this, but flip also means "record this candidate in
+  # working-switches.log", so an interrupted wait left forged picker entries behind.
+  if [ "${_acc_nopromo:-0}" != 1 ] \
+    && [ "$_status" = Discharging ] && [ "${_kstatus-}" = Charging ] && [ -z "${_ccd-}" ] \
     && [ "${switch-}" != off ] && { [ "${switch-}" = on ] || ! ${chDisabledByAcc:-false}; }
   then
     _status=Charging

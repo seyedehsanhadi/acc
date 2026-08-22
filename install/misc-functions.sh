@@ -127,7 +127,7 @@ apply_on_plug() {
     # leaving a node capped is the failure this path exists to prevent, so it fails toward writing.
     if [ "$arg" = default ]; then
       case "$file" in
-        */current_max|*/input_current|*/input_current_limit|*/input_current_settled|*/restrict_cur)
+        */current_max|*/input_current|*/input_current_max|*/input_current_limit|*/input_current_settled|*/restrict_cur)
           # restrict_cur belongs here too, and it was missed because the pattern above is written
           # around node NAMES under power_supply and this one lives in /sys/class/qcom-battery.
           #
@@ -320,7 +320,7 @@ cycle_switches() {
     # restore direction and accd.sh:2885's exit-trap sweep never see one. acc -t is exempt as well:
     # it walks every candidate on purpose, with a user watching it, and that is how an awkward phone
     # gets a switch at all.
-    if [ "$1" = off ] && [ -n "${_swEnd-}" ] && ! ${acc_t:-false} && [ $SECONDS -ge $_swEnd ]; then
+    if [ -n "${_swEnd-}" ] && ! ${acc_t:-false} && [ $SECONDS -ge $_swEnd ]; then
       # `read -A` has ALREADY overwritten the global array with this untried candidate, and
       # accd.sh:1219 writes it straight to $TMPDIR/.sw. Leave nothing that looks like a selection.
       chargingSwitch=()
@@ -476,6 +476,7 @@ cycle_switches() {
           # cycle_switches_off on this or a future session can try it FIRST instead of
           # fanning out through the full candidate list (each failed candidate's
           # flip_sw on re-arms charging briefly -> battery rises during cycling).
+          _swAdopted=1
           printf '%s\n' "${chargingSwitch[*]}" > $dataDir/.last-good-switch 2>/dev/null || :
           . $execDir/write-config.sh
           break
@@ -505,7 +506,19 @@ cycle_switches() {
     }
   done < $TMPDIR/ch-switches
 
-  rm $TMPDIR/.testingsw
+  # rc24: a candidate that was NOT adopted must not stay in the global. `read -A` leaves the last
+  # line of ch-switches there and enable_charging runs this loop in the current shell, so the next
+  # disable_charging could treat a leftover voltage node as the configured switch - a float ceiling,
+  # not a pause. -f on the rm: a missing marker aborted the caller under set -e.
+  [ -n "${_swAdopted-}" ] || chargingSwitch=()
+  unset _swAdopted
+  rm -f $TMPDIR/.testingsw
+}
+
+
+_rearm_sweep() {
+  local _swEnd=$(( SECONDS + ${_rearmBudget:-120} ))
+  cycle_switches on
 }
 
 
@@ -754,8 +767,166 @@ _rekick_due() {
   case ${_now:-x} in ''|*[!0-9]*) return 0;; esac
   _then=$(cat "$TMPDIR/.rekick" 2>/dev/null || echo 0)
   case ${_then:-x} in ''|*[!0-9]*) _then=0;; esac
+  # rc24: DO NOT stamp here. The caller can still withhold on the contract gate without kicking
+  # anything, and stamping first burned the whole 300s budget on a kick that never ran - so a real
+  # stall stayed unrepaired for up to five minutes. rekick_usb stamps after it has acted.
   [ $(( _now - _then )) -ge "$_min" ] || return 1
-  echo "$_now" > "$TMPDIR/.rekick" 2>/dev/null || :
+  return 0
+}
+
+
+# rc24 UNIT NORMALISATION - read this before touching any threshold below.
+#
+# usb/voltage_now is MICROVOLTS on some kernels and MILLIVOLTS on others, from the identical path.
+# Measured on the two test phones, both idle and unplugged: a Mi A3 reports 4144, a Pixel 6a
+# reports 25000. Every electrical threshold in ACC was written in microvolts, so on a millivolt
+# phone `>= 6000000` can never be true - the high-voltage contract latch never set, and rekick_usb
+# and aim-high therefore treated a live 9V QC3 plug as an unnegotiated one, re-ran APSD and
+# renegotiated it down to ~4.4V. That is the A3 outage, and it is a UNIT bug, not a policy bug.
+#
+# The bus is physically bounded: USB never exceeds 20V, and the input never exceeds 20A. So a
+# reading above 20000 cannot be millivolts (that would be 20V+) and must be microvolts; at or below
+# 20000 it is already millivolts. The same shape holds for current. Everything downstream now works
+# in mV and mA, which are the units the comments were always written in.
+_mv() {
+  case "${1:-x}" in ''|x|*[!0-9]*) return 1;; esac
+  [ "$1" -gt 20000 ] 2>/dev/null && echo $(( $1 / 1000 )) || echo "$1"
+}
+
+_ma() {
+  local _a=${1#-}
+  case "${_a:-x}" in ''|x|*[!0-9]*) return 1;; esac
+  [ "$_a" -gt 20000 ] 2>/dev/null && echo $(( _a / 1000 )) || echo "$_a"
+}
+
+# The bus voltage in mV, empty when unreadable.
+_vbus_mv() {
+  local _v=
+  { read -r _v < usb/voltage_now; } 2>/dev/null || :
+  _mv "${_v:-}"
+}
+
+# Input current in mA from whichever node this kernel provides. usb/input_current_now does not exist
+# on a Pixel 6a and usb/current_now does not exist on a Mi A3, so a single hardcoded path silently
+# disables every check that depends on it - which is how a gate can end up permanently answering
+# "no" on half the fleet.
+_iin_ma() {
+  local _n= _v= _a= _f=$TMPDIR/.iinmicro
+  for _n in usb/input_current_now usb/current_now usb/input_current_settled \
+            main-charger/current_now main/current_now; do
+    [ -f "$_n" ] || continue
+    _v=
+    { read -r _v < "$_n"; } 2>/dev/null || :
+    case "${_v:-x}" in ''|x|*[!0-9-]*) continue;; esac
+    _a=${_v#-}
+    # The scale rule is INLINE on purpose. Written as a second function it became a dependency of
+    # this one, and every fixture that extracts helpers by name - t111, t112 and the scenario
+    # replays - pulls _iin_ma without knowing to pull its new helper too. They then got an
+    # undefined command, an empty reading, and reported "the supply is not dead" for seven cases
+    # that were about a dead supply. A reader with no dependencies cannot be half-extracted.
+    if [ "$_a" -gt 20000 ] 2>/dev/null; then
+      grep -qxF "$_n" "$_f" 2>/dev/null || echo "$_n" >> "$_f" 2>/dev/null || :
+      echo $(( _a / 1000 ))
+    elif grep -qxF "$_n" "$_f" 2>/dev/null; then
+      echo $(( _a / 1000 ))
+    else
+      echo "$_a"
+    fi
+    return 0
+  done
+  return 1
+}
+
+
+# WHY _iin_ma LEARNS THE SCALE (the rule above is inline in it)
+#
+# rc24: learn the node's units, do not re-guess them from every reading.
+#
+# _ma decides per value: above 20000 it must be microamps, at or below it is already milliamps.
+# That is sound for a charging reading and wrong for a collapsed one. Measured on a Mi A3, whose
+# usb/input_current_now is microamps:
+#
+#     charging   2696040  -> 2696 mA   correct
+#     collapsed     5353  -> 5353 mA   a 5.35 mA supply reported as 5.35 A
+#
+# The whole band from about 51 to 20000 - which is 0.05 mA to 20 mA, precisely "collapsed but not
+# quite zero" - reads as alive on a microamp kernel. The A3's own measured collapse sat at 5190-5353.
+# Zero normalises correctly in either scale, which is why fixtures built on zero never caught it.
+#
+# A reading above 20000 is PROOF the node is microamps, because no port carries 20 A. That proof is
+# recorded per node for the boot, and afterwards every reading from that node is divided - including
+# the small ones the magnitude rule cannot classify. Normal charging produces such a reading on every
+# plug, so the scale is known long before a collapse is ever seen.
+#
+# A node that has never read high keeps today's behaviour: its small values are returned untouched
+# and an ambiguous reading therefore still fails closed in _hv_may_kick, which is what keeps this a
+# missed repair rather than a spurious re-detection.
+
+# The thresholds, in the units the hardware actually speaks.
+: ${hvLatchMv:=6500}     # at or above this, a contract exists
+: ${hvLostMv:=6000}      # sustained below this while plugged = a supply in a low-voltage phase
+: ${hvPeakMaxMv:=5500}   # a plug whose peak stayed under this was never negotiated
+: ${hvDeadMa:=50}        # input current at or below this = the supply is delivering nothing
+
+
+# rc24 CONTRACT POLICY - the one rule every caller goes through.
+#
+#   LIFT  raise the input CURRENT limit on the charger-owned supplies. Always safe: current is not
+#         the contract, and no allow-listed node renegotiates anything. This is the answer to a
+#         stall, to ICL=0, and to a resume.
+#   KICK  apsd_rerun / rerun_aicl. This RE-DETECTS the charger and can drop a won contract to 5V.
+#         Allowed only when there is demonstrably nothing to lose.
+#
+# A kick needs ALL of:
+#   - no contract latched this plug
+#   - charger type is not a high-voltage type
+#   - the highest voltage seen this plug is under 5.5V (a plug that was ever high stays "negotiated")
+#   - input current is essentially zero, so the supply really is dead rather than merely slow
+#   - it has not already been kicked this plug
+#   - the user has not set `acc -sk off`
+# Anything short of all six gets a LIFT instead.
+_hv_may_kick() {
+  [ ! -f "$TMPDIR/.hvcontract" ] || return 1
+  [ ! -f "$TMPDIR/.hvkicked" ] || return 1
+  [ ! -f "$dataDir/.rekick-off" ] || return 1
+  present 2>/dev/null || return 1
+  local _t= _tn= _pk= _in=
+  for _tn in real_type usb_type type; do
+    [ -f "usb/$_tn" ] || continue
+    _t=$(cat "usb/$_tn" 2>/dev/null) || :
+    break
+  done
+  case "${_t:-}" in *HVDCP*|*PD*|*QC*|*hvdcp*|*pd*) return 1;; esac
+  # .hvpeak is stored in mV (the writer normalises), so this compares like with like.
+  _pk=$(cat "$TMPDIR/.hvpeak" 2>/dev/null || echo 0)
+  case "${_pk:-x}" in ''|*[!0-9]*) _pk=0;; esac
+  [ "$_pk" -lt "${hvPeakMaxMv:-5500}" ] 2>/dev/null || return 1
+  # No readable input-current node means we cannot prove the supply is dead, and a kick is only ever
+  # justified against a supply proven dead. Fail closed.
+  _in=$(_iin_ma) || return 1
+  [ "$_in" -le "${hvDeadMa:-50}" ] 2>/dev/null || return 1
+  # rc24: CLAIM the kick here rather than trusting each caller to remember. The once-per-plug rule
+  # was enforced by convention - rekick_usb set the marker, aim-high set the marker - and a third
+  # caller added later would silently get an unlimited budget. Claiming it inside the gate makes the
+  # invariant structural: whoever is told "yes" has already spent the plug's single repair. The
+  # conservative failure mode is a kick that was authorised and then not carried out, which costs
+  # one missed repair rather than an unbounded re-detection loop on a live contract.
+  : > "$TMPDIR/.hvkicked" 2>/dev/null || :
+  return 0
+}
+
+
+# Raise the input current limit on the charger-owned supplies only. Never usb/, dc/, pc_port/ or
+# tcpm*: those are the negotiation side, and one write to usb/current_max was measured dropping a
+# port to 100mA. Through write(), so the blacklist and the write ledger apply.
+_hv_lift() {
+  local _n=
+  for _n in main/current_max main-charger/current_max mainchg/current_max charger/current_max \
+            gccd/current_max bbc/current_max main/input_current_limit main-charger/input_current_limit \
+            main/input_current_settled main-charger/input_current_settled; do
+    [ -f "$_n" ] || continue
+    write 5000000 "$_n" 0 || :
+  done
   return 0
 }
 
@@ -830,12 +1001,18 @@ rekick_usb() {
   # has been seen since the cable went in, treat the contract as live until the cable comes out.
   # accd sets and clears $TMPDIR/.hvcontract around the plug transition. A sag can no longer open
   # the door, and a genuine 5V-only supply never sets the latch, so real stalls still get repaired.
-  if [ -f "$TMPDIR/.hvcontract" ]; then
+  # rc24 CONTRACT POLICY. One question decides everything below: may this plug be re-detected at
+  # all? If not, the stall is answered by lifting the input current limit, which cannot disturb a
+  # contract, and no APSD is fired. This replaces the old bare latch check, which said "skip" and
+  # then left every other caller to invent its own escape - the escapes are what dropped 9V to 4.4V.
+  if ! _hv_may_kick; then
+    _hv_lift || :
     _rkv=
     { read -r _rkv < usb/voltage_now; } 2>/dev/null || :
-    command -v _wlog >/dev/null 2>&1 && _wlog "rekick skipped ($_reason): negotiated contract latched this plug (now $(( ${_rkv:-0} / 1000 ))mV) - apsd_rerun would drop it to 5V until replug" || :
+    command -v _wlog >/dev/null 2>&1 && _wlog "rekick withheld ($_reason): lifted the input limit instead (now $(_vbus_mv)mV) - re-detection would renegotiate a plug we have already won" || :
     return 1
   fi
+  : > "$TMPDIR/.hvkicked" 2>/dev/null || :
 
   # NO LATCH YET - AND A SINGLE READ HERE IS THE v3 BUG VERBATIM.
   #
@@ -860,11 +1037,11 @@ rekick_usb() {
     { read -r _rkv < usb/voltage_now; } 2>/dev/null || :
     case "${_rkv:-x}" in
       ''|x|*[!0-9]*) : ;;
-      *) [ "$_rkv" -ge 6000000 ] 2>/dev/null && { _rkhi=$_rkv; break; } ;;
+      *) [ "$(_mv "$_rkv")" -ge "${hvLatchMv:-6500}" ] 2>/dev/null && { _rkhi=$_rkv; break; } ;;
     esac
     [ $_rkn -lt 3 ] && sleep 1
   done
-  if [ "${_rkhi:-0}" -ge 6000000 ] 2>/dev/null; then
+  if [ "$(_mv "${_rkhi:-0}")" -ge "${hvLatchMv:-6500}" ] 2>/dev/null; then
     : > "$TMPDIR/.hvcontract" 2>/dev/null || :
     command -v _wlog >/dev/null 2>&1 && _wlog "rekick skipped ($_reason): $(( _rkhi / 1000 ))mV negotiated contract seen while sampling - apsd_rerun would drop it to 5V until replug" || :
     return 1
@@ -921,11 +1098,18 @@ rekick_usb() {
             _rkd=${_rkl##*::}
             case "${_rkd:-x}" in ''|x|*[!0-9]*) continue;; esac
             [ -w "$_rkn" ] || continue
-            command -v _wlog >/dev/null 2>&1 && _wlog "rekick restore $_rkn <- $_rkd" || :
-            echo "$_rkd" > "$_rkn" 2>/dev/null || :
+            # rc24 LIFT: release HIGH and let the driver clamp - the rule apply_on_plug already
+            # uses. The recorded default is a SNAPSHOT of whatever the node read when ACC first
+            # identified it; taken on a computer port that is 500000, and replaying it on a wall
+            # charger pinned the phone at 500mA for the rest of the session. Through write(), so the
+            # blacklist and the write ledger apply - this was a raw echo that bypassed both.
+            command -v _wlog >/dev/null 2>&1 && _wlog "rekick lift $_rkn <- 5000000 (recorded default was $_rkd)" || :
+            write 5000000 "$_rkn" 0 || :
           done < "$TMPDIR/ch-curr-ctrl-files" 2>/dev/null || : ;;
       esac ;;
   esac
+  # rc24: the budget is spent HERE, where a kick or a lift actually happened.
+  echo "$(date +%s 2>/dev/null)" > "$TMPDIR/.rekick" 2>/dev/null || :
   return 0
 }
 
@@ -997,7 +1181,11 @@ enable_charging() {
       # block above and by flip_sw itself, both untouched. A sweep cannot re-arm anything
       # electrically when there is no charger, so gating it costs no capability: with a cable
       # attached, discovery still runs exactly as before.
-      flip_sw on || { present && cycle_switches on; } || :
+      # rc24: the fallback sweep gets a ceiling. _swEnd is a local of the helper, so mksh's dynamic
+      # scoping hands it to cycle_switches for this call only - accd's exit-trap restore sweep still
+      # walks every candidate unbounded, which is what keeps a stranded phone able to charge again.
+      # Unbounded here, an empty chargingSwitch held a plugged A3 off charge for over five minutes.
+      flip_sw on || { present && _rearm_sweep; } || :
       if present; then
         # D8 (rc5: extended to current-cap classes): after un-cutting, re-run APSD/AICL so the
         # charger re-negotiates. Input-cut switches (input_suspend/bypass/vbus) mask */online to 0
@@ -1014,6 +1202,11 @@ enable_charging() {
           # on every resume regardless. rekick_usb() carries the off flag, the rate limit and the
           # ledger entry; nothing here needs to reach past it.
           *current_max*|*input_current*|*constant_charge_current*)
+            # rc24: clear `flip` first. flip_sw on leaves flip=on, and not_charging treats any
+            # non-empty flip as a SWITCH TEST - so this became a 35-iteration ON-test that answered
+            # "charging started", and the re-kick then fired AFTER a successful resume. The question
+            # here is only "is current flowing".
+            flip=
             present && not_charging && rekick_usb resume 2>/dev/null || : ;;
           *suspend*|*bypass*|*vbus*)
             present && ! online && rekick_usb resume 2>/dev/null || : ;;

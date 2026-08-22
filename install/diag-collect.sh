@@ -195,9 +195,39 @@ case "${_V_batt:-}" in ''|*[!0-9]*) _V_batt= ;; esac
       # others (sweet), and on/off are inverted between them, so resolve the path both ways and
       # always take OFF from field 3 rather than assuming 1 means "held".
       case "$_V_swn" in /*) _V_swp="$_V_swn" ;; *) _V_swp="/sys/class/power_supply/$_V_swn" ;; esac
-      if [ -n "$_V_swn" ] && [ -e "$_V_swp" ]; then
+      # THE FIRMWARE LIMIT DECIDES FIRST, WHERE THERE IS ONE.
+      #
+      # On a phone with a native charge_stop_level the daemon drives that and never writes the
+      # configured chargingSwitch at all. Judging the hold from that switch therefore reports a
+      # perfectly healthy phone as broken. Worse, the OFF value there is the KEYWORD "pcap", not a
+      # number, so the comparison was "40" against the literal string pcap and could never be true.
+      #
+      # Field report, bramble/Pixel 4a 5G: charge_stop_level=40 with pause=40 and the firmware
+      # holding correctly, and this block printed "switch is NOT holding charge (switch may be
+      # broken)" and then, off the same flag, "overcharging now (daemon not holding)". The bundle
+      # said the opposite of itself, because the section below already reports the native limit as
+      # ACTIVE. The same owner had already lost a report to exactly this once - see the note in
+      # accd.sh about a Pixel 4a 5G owner hunting a switch that had never been in use.
+      _V_gcsl=""
+      # Same override accd.sh uses for the same list, so this branch can be driven in a test with a
+      # fabricated tree instead of only on hardware that happens to have the path.
+      for _d in ${NATIVE_DIRS:-/sys/devices/platform/google,charger /sys/devices/platform/soc/soc:google,charger}; do
+        [ -f "$_d/charge_stop_level" ] && _V_gcsl="$_d"
+      done
+      if [ -n "$_V_gcsl" ] && [ ! -f "$DD/.no-native-limit" ]; then
+        _susp_node="${_V_gcsl}/charge_stop_level"
+        _susp_now=$(cat "$_V_gcsl/charge_stop_level" 2>/dev/null | head -1)
+        _susp_want="$_V_pause"
+      elif [ -n "$_V_swn" ] && [ -e "$_V_swp" ]; then
         _susp_node="$_V_swn"; _susp_want="$_V_swoff"
         _susp_now=$(cat "$_V_swp" 2>/dev/null | head -1)
+        # pcap and rcap are keywords meaning "the pause level" and "the resume level". Comparing a
+        # node reading 40 against the string "pcap" is never true, so a level-type switch that was
+        # holding perfectly read as broken.
+        case "$_susp_want" in
+          pcap) _susp_want="$_V_pause" ;;
+          rcap) _susp_want="$_V_resume" ;;
+        esac
       else
         _susp_node="battery/input_suspend"; _susp_want=1
         _susp_now=$(cat /sys/class/power_supply/battery/input_suspend 2>/dev/null)
@@ -461,10 +491,15 @@ if $CRASH_SIGNAL; then
   _fresh=$BOOT_EPOCH; [ "$MODE" = full ] && _fresh=0
   _n=0; for tb in $(ls -t /data/tombstones/tombstone_* 2>/dev/null | head -3); do
     [ "$(stat -c %Y "$tb" 2>/dev/null || echo 0)" -gt "$_fresh" ] || continue
-    cp -f "$tb" "$STAGE/crash/$(basename "$tb")" 2>/dev/null && { man "OK     tombstone (this boot) -> crash/$(basename "$tb")"; _n=$((_n+1)); }; done
+    # Through cpf, not a hand-rolled cp: cpf is the one place that reports what LANDED rather than
+    # what was attempted, so an empty source says EMPTY instead of OK. A Mi A3 carried two zero-byte
+    # ANR traces announced as "OK anr-trace (this boot)" -- the same defect this file already fixed
+    # for last_kmsg and for the DropBox kernel bodies.
+    cpf "crash/$(basename "$tb")" "tombstone (this boot)" "$tb"
+    if [ -s "$STAGE/crash/$(basename "$tb")" ]; then _n=$((_n+1)); fi; done
   for an in $(ls -t /data/anr/* 2>/dev/null | head -2); do
     [ "$(stat -c %Y "$an" 2>/dev/null || echo 0)" -gt "$_fresh" ] || continue
-    cp -f "$an" "$STAGE/crash/anr-$(basename "$an").txt" 2>/dev/null && man "OK     anr-trace (this boot) -> crash/anr-$(basename "$an").txt"; done
+    cpf "crash/anr-$(basename "$an").txt" "anr-trace (this boot)" "$an"; done
   man "NOTE   crash-signal -> $_n this-boot tombstone(s) + anr (our crash stack is in crash/logcat-crash.txt + acca-last-crash.txt; NO third-party logcat collected)"
 else man "SKIP   no fresh crash signal -> tombstones/anr/full-logcat deferred (run --full to force)"; fi
 
@@ -475,7 +510,24 @@ if $REBOOT_SIGNAL; then
   # vendor panic stores for phones WITHOUT pstore (MediaTek / Samsung) -- capture readable ones, note the dirs
   for _vp in /proc/sec_log /proc/mtk_ram_console; do [ -f "$_vp" ] && { tail -c 200000 "$_vp" > "$STAGE/reboot/vendor-${_vp##*/}.txt" 2>/dev/null; [ -s "$STAGE/reboot/vendor-${_vp##*/}.txt" ] && man "OK     vendor panic store -> reboot/vendor-${_vp##*/}.txt"; }; done
   for _vd in /data/aee_exp /sys/class/sec/sec_debug; do [ -e "$_vd" ] && man "OK     vendor panic-store dir present: $_vd (pull manually if pstore was empty)"; done
-  man "NOTE   reboot-signal fired -> attached full dmesg + all pstore variants + last_kmsg"
+  # The kernel log belongs to THIS tier, not to --full: Android drains /sys/fs/pstore into DropBox
+  # as SYSTEM_LAST_KMSG, so on a phone whose pstore has already been drained the loop above finds an
+  # empty directory and the body is the only copy left. Gating it on --full meant a normal bundle
+  # from a phone that had just rebooted abnormally carried no kernel log at all.
+  _dbx="$STAGE/crash/dropbox-bodies"; mkdir -p "$_dbx" 2>/dev/null; _dbn=${_dbn:-0}
+  _dbk=0; _dblost=0
+  for f in $(ls -t /data/system/dropbox/*KMSG* /data/system/dropbox/*kmsg* /data/system/dropbox/*watchdog* 2>/dev/null | awk '!seen[$0]++'); do
+    [ "$_dbk" -ge 3 ] && break
+    # DropBox leaves a ZERO-BYTE *.lost placeholder where it has purged a body, and the index still
+    # lists the event. Copying those announces an attachment that carries nothing and spends the
+    # budget a surviving body needs -- a Mi A3 offered seven lost placeholders and no real log.
+    [ -s "$f" ] || { _dblost=$((_dblost+1)); continue; }
+    cp -f "$f" "$_dbx/" 2>/dev/null && { _dbk=$((_dbk+1)); _dbn=$((_dbn+1)); man "OK     dropbox kernel-body -> crash/dropbox-bodies/$(basename "$f")"; }
+  done
+  [ "$_dblost" -gt 0 ] && man "NOTE   $(echo $_dblost) kernel-log body/bodies already purged by DropBox (zero-byte placeholder) -- listed in the index, not attachable"
+  rmdir "$_dbx" 2>/dev/null || :
+  _rbn=$(ls "$STAGE/reboot"/*.txt 2>/dev/null | wc -l)
+  man "NOTE   reboot-signal fired -> full dmesg + $(echo $_rbn) file(s) in reboot/ (an EMPTY pstore is normal: once Android drains it, the previous boot's kernel log is a SYSTEM_LAST_KMSG body under crash/)"
 else man "SKIP   normal/no reboot signal -> pstore/last_kmsg/full-dmesg deferred (reboot-history still recorded them)"; fi
 
 # ============================================================ EXTRA (--full only) ============================================================
@@ -483,7 +535,12 @@ if [ "$MODE" = full ]; then
   grab android/getprop-full.txt "getprop FULL" getprop
   grab android/avc-full.txt "avc FULL (all apps)" sh -c 'dmesg 2>/dev/null | grep -iE "avc: *denied"; logcat -d -b main -b system 2>/dev/null | grep -iE "avc: *denied"'
   cpf charging/power_supply-raw.log "acc raw power_supply mining dump" "$(ls -t $DD/logs/power_supply-*.log 2>/dev/null | head -1)"
-  _dbx="$STAGE/crash/dropbox-bodies"; mkdir -p "$_dbx"; _dbn=0
+  _dbx="$STAGE/crash/dropbox-bodies"; mkdir -p "$_dbx"; _dbn=${_dbn:-0}
+  # Kernel bodies FIRST and on their own budget. Android drains /sys/fs/pstore into DropBox as
+  # SYSTEM_LAST_KMSG, so after an abnormal reboot the previous boot's kernel log lives HERE and the
+  # pstore tier above finds nothing. The old glob (crash|anr|panic|tombstone) matched none of these
+  # names, so the index advertised a last_kmsg event the bundle could never carry. Kept separate from
+  # the app-body loop below so a burst of ANRs cannot push the decisive file out of the head -6.
   for f in $(ls -t /data/system/dropbox/*crash* /data/system/dropbox/*anr* /data/system/dropbox/*panic* /data/system/dropbox/*tombstone* 2>/dev/null | head -6); do
     cp -f "$f" "$_dbx/" 2>/dev/null && { _dbn=$((_dbn+1)); man "OK     dropbox-body -> crash/dropbox-bodies/$(basename "$f")"; }; done
   [ "$_dbn" = 0 ] && rmdir "$_dbx" 2>/dev/null
@@ -521,7 +578,7 @@ _redact(){ _ser=$(getprop ro.serialno 2>/dev/null); find "$STAGE" -type f 2>/dev
     -e 's#\[([a-z0-9._]*serial[a-z0-9._]*)\]: \[[^]]*\]#[\1]: [REDACTED]#g' \
     -e 's#\[([a-z0-9._]*(imei|imsi|iccid|meid|android_id)[a-z0-9._]*)\]: \[[^]]*\]#[\1]: [REDACTED]#g' \
     -e 's#([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}#[MAC]#g' \
-    -e 's#[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}#[EMAIL]#g' \
+    -e 's#[A-Za-z0-9._%+-]+@[A-Za-z][A-Za-z0-9.-]*\.[A-Za-z]{2,}#[EMAIL]#g' \
     "$f" > "$f.__r" 2>/dev/null && [ -s "$f.__r" ] && mv -f "$f.__r" "$f" 2>/dev/null || rm -f "$f.__r" 2>/dev/null
   if [ ${#_ser} -ge 6 ]; then sed "s#${_ser}#[REDACTED-SERIAL]#g" "$f" > "$f.__r" 2>/dev/null && [ -s "$f.__r" ] && mv -f "$f.__r" "$f" 2>/dev/null || rm -f "$f.__r" 2>/dev/null; fi
 done; }

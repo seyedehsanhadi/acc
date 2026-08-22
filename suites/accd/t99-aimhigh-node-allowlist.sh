@@ -5,7 +5,14 @@ ok(){ P=$((P+1)); echo "  PASS  $*"; }
 no(){ F=$((F+1)); echo "  FAIL  $*"; }
 fin(){ echo "$ID: $P passed, $F failed"; [ "$F" -eq 0 ] && exit 0 || exit 1; }
 execDir=${execDir:-/data/adb/vr25/acc}
-. $execDir/suites/fakeps/mkfake.sh
+# mkfake.sh lives beside this suite in the repo, and suites/ is not shipped inside an installed
+# module - so resolving it through $execDir aborts the run on any phone where ACC is actually
+# installed, which is every phone this suite matters on. Look next to this file first.
+_t99d=$(dirname "$0")
+if [ -f "$_t99d/../fakeps/mkfake.sh" ]; then . "$_t99d/../fakeps/mkfake.sh"
+elif [ -f "$execDir/suites/fakeps/mkfake.sh" ]; then . "$execDir/suites/fakeps/mkfake.sh"
+else echo "  SKIP  mkfake.sh not found beside the suite or under \$execDir"; exit 0
+fi
 W=/data/local/tmp/t99; rm -rf $W; mkdir -p $W; mkfake $W/ps
 
 _blk=$(sed -n '/if { { \$freshPlug && \${sawUnplug:-false}; } || \${_aimStall:-false}; }/,/^      fi$/p' $execDir/accd.sh)

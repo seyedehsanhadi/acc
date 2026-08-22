@@ -232,6 +232,9 @@ rm -rf \
       [ -r "$d" ] && cat "$d" > "$f" 2>/dev/null || echo 5000000 > "$f" 2>/dev/null || :
     done
     for f in */current_max */input_current_limit */input_current */constant_charge_current_max; do
+      # rc24: never the negotiation supplies. Writing usb/current_max renegotiates the port down to
+      # ~100mA until the value is written back, so an uninstall left the phone trickle-charging.
+      case "$f" in usb/*|dc/*|pc_port/*|tcpm*) continue;; esac
       [ -w "$f" ] && echo 5000000 > "$f" 2>/dev/null || :
     done
     for f in */siop_level; do

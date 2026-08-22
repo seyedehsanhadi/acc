@@ -85,7 +85,18 @@ _want ''   false Charging    "no cut anywhere, the kernel tie-break does its job
 # Pull the real condition out of batt-interface.sh and run the same matrix through it, so this cannot
 # pass on a rule that only exists in this file.
 _bisrc=$(sed 's/^[[:space:]]*#.*//' "$BI")
-_cond=$(printf '%s\n' "$_bisrc" | grep -A1 '\[ "\$_status" = Discharging \] && \[ "\${_kstatus-}" = Charging \]' | tr '\n' ' ')
+# Anchor on the Discharging clause, then take the WHOLE `if ... then` that encloses it. A fixed
+# -A1 window broke the moment rc24 prepended `[ "${_acc_nopromo:-0}" != 1 ] &&` on its own line:
+# the extract then began with `&&`, did not parse, evaluated to nothing, and scored all six cases
+# wrong against a condition that is in fact correct on all six. Walking back to the enclosing `if`
+# is indifferent to how many clauses the condition grows.
+_dl=$(printf '%s\n' "$_bisrc" | grep -n '"\$_status" = Discharging' | head -1 | cut -d: -f1)
+_if=$(printf '%s\n' "$_bisrc" | head -n "${_dl:-0}" | grep -n '^  if ' | tail -1 | cut -d: -f1)
+if [ -n "$_if" ]; then
+  _cond=$(printf '%s\n' "$_bisrc" | sed -n "${_if},/^  then/p" | grep -v '^  then' | tr '\n' ' ')
+else
+  _cond=
+fi
 case "$_cond" in
   *'_status'*) : ;;
   *) no "could not extract the shipped tie-break condition"; fin ;;

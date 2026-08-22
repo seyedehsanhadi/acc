@@ -132,7 +132,16 @@ case "$@" in
     . $defaultConfig
     . $config
 
-    export "$@"
+    # rc24: assign without export, so a value is taken literally - no re-expansion, no word
+    # splitting - and only a real config key can be written.
+    for _as; do
+      case "$_as" in
+        *=*) _ak=${_as%%=*}; _av=${_as#*=}
+          case "$_ak" in *[!a-zA-Z0-9_]*) continue;; esac
+          eval "$_ak=\$_av" ;;
+      esac
+    done
+    unset _as _ak _av
 
     . $execDir/write-config.sh
     exit 0

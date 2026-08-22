@@ -912,6 +912,30 @@ case "${1-}" in
       # setsid launch; this was the one place that called it bare.
       # Detached on purpose: a daemon left in this script's session dies when the script exits,
       # which is the same trap acca.sh documents for the switch scanner.
+      # HAND THE LOCK OVER BEFORE STARTING THE DAEMON, NOT AFTER.
+      #
+      # acquire-lock.sh registers the holder by writing `echo $$` into acc.lock, so from the moment
+      # `acc -t` takes the lock that file names THIS process. The daemon started below releases the
+      # lock on its way up by signalling whatever pid it finds there - SIGTERM, then SIGKILL two
+      # seconds later. That pid is us, so the handover killed the process performing the handover.
+      #
+      # Measured on a Pixel 6a with a one-second watcher and no outer timeout:
+      #     t=0    lock=[18323]  accd=[18323]   the old daemon holds it
+      #     t=10   lock=[22840]  accd=[]        acc -t stopped it and wrote its own pid in
+      #     t=59   acc=no        accd=[24120]   acc -t dies exactly as the new daemon appears
+      # reported as exit 143, and as 137 on the run where the SIGKILL landed first.
+      #
+      # Everything the command does had already succeeded by then - the message printed, the switch
+      # was restored, the daemon came back - so the only casualty was the exit status, which every
+      # wrapper reads as "this was killed" and which hid the real code (10 = nothing to test).
+      #
+      # Blanking the file first means release-lock.sh's pid sanitiser sees an empty holder and
+      # signals nobody; closing fd 4 drops our flock so the incoming daemon takes it honestly rather
+      # than inheriting it. If the daemon then fails to start, an unheld lock is the safe direction:
+      # the next acc or accd invocation can take it, where a lock held by a dead pid strands them.
+      : > $TMPDIR/${id}.lock 2>/dev/null || :
+      exec 4>&- 2>/dev/null || :
+
       if $daemonWasUp; then
         if command -v setsid >/dev/null 2>&1; then
           setsid $TMPDIR/.accdt </dev/null >/dev/null 2>&1 &
@@ -952,9 +976,9 @@ case "${1-}" in
 
     set +e
     echo $$ > $TMPDIR/.testingsw 2>/dev/null || touch $TMPDIR/.testingsw
-    not_charging && enable_charging > /dev/null
+    _acc_nopromo=1; not_charging && enable_charging > /dev/null
 
-    not_charging && {
+    _acc_nopromo=1; not_charging && {
       # rc23: this printed "Ensure the charger is plugged" once and then spun on not_charging every
       # second, forever -- no timeout, no further output, no way out but Ctrl-C. Reported as
       # "acc -t doesn't auto-advance".
@@ -969,7 +993,23 @@ case "${1-}" in
       # purpose: present() resolves its node list against the daemon's working directory, and
       # `acc -t` does not set one, so calling it here reported "not plugged" on a phone that was
       # plugged in -- printing the one message this fix exists to stop printing.
+      # rc24: the ceiling is SECONDS, and it is read from the clock.
+      #
+      # It used to be a loop counter incremented once per pass, which is only the same thing if a
+      # pass costs a second. It does not: not_charging walks its own confirmation window, `for i in
+      # $(seq $_STI)` with _STI=35 one second apart, so a pass on a phone that is not charging costs
+      # about 36 seconds. Measured with ACC_T_WAIT=10 against a 4-second not_charging: the loop ran
+      # 56 seconds and then reported "Giving up after 10s". Both numbers the user ever sees - the
+      # progress line and the give-up line - were wrong by the same factor, and the default of 180
+      # meant closer to two hours than three minutes.
+      #
+      # _tstart is the reference; _tw is recomputed from it at the top of every pass. If date is
+      # unavailable _tstart stays empty and the old per-pass count is used, which is worse but never
+      # worse than not terminating.
       _tw=0; _twmax=${ACC_T_WAIT:-180}
+      _tstart=$(date +%s 2>/dev/null) || _tstart=
+      case "${_tstart:-x}" in ''|x|*[!0-9]*) _tstart=;; esac
+      _tsaid=-1; _tfirst=1
       # rc23e: ask with the kernel-status tie-break SUPPRESSED, or this guard does not hold.
       #
       # `acc -t` stops the daemon before it gets here, so in this process chDisabledByAcc is false and
@@ -988,15 +1028,25 @@ case "${1-}" in
       # here: is this pack actually taking current. Same idiom, and same reason, as the confirmation
       # in disable_charging. A phone that IS charging still reads Charging from its sign and falls
       # straight through, so nothing is slower for the case that works.
-      while { flip=off; not_charging; }; do
-        if [ "$_tw" = 0 ]; then
+      while { _acc_nopromo=1; not_charging; }; do
+        # Elapsed seconds, not passes. Recomputed here so the first pass already carries whatever
+        # not_charging just spent, which is most of the wait on an unplugged phone.
+        if [ -n "$_tstart" ]; then
+          _tnow=$(date +%s 2>/dev/null)
+          case "${_tnow:-x}" in ''|x|*[!0-9]*) : ;; *) _tw=$(( _tnow - _tstart ));; esac
+        fi
+        if [ "$_tfirst" = 1 ]; then
+          _tfirst=0
           if _t_plugged; then
             printf "Charger is plugged in, but the battery is not taking charge.\n"
             printf "If you are at or above your charge limit, raise it (or let the battery drain a little) so the test has something to measure.\n\n"
           else
             print_unplugged
           fi
-        elif [ "$(( _tw % 15 ))" = 0 ]; then
+        elif [ "$(( _tw - _tsaid ))" -ge 15 ] 2>/dev/null; then
+          # Not `_tw % 15`: elapsed time jumps by a whole pass at a time and would step straight
+          # over the multiple, so the progress line printed once and then never again.
+          _tsaid=$_tw
           printf "  still waiting for charging to start (%ss of %ss)... Ctrl-C to abort.\n" "$_tw" "$_twmax"
         fi
         if [ "$_tw" -ge "$_twmax" ] 2>/dev/null; then
@@ -1005,7 +1055,8 @@ case "${1-}" in
           exit $exitCode_
         fi
         sleep 1
-        _tw=$(( _tw + 1 ))
+        # Only the no-clock fallback still counts passes; with a clock, _tw is recomputed above.
+        [ -n "$_tstart" ] || _tw=$(( _tw + 1 ))
         set +x
       done
       eval "${_logOn:-:}"

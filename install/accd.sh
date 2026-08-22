@@ -592,8 +592,11 @@ if ! $_INIT; then
       # device loses discovery - it only stops the sweep landing on a charge that is nowhere near
       # the limit. The result is persisted, so this still happens exactly once per install.
       if [ -z "${chargingSwitch[0]-}" ] && probe_due; then
-        disable_charging
-        enable_charging
+        # rc24: defensive. set -e is suspended here today because is_charging is called from an if,
+        # but that safety belongs to the CALLER; a future plain call would inherit a daemon-killing
+        # pair. Two tokens.
+        disable_charging || :
+        enable_charging || :
       fi
     fi
 
@@ -855,7 +858,7 @@ if ! $_INIT; then
     # weak source, and while the pack is nearly full, so a single sample means nothing.
     case "${_ft:-}" in
       *HVDCP*|*PD*|*QC*)
-        if [ -n "${_fv:-}" ] && [ "${_fv:-0}" -lt 5500000 ] 2>/dev/null            && [ "$(read_status 2>/dev/null)" = Charging ]; then
+        if [ -n "${_fv:-}" ] && [ "$(_mv "${_fv:-0}")" -lt "${hvPeakMaxMv:-5500}" ] 2>/dev/null            && [ "$(read_status 2>/dev/null)" = Charging ]; then
           _lowV=$(( ${_lowV:-0} + 1 ))
           if [ "$_lowV" -eq 10 ]; then
             _wlog "contract collapsed: $_ft advertised, vbus $(( ${_fv:-0} / 1000 ))mV for 10 loops. A replug usually restores it. ACC is NOT re-negotiating: forcing detection is what collapses these."
@@ -958,7 +961,7 @@ if ! $_INIT; then
       # which is exactly the cadence it had before for the generic path.
       [ "$(du -k $log 2>/dev/null | cut -f 1)" -lt 256 ] 2>/dev/null || : > $log
 
-      # rc24: plug-transition trackers. Two of them, on purpose (rc24.1, B1 follow-up): a single
+      # rc24: plug-transition trackers. Two of them, on purpose (rc24, B1 follow-up): a single
       # online-derived edge let generic_rearm miss an input-cut replug (B1 itself), but collapsing
       # it onto present() the other way narrows native_unlatch's window instead -- a loop that saw
       # present=1/online=0 already counts as "was", so a later online 0->1 flip stops looking fresh
@@ -991,7 +994,7 @@ if ! $_INIT; then
         # rc23f: the stalled-supply aim is per PLUG too. .hvaim is its once-per-plug marker and
         # .hvfloor its consecutive-floor counter; both must go with the cable or a phone gets exactly
         # one repair attempt for the rest of the boot, which is the defect this pair exists to fix.
-        rm -f $TMPDIR/.hvaim $TMPDIR/.hvfloor $TMPDIR/.hvlost 2>/dev/null || :
+        rm -f $TMPDIR/.hvaim $TMPDIR/.hvfloor $TMPDIR/.hvlost $TMPDIR/.hvpeak $TMPDIR/.hvkicked 2>/dev/null || :
         # rc23e: give the polarity learn one fresh chance per cable event. .dpol_unstable is set after
         # two sign flips and read by set_dp as an unconditional `return 0`, so once set it froze _DPOL
         # for the rest of the boot -- and nothing under install/ ever removed it. A phone that latched a
@@ -1014,9 +1017,36 @@ if ! $_INIT; then
         { read -r _hvv < usb/voltage_now; } 2>/dev/null || :
         case "${_hvv:-x}" in
           ''|x|*[!0-9]*) : ;;
-          *) if [ "$_hvv" -ge 6000000 ] 2>/dev/null; then
+          *) # rc24 CONTRACT POLICY. Two changes, both about never renegotiating a contract we
+             # already won.
+             #
+             # 6.5V, not 6.0V. A QC3 contract under ~2A load was measured at 6433-6712mV on a Mi A3,
+             # so 6.0V sits inside the operating band of a HEALTHY supply. The latch must be set by
+             # a voltage no 5V supply can reach, and read as "we have one" ever after.
+             #
+             # And the PEAK for this plug is recorded, because that is what decides whether a kick
+             # is ever allowed: a plug that has been high once is a negotiated plug forever, however
+             # far it later sags.
+             # Normalise FIRST, store mV, compare mV. The raw node is microvolts on one of the two
+             # test phones and millivolts on the other.
+             _hvmv=$(_mv "$_hvv") || _hvmv=
+             _hvp=$(cat $TMPDIR/.hvpeak 2>/dev/null || echo 0)
+             case "${_hvp:-x}" in ''|*[!0-9]*) _hvp=0;; esac
+             [ -z "$_hvmv" ] || [ "$_hvmv" -le "$_hvp" ] 2>/dev/null || echo "$_hvmv" > $TMPDIR/.hvpeak 2>/dev/null || :
+             if [ -n "$_hvmv" ] && [ "$_hvmv" -ge "${hvLatchMv:-6500}" ] 2>/dev/null; then
                [ -f $TMPDIR/.hvcontract ] || : > $TMPDIR/.hvcontract 2>/dev/null || :
-             fi ;;
+             fi
+             # A high-voltage charger TYPE is a contract too, whatever this millisecond reads. A
+             # labelled HVDCP_3 sitting at 4.5-5.5V with current flowing is a working supply in a
+             # low-voltage phase, not a dead one: latch it and leave it alone.
+             for _tn in real_type usb_type type; do
+               [ -f "usb/$_tn" ] || continue
+               _hvt=$(cat "usb/$_tn" 2>/dev/null) || continue
+               case "$_hvt" in
+                 *HVDCP*|*PD*|*QC*|*hvdcp*|*pd*) [ -f $TMPDIR/.hvcontract ] || : > $TMPDIR/.hvcontract 2>/dev/null || :;;
+               esac
+               break
+             done ;;
         esac
 
         # rc23e: ONE way back from a contract that has actually COLLAPSED, without unplugging.
@@ -1057,19 +1087,27 @@ if ! $_INIT; then
         #     crossing the port, nothing is charging from the wall, whatever the pack is doing.
         if [ ! -f $TMPDIR/.hvrecover ] && ! ${chDisabledByAcc:-false} \
            && ! _ge_pause_cap 2>/dev/null && online 2>/dev/null; then
-          _hvin=
-          { read -r _hvin < usb/input_current_now; } 2>/dev/null || :
-          case "${_hvin:-x}" in ''|x|*[!0-9-]*) _hvin=;; esac
-          if [ -n "$_hvin" ] && [ "${_hvin#-}" -lt 50000 ] 2>/dev/null; then
+          # Whichever node this kernel has, in mA.
+          _hvin=$(_iin_ma) || _hvin=
+          if [ -n "$_hvin" ] && [ "$_hvin" -le "${hvDeadMa:-50}" ] 2>/dev/null; then
             _hvz=$(cat $TMPDIR/.hvzero 2>/dev/null || echo 0)
             case "${_hvz:-x}" in ''|*[!0-9]*) _hvz=0;; esac
             _hvz=$(( _hvz + 1 ))
             echo $_hvz > $TMPDIR/.hvzero 2>/dev/null || :
             if [ "$_hvz" -ge ${hvZeroPasses:-5} ] 2>/dev/null; then
-              : > $TMPDIR/.hvrecover 2>/dev/null || :
-              rm -f $TMPDIR/.hvcontract $TMPDIR/.hvzero 2>/dev/null || :
-              command -v _wlog >/dev/null 2>&1 \
-                && _wlog "input collapsed (${_hvin}uA in for ${_hvz} passes, present+online, pack not charging) - allowing one contract recovery this plug" || :
+              # rc24 CONTRACT POLICY: detect, LIFT, never re-negotiate. This used to clear
+              # .hvcontract and open the door to an apsd_rerun, and an APSD on a live QC plug is
+              # exactly what takes a Mi A3 from 9V to 4.4V - the outage this release exists to end.
+              # A collapsed input is repaired by raising the input CURRENT limit, which cannot
+              # disturb the voltage contract. .hvrecover stays as the once-per-plug marker for the
+              # lift so it cannot loop.
+              [ -f $TMPDIR/.hvrecover ] || {
+                : > $TMPDIR/.hvrecover 2>/dev/null || :
+                rm -f $TMPDIR/.hvzero 2>/dev/null || :
+                command -v _wlog >/dev/null 2>&1 \
+                  && _wlog "input collapsed (${_hvin}mA in for ${_hvz} passes) - lifting the input current limit; the voltage contract is left alone" || :
+                _hv_lift || :
+              }
             fi
           else
             rm -f $TMPDIR/.hvzero 2>/dev/null || :
@@ -1120,14 +1158,20 @@ if ! $_INIT; then
           rm -f $TMPDIR/.hvlost 2>/dev/null || :
         elif [ "${_lin#-}" -ge 500000 ] 2>/dev/null; then
           rm -f $TMPDIR/.hvlost 2>/dev/null || :
-        elif [ -n "$_lvb" ] && [ "$_lvb" -lt 6000000 ] 2>/dev/null; then
+        elif [ -n "$_lvb" ] && [ "$(_mv "$_lvb")" -lt "${hvLostMv:-6000}" ] 2>/dev/null; then
           _lvc=$(cat $TMPDIR/.hvlost 2>/dev/null || echo 0)
           case "${_lvc:-x}" in ''|*[!0-9]*) _lvc=0;; esac
           _lvc=$(( _lvc + 1 ))
           echo $_lvc > $TMPDIR/.hvlost 2>/dev/null || :
           if [ "$_lvc" -ge ${hvLostPasses:-5} ] 2>/dev/null; then
-            rm -f $TMPDIR/.hvcontract $TMPDIR/.hvlost 2>/dev/null || :
-            command -v _wlog >/dev/null 2>&1               && _wlog "contract lost ($(( _lvb / 1000 ))mV for ${_lvc} passes while plugged) - releasing the latch so a repair can be attempted" || :
+            # rc24 CONTRACT POLICY: a sag is not a lost contract, and this clear was the loaded gun.
+            # Sustained sub-6V while current still flows is what a QC3 supply looks like in a
+            # low-voltage phase; clearing the latch here let the next rekick fire an apsd_rerun at a
+            # live plug and renegotiate 9V down to 4.4V, which is the A3 outage. The latch now
+            # clears on ONE event only: the cable physically coming out. Kept as a log line so the
+            # condition is still visible in flight.log.
+            rm -f $TMPDIR/.hvlost 2>/dev/null || :
+            command -v _wlog >/dev/null 2>&1 && _wlog "supply low ($(_mv "$_lvb")mV for ${_lvc} passes while plugged) - contract latch HELD; only the input current limit may be lifted" || :
           fi
         else
           rm -f $TMPDIR/.hvlost 2>/dev/null || :
@@ -1191,7 +1235,7 @@ if ! $_INIT; then
         # collapsed state this repair exists for. The floor excluded its own target.
         # `present` and the sustain requirement are what keep this honest; re-detecting a genuinely
         # dead line is harmless and happens at most once per plug.
-        if [ -n "$_avb" ] && [ "$_avb" -lt 6000000 ] 2>/dev/null; then
+        if [ -n "$_avb" ] && [ "$(_mv "$_avb")" -lt "${hvLostMv:-6000}" ] 2>/dev/null; then
           _afc=$(cat $TMPDIR/.hvfloor 2>/dev/null || echo 0)
           case "${_afc:-x}" in ''|*[!0-9]*) _afc=0;; esac
           _afc=$(( _afc + 1 ))
@@ -1251,10 +1295,10 @@ if ! $_INIT; then
             # A high pre-read means a contract already exists: latch it and do nothing else.
             # Previously this branch simply fell through, leaving the contract unlatched until the
             # periodic check happened to catch it between load sags.
-            if [ "$_mcv" -ge 6000000 ] 2>/dev/null; then
+            if [ "$(_mv "$_mcv")" -ge "${hvLatchMv:-6500}" ] 2>/dev/null; then
               : > $TMPDIR/.hvcontract 2>/dev/null || :
             fi
-            if [ "$_mcv" -lt 6000000 ] 2>/dev/null; then
+            if [ "$(_mv "$_mcv")" -lt "${hvLatchMv:-6500}" ] 2>/dev/null; then
               # Release the input ceiling so detection is not measuring our own cap. High, and let
               # the driver clamp - the same rule the restore path uses.
               # Match on the SUPPLY NAME, not the whole path. The daemon is cd'd into
@@ -1268,13 +1312,24 @@ if ! $_INIT; then
                 case "${_mcf%/*}" in main|main-charger|mainchg|charger|gccd|bbc) :;; *) continue;; esac
                 write 5000000 "$_mcf" 0 || :
               done
-              for _mcf in */apsd_rerun; do
-                [ -w "$_mcf" ] && echo 1 > "$_mcf" 2>/dev/null || :
-              done
-              sleep 2
-              for _mcf in */rerun_aicl; do
-                [ -w "$_mcf" ] && echo 1 > "$_mcf" 2>/dev/null || :
-              done
+              # rc24 CONTRACT POLICY: aim-high goes through the same gate as every other caller.
+              # The lift above is always safe - it only raises a current limit. The APSD below is
+              # re-detection, and on a plug that has already negotiated it is the write that turns
+              # 9V into 4.4V. _hv_may_kick answers with the whole rule (no latch, no HV type, peak
+              # under 5.5V this plug, input current at zero, not already kicked, `acc -sk off`
+              # honoured), so a dead 5V SDP is still repaired and nothing else is touched.
+              if _hv_may_kick; then
+                : > $TMPDIR/.hvkicked 2>/dev/null || :
+                for _mcf in */apsd_rerun; do
+                  [ -w "$_mcf" ] && echo 1 > "$_mcf" 2>/dev/null || :
+                done
+                sleep 2
+                for _mcf in */rerun_aicl; do
+                  [ -w "$_mcf" ] && echo 1 > "$_mcf" 2>/dev/null || :
+                done
+              else
+                command -v _wlog >/dev/null 2>&1 && _wlog "aim: lifted the input limit, withheld re-detection (this plug has a contract or is not dead)" || :
+              fi
               # WATCH LONG ENOUGH TO SEE THE ANSWER. A QC/PD handshake is not finished when the
               # AICL write returns: it steps the voltage up over several seconds. Sampling once
               # after 3s caught the supply mid-transition and logged "4542mV -> 4340mV", a DROP,
@@ -1295,13 +1350,13 @@ if ! $_INIT; then
                 case "${_mcvn:-x}" in
                   ''|x|*[!0-9]*) : ;;
                   *) [ "$_mcvn" -gt "${_mcv2:-0}" ] 2>/dev/null && _mcv2=$_mcvn
-                     if [ "$_mcvn" -ge 6000000 ] 2>/dev/null; then _mcw=15; fi ;;
+                     if [ "$(_mv "$_mcvn")" -ge "${hvLatchMv:-6500}" ] 2>/dev/null; then _mcw=15; fi ;;
                 esac
               done
               # Won a contract? Latch it immediately, so the very next loop cannot re-kick it away
               # during a load sag before the periodic check above has run.
-              [ "${_mcv2:-0}" -ge 6000000 ] 2>/dev/null && { : > $TMPDIR/.hvcontract 2>/dev/null || :; }
-              command -v _wlog >/dev/null 2>&1 && _wlog "plug: aimed for best contract, $(( ${_mcv:-0} / 1000 ))mV -> $(( ${_mcv2:-0} / 1000 ))mV" || :
+              [ "$(_mv "${_mcv2:-0}")" -ge "${hvLatchMv:-6500}" ] 2>/dev/null && { : > $TMPDIR/.hvcontract 2>/dev/null || :; }
+              command -v _wlog >/dev/null 2>&1 && _wlog "plug: aimed for best contract, $(_mv "${_mcv:-0}")mV -> $(_mv "${_mcv2:-0}")mV" || :
             fi ;;
         esac
       fi
@@ -1980,7 +2035,7 @@ if ! $_INIT; then
       if [ "${_fcv:-x}" != x ]; then
         case "$_fcv" in
           ''|*[!0-9]*) : ;;
-          *) if [ "$_fcv" -ge 6000000 ] 2>/dev/null; then return 0; fi ;;
+          *) if [ "$(_mv "$_fcv")" -ge "${hvLostMv:-6000}" ] 2>/dev/null; then return 0; fi ;;
         esac
       fi
     done
@@ -2177,7 +2232,9 @@ if ! $_INIT; then
       # not_charging() consumes the global `flip` (flip_sw sets it, the next not_charging
       # eats it). This verification is an ad-hoc probe, NOT part of that handoff, so save
       # and restore it -- otherwise a pending flip context could be swallowed here.
-      _lbflip="${flip-}"; not_charging; _lbrc=$?; flip="$_lbflip"
+      _lbflip="${flip-}"
+      if not_charging; then _lbrc=0; else _lbrc=1; fi
+      flip="$_lbflip"
       if [ $_lbrc -eq 0 ]; then
         touch $TMPDIR/.leakcut
         warn_once_per leakcut 21600 "⚠️ ACC: your charging switch leaked past the ${capacity[3]:-?}% limit; holding a reversible input cut until the battery is back at the limit."

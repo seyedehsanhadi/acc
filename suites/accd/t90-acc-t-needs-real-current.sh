@@ -101,6 +101,12 @@ else
   case "$_cond" in
     *current_now*|*_t_taking*|*taking*)
       ok "the wait condition consults real current, not just not_charging" ;;
+    *_acc_nopromo=1*)
+      # rc24 replaced flip=off with a dedicated suppressor. flip=off worked, but `flip` also means
+      # "record this candidate in working-switches.log", so an interrupted wait left forged picker
+      # entries behind. _acc_nopromo suppresses the promotion without claiming a switch test is
+      # running, which is the same guard with none of the side effect.
+      ok "the wait condition suppresses the tie-break (_acc_nopromo=1), so a stale kernel status cannot walk past it" ;;
     *flip=off*)
       ok "the wait condition suppresses the tie-break (flip=off), so a stale kernel status cannot walk past it" ;;
     *) no "acc -t still gates on a bare 'while not_charging' (line ${_wait} of the stripped source) - with the daemon stopped both tie-break suppressors are off, so a stale kernel 'Charging' walks straight past this guard and the test runs on a phone taking zero current" ;;

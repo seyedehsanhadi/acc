@@ -41,11 +41,15 @@ MF=$execDir/misc-functions.sh
 # zero-or-more and matches both.
 body(){ sed -n "/^[ ]*$1()/,/^[ ]*}/p" "$2" | sed 's/^[[:space:]]*#.*//'; }
 
+# NOTE ON THE PATTERN. These checks look for a bus-voltage threshold, and rc24 spells it
+# `[ "$(_mv "$v")" -ge "${hvLatchMv:-6500}" ]` where rc23 spelled it `[ "$v" -ge 6000000 ]`. The
+# assertion is that a voltage test is present and correctly placed, not that it is written in
+# microvolts - pinning the literal made every one of these report the fix as a missing feature.
 # ---- 1: the guard must not depend on vendor nodes existing ----------------------------------------
 _fs=$(body fast_session "$AD")
 [ -n "$_fs" ] || { no "could not extract fast_session"; fin; }
 
-printf '%s' "$_fs" | grep -q '6000000' \
+printf '%s' "$_fs" | grep -qE '6000000|hvLostMv|hvLatchMv' \
   && ok "fast_session treats a negotiated voltage above the 5V floor as a live session" \
   || no "fast_session has no voltage test - it is blind on every phone with no vendor node (e.g. Mi A3)"
 
@@ -55,7 +59,7 @@ printf '%s' "$_fs" | grep -q 'voltage_now' \
 
 # Order matters: the voltage test has to run even when the vendor list is empty, which means it
 # cannot sit inside or after a loop over that list.
-_vline=$(printf '%s' "$_fs" | grep -n '6000000' | head -1 | cut -d: -f1)
+_vline=$(printf '%s' "$_fs" | grep -nE '6000000|hvLostMv|hvLatchMv' | head -1 | cut -d: -f1)
 _nline=$(printf '%s' "$_fs" | grep -n '_fcNodes' | head -1 | cut -d: -f1)
 if [ -n "$_vline" ] && [ -n "$_nline" ]; then
   [ "$_vline" -lt "$_nline" ] 2>/dev/null \
@@ -110,7 +114,7 @@ printf '%s' "$_rk" | grep -qE 'negotiated contract|contract is healthy'   && ok 
 # for. Fifth time a test in this set has matched prose about a defect instead of the defect - the
 # loop header `for _rn in */apsd_rerun` is the write itself and cannot appear in a message.
 _pre=$(printf '%s' "$_rk" | sed -n '1,/for _rn in \*\/apsd_rerun/p')
-printf '%s' "$_pre" | grep -q '6000000'   && ok "and that check runs BEFORE apsd_rerun is written"   || no "the health check does not precede the apsd_rerun write - it would fire first and check after"
+printf '%s' "$_pre" | grep -qE '6000000|hvLostMv|hvLatchMv'   && ok "and that check runs BEFORE apsd_rerun is written"   || no "the health check does not precede the apsd_rerun write - it would fire first and check after"
 
 # The guard must key on VOLTAGE ONLY. Requiring a healthy input limit as well is the hole the
 # first version leaked through: ACC's own cap drives the limit to 500mA, the guard then read the
@@ -152,7 +156,7 @@ _pl=$(sed -n '/AIM FOR THE BEST CONTRACT/,/^      fi$/p' "$AD" | sed 's/^[[:spac
 if [ -n "$_pl" ]; then
   printf '%s' "$_pl" | grep -q 'freshPlug'     && ok "the plug-time attempt is gated on a real plug transition"     || no "the plug-time attempt is not gated on freshPlug - it could fire every loop"
   printf '%s' "$_pl" | grep -q 'rekick-off'     && ok "and it honours acc -sk off"     || no "the plug-time attempt ignores acc -sk off"
-  printf '%s' "$_pl" | grep -q '6000000'     && ok "it only acts when the supply is on the 5V floor, leaving a good contract alone"     || no "no floor test - it would re-detect a contract that is already good"
+  printf '%s' "$_pl" | grep -qE '6000000|hvLostMv|hvLatchMv'     && ok "it only acts when the supply is on the 5V floor, leaving a good contract alone"     || no "no floor test - it would re-detect a contract that is already good"
 
   # Order is the whole trick: releasing the input ceiling BEFORE detection is what stops the
   # charger learning that our own cap is all this phone wants.

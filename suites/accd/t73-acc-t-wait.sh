@@ -78,11 +78,16 @@ _np=$(grep -c '^    print_unplugged$' "$AC")
 _r=$( cd / 2>/dev/null
       eval "$(sed -n '/_t_plugged() {/,/^ *}$/p' "$AC" | sed -n '1,12p')"
       _t_plugged && echo PLUGGED || echo UNPLUGGED )
+# THE TRUTH IS present, NOT online. An input-cut switch masks */online to 0 while the cable is
+# still in - that is the whole point of an input cut - so an online-only reading calls a plugged,
+# ACC-paused phone "unplugged" and then reports the shipped probe as wrong for agreeing with the
+# hardware. Caught on a Mi A3 sitting at its charge limit: usb/present=1, usb/online=0, and this
+# check failed against a _t_plugged that was answering correctly.
 _truth=UNPLUGGED
-for _f in /sys/class/power_supply/*/online; do
-  case "$_f" in */battery/*|*/bms/*) continue;; esac
+for _f in /sys/class/power_supply/*/present /sys/class/power_supply/*/online; do
+  case "$_f" in */battery/*|*/bms/*|*/maxfg/*) continue;; esac
   [ -f "$_f" ] || continue
-  read -r _v < "$_f" 2>/dev/null || continue
+  _v=; { read -r _v < "$_f"; } 2>/dev/null || :
   [ "$_v" = 1 ] && { _truth=PLUGGED; break; }
 done
 [ "$_r" = "$_truth" ] \
