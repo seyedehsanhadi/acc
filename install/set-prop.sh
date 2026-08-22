@@ -99,7 +99,32 @@ set_prop() {
         esac
       done
 
+      # mksh ARRAY SEMANTICS. `name=value` assigns to name[0] and leaves name[1..n] alone, so
+      # `export maxChargingCurrent=` clears the user's value and keeps every derived node entry:
+      #
+      #   maxChargingCurrent=(500 usb/current_max::500000::2200000 ...)
+      #   export maxChargingCurrent=
+      #   -> count is still 3, [0] is empty, and write-config publishes
+      #      maxChargingCurrent=( usb/current_max::500000::2200000 ...)
+      #
+      # apply_on_plug iterates ${maxChargingCurrent[@]}, not [0], so those survivors are re-applied
+      # on every loop and the cap can never be cleared. Measured on both test phones: after
+      # `acc -s maxChargingCurrent=`, usb/current_max and main-charger/current_max stayed pinned at
+      # 500000 with a config and a UI that both reported no limit, recoverable only by editing the
+      # config and restarting the daemon. The same mechanism strands maxChargingVoltage: a 4000mV
+      # cap cleared this way left a Mi A3 floating at 3.9V on a pack that charges to 4.4V.
+      #
+      # A cleared array key must be cleared WHOLE. Only the two derived-entry keys need this -- they
+      # are the only ones where [1..n] are generated rather than typed by the user.
       export "$@"
+
+      for _spa in "$@"; do
+        case "$_spa" in
+          maxChargingCurrent=|max_charging_current=|mcc=) maxChargingCurrent=() ;;
+          maxChargingVoltage=|max_charging_voltage=|mcv=) maxChargingVoltage=() ;;
+        esac
+      done
+      unset _spa
 
       # set_ch_curr REFUSES an out-of-range milliamp value (prints "[0-9999] mA only", returns
       # 11) - it never clamps. `|| :` swallowed that and left the refused scalar exported, so

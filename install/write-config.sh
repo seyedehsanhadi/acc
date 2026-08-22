@@ -23,6 +23,27 @@ ia="${idle_apps-${ia-${idleApps[@]}}}"
 lang=${lang-${l-${language}}}
 mcc="${max_charging_current-${mcc-${maxChargingCurrent[@]}}}"
 mcv="${max_charging_voltage-${mcv-${maxChargingVoltage[@]}}}"
+
+# HEAL A CONFIG THAT WAS CLEARED BY AN OLDER BUILD. In mksh `name=value` writes name[0] and leaves
+# name[1..n] alive, so every `acc -s maxChargingCurrent=` before the fix in set-prop.sh published
+#
+#   maxChargingCurrent=( usb/current_max::500000::2200000 main/current_max::500000::2000000)
+#
+# -- the user's value gone, the derived node entries surviving. apply_on_plug iterates the whole
+# array, so those survivors were re-applied on every loop and the cap could not be cleared: two test
+# phones stayed pinned at 500000 with a UI reporting no limit, and a Mi A3 sat at a 3.9V float on a
+# 4.4V pack after its voltage cap was "cleared".
+#
+# Fixing set-prop stops NEW corruption; it cannot repair a config already on disk. The leading value
+# is the whole meaning of these two keys -- with no value there is no cap, so the derived entries are
+# not just stale, they are a cap nobody asked for. Drop them here, at the one place every config
+# write passes through, so the first write after an upgrade publishes a clean key.
+# Detected on the FIRST TOKEN, not on a leading space: re-reading `( usb/current_max::... )` from
+# disk gives an array whose element 0 IS that node entry, because the space is only whitespace to the
+# parser. A real value is a bare number of mA or mV; anything else in first position means the value
+# was lost and only derived entries remain.
+case "${mcc%% *}" in ''|[0-9]*) : ;; *) mcc= ;; esac
+case "${mcv%% *}" in ''|[0-9]*) : ;; *) mcv= ;; esac
 mt=${max_temp-${mt-${temperature[1]}}}
 om="${off_mid-${om-$offMid}}"
 pbim=${prioritize_batt_idle_mode-${pbim-$prioritizeBattIdleMode}}
