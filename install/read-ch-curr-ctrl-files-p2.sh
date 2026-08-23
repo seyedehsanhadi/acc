@@ -22,10 +22,25 @@ currCtrl=$TMPDIR/ch-curr-ctrl-files
 # a cap is in force and the cap becomes the default, so releasing it writes the cap straight back.
 # Measured on a Mi A3 whose voltage snapshot was poisoned exactly this way, leaving two of three
 # nodes pinned at the test cap with a config that read "no limit".
-if [ -n "${maxChargingCurrent[0]-}" ] && [ -s $TMPDIR/ch-curr-ctrl-files ]; then
+#
+# Read from the CONFIG FILE, not the in-memory array. This runs at daemon init, before the config is
+# sourced, so the array is still empty here and an array test never fires -- measured: the guard was
+# in place and the snapshot was poisoned anyway. The file is the authority at this point.
+# The CANONICAL config path, not $config. By this point $config can be the daemon's own
+  # stripped tmpfs copy from a previous exit, which predates the cap the user just set -- so
+  # the guard read an empty value and stood down exactly when it was needed.
+  _capcfg=$(sed -n 's/^maxChargingCurrent=(//p' ${config:-} 2>/dev/null | cut -d' ' -f1 | tr -d ')')
+  # $config can be the daemon's own stripped tmpfs copy from a previous exit, which predates the
+  # cap the user just set -- so fall through to the canonical file rather than read an empty
+  # value and stand down exactly when the guard is needed. Trying $config first keeps this
+  # drivable from a fixture.
+  [ -n "${_capcfg:-}" ] || _capcfg=$(sed -n 's/^maxChargingCurrent=(//p' /data/adb/vr25/acc-data/config.txt 2>/dev/null | cut -d' ' -f1 | tr -d ')')
+if [ -n "${_capcfg:-}" ] && [ -s $TMPDIR/ch-curr-ctrl-files ]; then
   :
 elif [ ! -f $TMPDIR/.mcc-read ]; then
 
+  # Keep the outgoing snapshot; the merge at the end of this block never lets a default go DOWN.
+  [ ! -f $currCtrl ] || cp -f $currCtrl ${currCtrl}.prev 2>/dev/null || :
   rm $currCtrl ${currCtrl}_ 2>/dev/null || :
   . $execDir/ctrl-files.sh
   plugins=/data/adb/vr25/acc-data/plugins
@@ -80,6 +95,29 @@ elif [ ! -f $TMPDIR/.mcc-read ]; then
     $currentWorkaround \
       && grep -i batt $TMPDIR/.ctrl > ${currCtrl} \
       || cat $TMPDIR/.ctrl > ${currCtrl}
+
+    # A DEFAULT MUST NEVER GO DOWN.
+    #
+    # Guarding on "is a cap configured" is not enough, and two runs proved it. The poisoning window
+    # is the moment just AFTER a clear: the config already reads () so the guard correctly stands
+    # down, the daemon restarts, and discovery reads nodes that are still holding the cap because
+    # the release has not landed yet. It records the cap as the default, and from then on "restore
+    # to default" writes the cap back forever. Measured on a Mi A3:
+    #     battery/constant_charge_current::v000::1260000   <- the test cap
+    #     usb/current_max::v000::1450000                   <- a mid-release reading
+    #
+    # ACC only ever caps DOWNWARD, so for any node the highest value ever observed is the best
+    # estimate of its unconstrained ceiling. Merging on max makes the snapshot monotonic: a reading
+    # taken while capped can no longer overwrite a good one, and an already-poisoned entry heals the
+    # first time that node is seen uncapped.
+    if [ -f ${currCtrl}.prev ] && [ -s ${currCtrl} ]; then
+      awk -F'::' '
+        NR==FNR { if ($1 != "") { if (!($1 in d) || $3+0 > d[$1]+0) d[$1]=$3 } ; next }
+        { if ($1 in d && d[$1]+0 > $3+0) print $1"::"$2"::"d[$1]; else print $0 }
+      ' ${currCtrl}.prev ${currCtrl} > ${currCtrl}.m 2>/dev/null \
+        && [ -s ${currCtrl}.m ] && mv -f ${currCtrl}.m ${currCtrl} 2>/dev/null || :
+    fi
+    rm -f ${currCtrl}.prev ${currCtrl}.m 2>/dev/null || :
 
     # add curr and volt ctrl files to charging switches list
     #

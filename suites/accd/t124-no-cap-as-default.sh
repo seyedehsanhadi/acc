@@ -55,11 +55,14 @@ run_curr(){
   echo 500000 > $W/ps/usb/current_max
   echo 500000 > $W/ps/battery/constant_charge_current
   echo "usb/current_max::v000::2000000" > $W/t/$CCF
+  # The guard reads a config FILE (a shell variable cannot stand in for it), so give it one.
+  echo "maxChargingCurrent=(500 usb/current_max::500000::2000000)" > $W/t/fixture.conf
   {
     echo "TMPDIR=$W/t"
     echo "execDir=$_arm"
     echo "currentWorkaround=false"
     echo "maxChargingCurrent=(500 usb/current_max::500000::2000000)"
+    echo "config=$W/t/fixture.conf"
     echo "cd $W/ps"
     echo ". $_arm/read-ch-curr-ctrl-files-p2.sh"
     echo "head -1 $W/t/$CCF 2>/dev/null || echo GONE"
@@ -89,9 +92,11 @@ run_nocap(){
   rm -rf $W/t $W/ps 2>/dev/null; mkdir -p $W/t $W/ps/usb $W/ps/battery
   echo 2000000 > $W/ps/usb/current_max
   echo 3000000 > $W/ps/battery/constant_charge_current
+  echo "maxChargingCurrent=()" > $W/t/fixture.conf
   {
     echo "TMPDIR=$W/t"; echo "execDir=$_arm"; echo "currentWorkaround=false"
     echo "maxChargingCurrent=()"
+    echo "config=$W/t/fixture.conf"
     echo "cd $W/ps"
     echo ". $_arm/read-ch-curr-ctrl-files-p2.sh"
     echo "_c=\$(grep -c / $W/t/$CCF 2>/dev/null); case \"\${_c:-}\" in ''|*[!0-9]*) _c=0;; esac; echo \$_c"
@@ -151,8 +156,11 @@ fi
 echo
 echo "-- 6  can this suite still fail?"
 mkdir -p $W/mut
-# Neutralise the guard itself, leaving the file syntactically whole.
-sed '25s/.*/if false; then/' \
+# TWO independent defences now: the guard that refuses to re-record while a cap is set, and the
+# merge that refuses to lower a default. Disabling either alone leaves the other holding, which is
+# the point of having both -- so the mutation must defeat both to show case 1 can fail.
+sed -e 's/^if \[ -n "${_capcfg:-}" \].*then$/if false; then/' \
+    -e '/DEFAULT MUST NEVER GO DOWN/,/^    rm -f ${currCtrl}.prev/d' \
   "$ARM24/read-ch-curr-ctrl-files-p2.sh" > $W/mut/read-ch-curr-ctrl-files-p2.sh
 if cmp -s "$ARM24/read-ch-curr-ctrl-files-p2.sh" $W/mut/read-ch-curr-ctrl-files-p2.sh; then
   sk "could not mutate the discovery guard"

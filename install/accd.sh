@@ -1428,6 +1428,18 @@ if ! $_INIT; then
           else
             . $execDir/read-ch-curr-ctrl-files-p2.sh
           fi
+          # ...and then WRITE the expanded entries, which is a separate job from set_ch_curr.
+          #
+          # set_ch_curr above only fires while the config still holds a BARE value -- its guard is
+          # `[ -z "${maxChargingCurrent[1]-}" ]`, meaning "not yet expanded to node entries". Once
+          # expanded, re-applying is apply_on_plug's job, and apply_on_plug lives inside
+          # is_charging(), which this branch never reaches. So a cap set before a daemon restart was
+          # applied once and then silently dropped: measured on a Pixel 6a, one node held 1260000
+          # before an `acc -D restart` and none held it for the next three minutes after.
+          #
+          # is_charging() pairs set_ch_curr with apply_on_plug for exactly this reason; the native
+          # path needs the same pair.
+          apply_on_plug || :
           if [ -n "${maxChargingVoltage[0]-}" ]             && { [ -z "${maxChargingVoltage[1]-}" ] || [[ "${maxChargingVoltage[1]-}" = -* ]]; }             && grep -q / $TMPDIR/ch-volt-ctrl-files 2>/dev/null
           then
             set_ch_volt ${maxChargingVoltage[0]} || :
@@ -3477,10 +3489,23 @@ else
   # recorded is the very one the user asked to remove.
   #
   # So: if a cap is configured, keep whatever snapshot we already have and re-record nothing.
-  if [ -n "${maxChargingVoltage[0]-}" ] && [ -f $TMPDIR/ch-volt-ctrl-files ]; then
-    _wlog "volt ctrl-files: keeping the existing defaults, a ${maxChargingVoltage[0]}mV cap is applied" 2>/dev/null || :
+  # From the CONFIG FILE, not the array: this runs at init before the config is sourced, so an array
+  # test is always empty here and never fires. Measured -- the guard was present and the snapshot was
+  # poisoned regardless.
+  # The CANONICAL config path, not $config. By this point $config can be the daemon's own
+  # stripped tmpfs copy from a previous exit, which predates the cap the user just set -- so
+  # the guard read an empty value and stood down exactly when it was needed.
+  _vcapcfg=$(sed -n 's/^maxChargingVoltage=(//p' ${config:-} 2>/dev/null | cut -d' ' -f1 | tr -d ')')
+  # $config can be the daemon's own stripped tmpfs copy from a previous exit, which predates the
+  # cap the user just set -- so fall through to the canonical file rather than read an empty
+  # value and stand down exactly when the guard is needed. Trying $config first keeps this
+  # drivable from a fixture.
+  [ -n "${_vcapcfg:-}" ] || _vcapcfg=$(sed -n 's/^maxChargingVoltage=(//p' /data/adb/vr25/acc-data/config.txt 2>/dev/null | cut -d' ' -f1 | tr -d ')')
+  if [ -n "${_vcapcfg:-}" ] && [ -f $TMPDIR/ch-volt-ctrl-files ]; then
+    _wlog "volt ctrl-files: keeping the existing defaults, a ${_vcapcfg}mV cap is applied" 2>/dev/null || :
   else
   rm $TMPDIR/.mcc-read 2>/dev/null
+  [ ! -f $TMPDIR/ch-volt-ctrl-files ] || cp -f $TMPDIR/ch-volt-ctrl-files $TMPDIR/ch-volt-ctrl-files.prev 2>/dev/null || :
   : > $TMPDIR/ch-volt-ctrl-files_
   ls -1 $(ls_volt_ctrl_files | grep -Ev '^#|^$') 2>/dev/null | \
     while read file; do
@@ -3490,6 +3515,16 @@ else
         >> $TMPDIR/ch-volt-ctrl-files_
     done
   grep -q / $TMPDIR/ch-volt-ctrl-files_ || rm $TMPDIR/ch-volt-ctrl-files_
+  # Same monotonic rule as the current side: a recorded default may never go DOWN. The window this
+  # closes is the moment just after a clear, when the config already reads () but the nodes still
+  # hold the cap -- discovery then records the cap as the ceiling and no release can ever undo it.
+  if [ -f $TMPDIR/ch-volt-ctrl-files.prev ] && [ -s $TMPDIR/ch-volt-ctrl-files_ ]; then
+    awk -F'::' '
+      NR==FNR { if ($1 != "") { if (!($1 in d) || $3+0 > d[$1]+0) d[$1]=$3 } ; next }
+      { if ($1 in d && d[$1]+0 > $3+0) print $1"::"$2"::"d[$1]; else print $0 }
+    ' $TMPDIR/ch-volt-ctrl-files.prev $TMPDIR/ch-volt-ctrl-files_ > $TMPDIR/ch-volt-ctrl-files.m 2>/dev/null       && [ -s $TMPDIR/ch-volt-ctrl-files.m ] && mv -f $TMPDIR/ch-volt-ctrl-files.m $TMPDIR/ch-volt-ctrl-files_ 2>/dev/null || :
+  fi
+  rm -f $TMPDIR/ch-volt-ctrl-files.prev $TMPDIR/ch-volt-ctrl-files.m 2>/dev/null || :
   fi
 
 
