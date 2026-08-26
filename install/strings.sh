@@ -17,7 +17,8 @@ print_not_running() {
 }
 
 print_restart_accd() {
-  echo "Restart accd manually to exit this mode"
+  echo "This mode ends by itself once that level is reached."
+  echo "Unplug before then and it stays until accd restarts (pass -a to restart on unplug)."
 }
 
 print_restarted() {

@@ -617,16 +617,29 @@ case "${1-}" in
     # entire purpose is not charging to full. Same class as `acc 999` and `acc 12abc`, which are
     # already refused; -f was missed. AccA passes a plain number here (charge-once), so a valid
     # limit is unaffected, and `acc -f` with no argument still means 100 as documented.
-    for i in ${1-} ${2-}; do
-      [ -n "$i" ] || continue
-      case "$i" in
+    # rc24: this loop used to be `for i in ${1-} ${2-}` with every non-numeric token refused, which
+    # also refused the pass-through options the same help text documents one line above the typo it
+    # was written to catch:
+    #     acc -f 95 -s mcc=500     ->  Invalid argument for -f: -s
+    # so the `"$TMPDIR/acca" "$config" "$@"` call below had been unreachable. Found while testing
+    # the restore hook, not reported.
+    #
+    # The rc21 guarantee is untouched, and it is the reason this is a case order rather than a
+    # blanket relaxation: a typo in the CAPACITY position must still be refused, because `acc -f 8O`
+    # silently falling back to 100 force-charges the phone to full, which is the worst outcome a
+    # typo can have on a tool that exists to avoid full. A pass-through option is distinguishable
+    # from a typo'd number by the leading '-', so options end the loop and everything after them is
+    # handed to acca untouched, while 8O still has no leading '-' and still exits 2.
+    while [ -n "${1-}" ]; do
+      case "$1" in
         -a) auto=true; shift;;
+        -*) break;;
         *[!0-9]*)
-          echo "Invalid argument for -f: $i" >&2
-          echo "Usage: acc -f [capacity] [-a]     e.g. acc -f 90" >&2
+          echo "Invalid argument for -f: $1" >&2
+          echo "Usage: acc -f [capacity] [-a] [additional opts/args]     e.g. acc -f 90" >&2
           exit 2
         ;;
-        *) cap=$i; shift;;
+        *) cap=$1; shift;;
       esac
     done
     case ${cap:-100} in ''|*[!0-9]*) cap=100;; esac
@@ -655,6 +668,37 @@ case "${1-}" in
     resume_temp=
     temp_level=
     . $execDir/write-config.sh)
+
+    # THE WAY BACK. Everything above hands the daemon a throwaway config and execs it onto that
+    # file; the real config.txt is untouched but nothing ever loads it again. Without -a the
+    # override outlived the charge it was made for: `acc -f 100` left the daemon pinned at
+    # pause=100 until someone restarted it by hand, which is the worst resting state there is for
+    # a cell and the opposite of what the help promises ("Charge ONCE to a given capacity").
+    # AccA's "charge once to N%" button sends `acca -f N` with no -a, so every use of it stranded
+    # the phone. Reproduced on a Mi A3: after the button the live daemon was
+    #   accd.sh /dev/.vr25/acc/.acc-f-config      capacity=(5 101 88 90 false)
+    # with config.txt still reading 75 and no path back to it.
+    #
+    # -a was never the fix for this. It restores on UNPLUG, so a phone left plugged after hitting
+    # the target keeps the override even with -a set. The event that always happens is reaching
+    # the target, and that is what this hook watches.
+    #
+    # Config lines starting with ':' are shell, run every time the file is sourced, which is how -a
+    # has always worked. Three properties make a second one safe:
+    #   _ge_pause_cap is defined ONLY in accd.sh, so a front-end that also sources this file (acca,
+    #     during `acc -f 90 -s mcc=500`) skips the hook instead of exec'ing a daemon out of a
+    #     front-end. Same trick acca.sh:7-9 uses when it stubs at() and online() to no-ops.
+    #   capacity[3] is this file's pause level and is already assigned by the time a trailing ':'
+    #     line runs, so the comparator answers "at or above the -f target" with no new arithmetic,
+    #     no extra fork, and the garbage-input fail-safe t48 already pins.
+    #   the trailing `|| :` means a false test, or an exec that cannot find $TMPDIR/accd, leaves
+    #     the daemon running on the throwaway instead of aborting the source under set -eu.
+    # `exec $TMPDIR/accd` with no argument reloads $dataDir/config.txt, because config is not
+    # exported and the fresh shell takes the ':=' default in misc-functions.sh.
+    #
+    # Unplugging early still keeps the override unless -a was given, which is -a's documented job.
+    # That case now self-heals on the next charge: the target is reached, this fires, real config.
+    print '\n:; command -v _ge_pause_cap >/dev/null 2>&1 && _ge_pause_cap && exec $TMPDIR/accd || :' >> $config
 
     ! $auto || print '\n:; online || exec $TMPDIR/accd' >> $config
     # rc21 SECURITY: was `eval $TMPDIR/acca $config "$@"`. The pass-through options of
