@@ -67,6 +67,21 @@ grep -q 'cfg_parses' "$execDir/acca.sh"   && ok "acca sources the config parse-s
                                           || no "acca still has a bare . \$config under set -eu"
 
 # ---- 4. negotiation supplies: NOT a blanket rule ---------------------------
+# The four writes that reach usb/current_max are NOT one class, and only one of them is a skip:
+#
+#   apply_on_plug default   5000000 to clear ACC's cap        must write (else the cap is stranded)
+#   init restore            5000000 when the node is <=100mA  must write (the leftover 50000 case)
+#   rekick ICL lift         5000000 when ICL is really 0      must write (a skip makes it inert)
+#   uninstall :180          the node's recorded pre-ACC value must write (put back what ACC found)
+#   uninstall :237          5000000 by name on every supply   SKIPS usb, and should
+#
+# _hv_lift also stays off usb, and that is right: it lifts a LIVE negotiated port, which is a
+# different operation from clearing a cap ACC itself applied.
+#
+# The two "100mA" measurements in the tree are also different events: the A3's "5000000 over a
+# live 1.2A -> 200mA" was traced to a ~500 milliohm cable, while the bluejay "one write -> 100mA"
+# is asserted independently in _hv_lift and the rc24 changelog. Only a charger settles which rule
+# a LIFT needs; neither touches the cap-clear paths above.
 # rc24 forbids writing usb/ dc/ pc_port/ tcpm* from the UNINSTALLER'S name-glob sweep, and that
 # skip is deliberate and stays. It was briefly generalised into a predicate applied to every
 # RELEASE path too, and that was wrong -- the code's own measurements say so:
