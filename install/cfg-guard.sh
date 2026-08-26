@@ -48,8 +48,21 @@ cfg_srcsafe() {
 #
 # write-config clamps anything outside the documented ranges to 80 and drops a non-numeric value
 # entirely, so without this the number on screen is not the number in force and nothing says so.
-# Measured on a Mi A3: a non-numeric pause capacity also moved shutdown_capacity to 0, so garbage
-# in one field disabled protection in another.
+# Measured on a Mi A3 running rc22, with the front-end reporting success every time:
+#
+#     acc -s pause_capacity=999  ->  exit 0, prints the tick, stores 80
+#     acc -s pause_capacity=101  ->  exit 0, prints the tick, stores 80
+#     acc -s pause_capacity=abc  ->  exit 0, prints the tick, stores 75
+#
+# A non-numeric pause capacity also moved shutdown_capacity to 0, so garbage in one field disabled
+# protection in another.
+# This is the more important of the two front-end paths: `-s key=value` is what AccA sends for
+# every setting the app writes, and what the daemon uses internally. write-config's own clamp
+# stays exactly as it is -- it is the backstop for a corrupt config FILE, not for a user command.
+#
+# Ranges are the documented ones and match acc.sh exactly: percent, or millivolts. An EMPTY value
+# is allowed through untouched: clearing a key is a legitimate operation and the daemon relies on
+# it.
 cfg_check_kv() {
   case "$1" in
     # ARRAYS in the config. Assigning one as a scalar leaves write-config reading ${capacity[0]} as
@@ -64,6 +77,10 @@ cfg_check_kv() {
       echo "  acc 75 70    (shortcut for pause and resume capacity)" >&2
       return 2
     ;;
+    # REFUSE an out-of-range capacity, the way the shorthand `acc 999` already does. rc21 added
+    # that check to the shorthand only, so the -s form stayed the "success tick over a value you
+    # did not ask for" that the shorthand fix exists to stop.
+    #
     # cooldown_capacity is deliberately absent: it uses 101 to mean "disabled", a different domain
     # that this rule would wrongly reject.
     pause_capacity=*|resume_capacity=*|shutdown_capacity=*)
