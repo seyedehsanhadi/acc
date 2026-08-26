@@ -1686,7 +1686,18 @@ config_=$config
 # front-end had nothing: `acc -i`, `acc -s` and `acc -D` all died on the very file a user would
 # run acc to repair. Deliberately NOT folded into accd's _srccfg -- that one is on the per-loop
 # hot path and is already tested; this is the same three lines without its bookkeeping.
-. $execDir/cfg-guard.sh
+# Degrade rather than die if the file is missing. acca runs under `set -eu`, so a bare `.` of an
+# absent file kills the process -- and an upgrade that did not fully refresh the module directory
+# would then break every AccA call, with `acca -s` exiting 127 on an undefined cfg_check_kv. The
+# fallbacks reproduce the pre-guard behaviour exactly: no parse test, a plain source, no value
+# check. Worse than having the guards, far better than a front-end that cannot run.
+if [ -f $execDir/cfg-guard.sh ]; then
+  . $execDir/cfg-guard.sh
+else
+  cfg_parses() { [ -f "$1" ]; }
+  cfg_srcsafe() { . "$1" 2>/dev/null || :; }
+  cfg_check_kv() { return 0; }
+fi
 
 
 srccfg_try() {
