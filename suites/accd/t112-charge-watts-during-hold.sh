@@ -77,6 +77,21 @@ j=$(say 5000 20 -300000 3700000 Discharging 300 40)
 [ "$(_f "$j" watts)" = null ] && ok "noise floor: 20 mA input ignored" \
                               || no "noise floor: watts was $(_f "$j" watts), expected null"
 
+# --- 4b. a suspended input must not report its stale current -----------------
+# Measured on a Mi A3 with input_suspend=1: usb/input_current_now still read 2084 mA while
+# usb/online, usb/current_max and usb/input_current_settled were all 0. The kernel never clears
+# that node on a cut, so the last value before the cut sits there indefinitely.
+command -v _se_gate_ma >/dev/null 2>&1 || { no "_se_gate_ma not defined"; fin; }
+_se_gate_ma 0 2084; [ "$_segma" = 0 ] && ok "offline supply: stale 2084 mA zeroed"                                       || no "offline supply: reported $_segma mA from a dead input"
+_se_gate_ma 1 1994; [ "$_segma" = 1994 ] && ok "online supply: reading passes through"                                          || no "online supply: mangled 1994 to $_segma"
+_se_gate_ma 0 null; [ "$_segma" = null ] && ok "offline with no reading stays null"                                          || no "offline null became $_segma"
+# a device with no online node has never been gated and must not start reading 0
+_se_gate_ma "" 1500; [ "$_segma" = 1500 ] && ok "no online node: reading trusted"                                           || no "no online node: reading became $_segma"
+
+# and end to end: an offline input yields no wattage, not a phantom one
+j=$(say 8440 0 470000 3780000 Discharging 280 27)
+[ "$(_f "$j" watts)" = null ] && ok "held with a suspended input: no phantom wattage"                               || no "held: invented $(_f "$j" watts) W from a suspended input"
+
 # --- 5. the battery-side fallback stays charging-only -----------------------
 # No input nodes, but charging: the old approx path must still work.
 j=$(say null null 2000000 4000000 Charging 300 50)

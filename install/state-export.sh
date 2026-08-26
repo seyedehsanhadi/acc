@@ -488,7 +488,24 @@ _se_input() {
     *) va="$v"; [ "$va" -ge 100000 ] 2>/dev/null && v=$(( v / 1000 ));;
   esac
   _se_ma "$c"; c=$_sema
+  # A current reading only means something while that supply is actually online. Measured on a Mi
+  # A3 with input_suspend=1: usb/input_current_now still read 2084 mA while usb/online,
+  # usb/current_max and usb/input_current_settled were all 0 -- a value left over from before the
+  # cut, which the kernel never clears. Taken at face value it turns a suspended input into "2.1 A,
+  # 18 W" from a charger delivering nothing. The voltage stays as read: the cable really is sitting
+  # at 8.4 V, and that is worth showing.
+  ca=1
+  [ -n "$cf" ] && [ -r "${cf%/*}/online" ] && { { read -r ca < "${cf%/*}/online"; } 2>/dev/null || ca=1; }
+  _se_gate_ma "$ca" "$c"; c=$_segma
   printf '"input":{"voltageMv":%s,"currentMa":%s}' "$(_se_num "$v")" "$(_se_num "$c")"
+}
+
+# Zero a current reading whose supply is offline. Split out so it can be exercised without a
+# charger: $1 = the supply's online flag (anything non-numeric counts as online, since a device
+# with no online node has never been gated), $2 = the mA reading. Sets $_segma.
+_se_gate_ma() {
+  _segma="$2"
+  case "$1" in 0) [ "$2" != null ] && _segma=0;; esac
 }
 
 
