@@ -127,7 +127,7 @@ else
 fi
 _pid=$(daemon_pid)
 [ -n "$_pid" ] && ok "daemon $_pid" || { echo ABORT:no_daemon; exit 1; }
-[ "$(st_now)" != Charging ] && ok "status $(st_now)" || no "Charging unplugged"
+if [ "$_already" = yes ]; then sk "status is Charging, but the phone started plugged - this case only measures an unplugged phone"; else [ "$(st_now)" != Charging ] && ok "status $(st_now)" || no "Charging unplugged"; fi
 
 _i0=$(batt_i); _i0=${_i0#-}
 _sign0=$(batt_i)

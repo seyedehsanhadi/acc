@@ -1,7 +1,7 @@
 #!/system/bin/sh
-# rc25-acc-vs-thermal.sh - does ACC slow charging, or does the pack temperature?
+# rc24-acc-vs-thermal.sh - does ACC slow charging, or does the pack temperature?
 #
-#   su -c 'sh /data/local/tmp/rc25-acc-vs-thermal.sh'
+#   su -c 'sh /data/local/tmp/rc24-acc-vs-thermal.sh'
 #
 # START IT PLUGGED AND CHARGING, with no cap configured.
 #
@@ -24,7 +24,7 @@
 #   If ACC throttles, OFF beats ON inside the same bin, repeatably.
 #   If it is thermal, current tracks temperature and the ACC state does not matter.
 
-ID=rc25-acc-vs-thermal
+ID=rc24-acc-vs-thermal
 PS=/sys/class/power_supply
 W=/data/local/tmp/acctherm
 WIN=${WIN:-150}

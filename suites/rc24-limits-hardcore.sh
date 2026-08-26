@@ -1,7 +1,7 @@
 #!/system/bin/sh
-# rc25-limits-hardcore.sh - the charging limits, end to end, on a live plug.
+# rc24-limits-hardcore.sh - the charging limits, end to end, on a live plug.
 #
-#   su -c 'sh /data/local/tmp/rc25-limits-hardcore.sh'
+#   su -c 'sh /data/local/tmp/rc24-limits-hardcore.sh'
 #
 # START IT PLUGGED AND CHARGING. Every case needs current actually flowing.
 #
@@ -24,7 +24,7 @@
 #       on every loop, so a cap could not be released
 #   plus the edge cases the two of them create between them.
 
-ID=rc25-limits-hardcore
+ID=rc24-limits-hardcore
 P=0; F=0; S=0
 ok(){ P=$((P+1)); echo "  PASS  $*"; }
 no(){ F=$((F+1)); echo "  FAIL  $*"; }

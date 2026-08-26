@@ -8,6 +8,37 @@ Community fork of VR-25's ACC, maintained by seyedehsanhadi.
 
 Changes since the fork baseline (v2025.5.18-stable.6.5):
 
+**v2025.5.18-6.5.1-rc24 (202505333)**
+
+Nobody reported a fault in rc23. Everything below was found by testing it, so these are latent
+problems rather than a queue of complaints, and most of them need a particular charger, kernel or
+install path to show up at all.
+
+Fixed
+- A 9 V charger no longer collapses to about 4.4 V shortly after you plug it in. ACC read a live, negotiated supply as unnegotiated and re-ran USB detection on it. Voltage and current are now normalised before any comparison, because the same kernel path reports microvolts on one phone and millivolts on another, and the contract bar moved from 6.0 V to 6.5 V, which is above the operating band of a healthy 5 V supply.
+- A charger that has once reached high voltage is treated as negotiated for the rest of that plug, however far it later sags. A high-voltage label (HVDCP, PD, QC) counts on its own. Only unplugging the cable clears it.
+- All charger re-detection goes through a single gate that has to satisfy six conditions at once, and each plug gets one repair attempt, never two. Previously every caller invented its own way around the check, and those escapes were the fault.
+- A stalled charger is answered by lifting its input current limit, which cannot disturb a voltage contract, instead of by re-detecting the charger.
+- Your charge limit is no longer silently absent after install. The installer reported the exit code of a fork rather than of the daemon, so a daemon that never came up looked like a successful install and the phone charged to 100% with nothing to show it was wrong.
+- The limit can no longer stop being enforced part-way through a session, from an abort inside the first-install probe or the leak backstop taking the daemon with it.
+- The USB port no longer drops to roughly 100 mA on a good charger. Releasing a current ceiling used to write the negotiation side of the port; it now writes charger-owned supplies only, through the normal write path, so the blacklist and the ledger apply.
+- Uninstalling ACC no longer leaves the phone barely charging, for the same reason.
+- Charging no longer renegotiates every time it resumes from a pause, which cost you fast charge after the first pause of the session.
+- Plugging in charges again on phones whose switch is an input cut. The re-arm gated on a node that an input cut masks to zero while the cable is still in.
+- No more five minutes of "not charging" before it starts: the candidate sweep that ran as the resume path when no switch was configured is now bounded.
+- An untried candidate can no longer end up used as your configured switch, where a voltage float ceiling stands in for a pause and the limit is never enforced.
+- Fast charging survives. A write that already held the right value was re-asserted five more times, which re-triggered input current limiting and the charge pump.
+- Clearing a current limit no longer strands the phone at 500 mA. The restore replayed a default snapshotted from whenever ACC first saw the node, which on a laptop port is 500000.
+- A collapsed charger is repaired on phones that report microamps. 5353 µA was read as five amps, so the detector never fired.
+- `acc -t` gives up after the time it says it will. The wait counted loop passes, and a pass costs about 36 seconds on an unplugged phone, so the three-minute default ran closer to two hours.
+- `maxChargingCurrent` works on phones with a firmware charge limit. It was accepted, stored and displayed while nothing was ever written; a reporter's Pixel 4a 5G had been running a 925 mA limit that had never done anything. The firmware-limit branch returned before the charging-current and charging-voltage limits were reached at all.
+- Clearing a charging limit removes its node entries instead of leaving them behind and continuing to apply them, and an applied cap is never recorded as the node's own default, so a cap can be released and applied again on any phone.
+- The diagnostic bundle no longer accuses a working switch on phones with a firmware limit, and it attaches the kernel log from an abnormal reboot that it advertises in its own index.
+- "Show config" works in AccA, and a config value containing a command substitution is stored rather than run.
+
+Note
+- Almost every change here makes ACC do less: do not renegotiate, do not write the negotiation side, fail closed when a supply cannot be proven dead, bound the sweep. The price is a rarer missed repair, where a stalled charger that rc23 might have kicked back to life is answered only by lifting its input current limit.
+
 **v2025.5.18-6.5.1-rc23 (202505331)**
 
 Fixed

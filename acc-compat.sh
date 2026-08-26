@@ -1,7 +1,7 @@
 #!/system/bin/sh
 
 # AMPS - Adaptive Multi-device Probe & Selector.
-V=7.2.4
+V=7.2.9
 export LC_ALL=C LANG=C
 case "${1:-}" in --selftest|--version) _STONLY=1;; esac
 SUPER=1; UNKNOWN=0
@@ -9,6 +9,36 @@ case "$*" in *--unknown*) UNKNOWN=1; SUPER=1;; esac
 MODE=quick
 case "$*" in *--complete*|*--all*|*--deep*) MODE=complete;; *--quick*|*--fast*) MODE=quick;; esac
 WANT_UNPLUG=0; case "$*" in *--unplug*|*--accurate*) WANT_UNPLUG=1;; esac
+# 7.2.9: the low-battery warning told an UNPLUGGED run "you're plugged in so charging offsets the
+#        short drain tests" -- stated unconditionally, and the advice is the opposite one when
+#        there is no charger. Found by running the whole script with no cable and reading what
+#        it actually said.
+# 7.2.8: audit of every LEVELOK consumer, not just the ones that were reported. The RECOMMENDED
+#        pick took the FIRST entry unfiltered, so a read-only node could be recommended as a
+#        switch; two report branches listed (ro) entries under wording that says the node
+#        ACCEPTS values; and five more sites re-derived the filter by hand. LEVELOK now has
+#        exactly two named views -- level_writable (took a value) and level_enf (enforces) --
+#        and every consumer uses one of them.
+# 7.2.7: the fourth and last copy of "gate set before the router decided" -- firmware-combo
+#        still preset cheld, so a refused verdict spent a resume wait AND suppressed the
+#        pair-combo layer that should run when nothing held. The Deep "ALL WORKING SWITCHES"
+#        list printed LEVELOK raw, advertising (ro)/(accepts) level nodes as working. And the
+#        combo engine admitted only trusted NAMES while 6c/SUPER already test vendor nodes by
+#        shape, so a pair that only holds together could never be built.
+# 7.2.6: the combo minimizer existed twice and only one copy got 7.2.5's slow-node re-check, so
+#        the teach path still dropped a required node after a single 6s look. There is now one
+#        minimize_combo(). resume_check is gated on the ROUTER accepting the verdict rather
+#        than on the hold alone, so a refused NOT-HELD/THROTTLE no longer spends minutes
+#        waiting to re-arm a node that was never recorded. level_enf emits one label per line
+#        instead of gluing them, and the third hand-rolled copy of that filter now calls it.
+# 7.2.5: verdict routing. A verdict that is not a hold (NOT-HELD from the coulomb veto, or a
+#        THROTTLE) used to fall through route_hit/route_stab's `*)` arm and be recorded as a
+#        working CUT, config line and all. Both routers now refuse it, and GENHITS/BUILT only
+#        record a hit the router accepted. chg_now no longer takes a status string for a
+#        current, the trickle window is a THROTTLE rather than a CUT, label_path strips any
+#        [TAG] prefix, level_enf is the single definition of "a level node that enforces",
+#        present_now waits for IDLE to be learned, 4c tests grouped switches, and the
+#        classifiers moved above --selftest so 23 new cases can reach them.
 # 7.2.4: --unplug calls itself "Highest-accuracy (Deep + unplug)", estimates 10-20 minutes and
 # refuses every early exit -- while running on quick's caps and quick's deadline. Either the label
 # or the budget was wrong; the label is what the user chose, so give it Deep's budget.
@@ -47,7 +77,7 @@ SNAP="$BK/snap.tsv"; DISC="$BK/disc.txt"; SNLIST="$BK/snlist"
 SCHG="$BK/s_chg.tsv"; SUNP="$BK/s_unplug.tsv"; SHELD="$BK/s_held.tsv"; GENC="$BK/gen.tsv"
 POLL=3; SETTLE=4; TO=5; MAXSEC=1020; MAX_NEW=20; MAX_CURR=10; MAX_GEN=12
 DID=0; RESTORED=0; ACTIVE=1; SKIPALL=0; WARN=
-BYPASS=; BYPASS_HELD=; LONGOK=; CUT=; DRAIN=; THROTTLE=; LEVELOK=; REASSERT=; WORKING=; NEWHITS=; GENHITS=; SUPERHITS=; ADDLINES=
+BYPASS=; BYPASS_HELD=; LONGOK=; CUT=; DRAIN=; THROTTLE=; NOTHELD=; LEVELOK=; REASSERT=; WORKING=; NEWHITS=; GENHITS=; SUPERHITS=; ADDLINES=
 STABMAP=; LEAKY=; STAB=
 RESUMES=; STUCKS=; CFG_BYPASS=; CFG_CUT=; CFG_DRAIN=; CFG_LEVEL=
 ENGDUMPED=0; OBS_UNPLUG=0; OBS_ENGAGE=0; EXTRA_DIRS=""
@@ -438,6 +468,14 @@ read_st(){ rd "$BATT/status" | sed -n '1p' | pclean; }
 san(){ local v; _s="$1"; case "$_s" in +*) _s="${_s#+}";; esac; _sg=; case "$_s" in -*) _sg=-; _s="${_s#-}";; esac; case "$_s" in ''|*[!0-9]*) echo 0; return;; esac; while :; do case "$_s" in 0[0-9]*) _s="${_s#0}";; *) break;; esac; done; [ "$_s" = 0 ] && _sg=; echo "$_sg$_s"; }
 abs(){ v="${1#-}"; case "$v" in ''|*[!0-9]*) echo 0;; *) echo "$v";; esac; }
 sgn(){ case "$1" in -*) echo n;; *) echo p;; esac; }
+# is_charging/is_idle are pure numeric predicates over THR/IDLE/CHGDIR and belong with abs/sgn.
+# They sat below the scan body, which put them out of reach of --selftest -- the same structural
+# reason the routing defects went untested.
+is_charging(){ local c m; c="$1"; case "$c" in ''|*[!0-9-]*) echo 1; return;; esac
+  m="${c#-}"; [ "$m" -gt "$THR" ] 2>/dev/null || { echo 0; return; }
+  [ "$(sgn "$c")" = "$CHGDIR" ] && echo 1 || echo 0; }
+is_idle(){ local bct bd bs bv m; m="$(abs "$1")"; [ "$m" -le "$IDLE" ] 2>/dev/null && echo 1 || echo 0; }
+
 
 _norm(){ case "$2" in
     inverted) case "$1" in -*) printf '%s\n' "${1#-}";; 0) echo 0;; *) printf '%s\n' "-$1";; esac;;
@@ -458,6 +496,51 @@ classify_state(){ _csc="$(_norm "$3" "$4")"; _csp=0; { [ "$1" = 1 ] || [ "$2" = 
     -*) if [ "$2" = 1 ] && [ "${_csm:-0}" -gt "$5" ] 2>/dev/null; then echo DRAIN; else echo CUT; fi;;
     *)  if [ "${_csm:-0}" -gt "$5" ] 2>/dev/null; then echo CHARGING
         elif [ "$2" = 1 ]; then echo BYPASS; else echo CUT; fi;; esac; }
+
+# LEVELOK collects "$lbl(ro)" for a read-only level node and "$lbl(accepts)" for one that took the
+# value without ever enforcing it. Neither is a switch. Every caller that asks "do we already have a
+# level switch?" must ask about the ENFORCING ones only.
+# ONE combo minimizer, shared by both builders. It existed twice, and when the slow-node re-check
+# was added only one copy received it -- the other went on dropping a required node after a single
+# 6s look and handing ACC a grouped line that does not hold. $1 = tsv of "node<TAB>on<TAB>off";
+# sets $minimal. A node is only called optional once the hold has survived a real window without
+# it, so a slow actuator is kept rather than minimised away.
+minimize_combo(){
+  minimal=""
+  while IFS="	" read -r p von voff; do
+    over && { minimal="$minimal$p $von $voff "; continue; }
+    wr "$p" "$von"
+    sleep 6
+    if [ "$(chg_now)" = 1 ]; then
+      wr "$p" "$voff"; minimal="$minimal$p $von $voff "
+      log "    $p : REQUIRED (re-enabling it resumed charging)"
+      sleep 2
+    else
+      _mw=0
+      while [ "$_mw" -lt 12 ] && [ "$(chg_now)" = 0 ]; do sleep 3; _mw=$((_mw+3)); done
+      if [ "$(chg_now)" = 1 ]; then
+        wr "$p" "$voff"; minimal="$minimal$p $von $voff "
+        log "    $p : REQUIRED (charging resumed after ~$(( _mw + 6 ))s -- slow node, kept)"
+        sleep 2
+      else
+        log "    $p : not needed (hold persisted through a $(( _mw + 6 ))s re-check)"
+      fi
+    fi
+  done < "$1"
+  [ -n "$minimal" ] || { minimal="$(awk -F'	' '{printf "%s %s %s ", $1, $2, $3}' "$1")"
+    log "    (minimization inconclusive -- keeping the full set)"; }
+}
+
+# Emitted ONE PER LINE. It used to strip the newline, gluing two enforcing labels into
+# "nodeCnodeD" -- harmless while every caller only asked "is this empty?", but wrong the moment one
+# wants to name the node. Labels contain spaces, so the line is the only safe separator.
+# Not read-only: took a value at least once. Weaker than level_enf, and the right view whenever
+# the wording says the node ACCEPTS values -- a "(ro)" entry never did.
+level_writable(){ printf '%s' "${LEVELOK:-}" | tr '|' '
+' | sed '/^$/d' | grep -v '(ro)$'; }
+
+level_enf(){ printf '%s' "${LEVELOK:-}" | tr '|' '
+' | sed '/^$/d' | grep -v '(ro)$' | grep -v '(accepts)$'; }
 
 classify_unheld(){
   _cuf="${1#-}"; case "$_cuf" in ''|*[!0-9]*) _cuf=0;; esac
@@ -619,6 +702,137 @@ conf_resume(){ _crc="$1"; _crl="$2"; _crr="$3"
 unit_pick(){ [ "${2:-0}" = 1 ] && { printf '%s' "$1"; return; }
   case "${3:-}" in uA*|microamp*) printf uA;; mA*|milliamp*) printf mA;; *) printf '%s' "$1";; esac; }
 
+# 7.2.5: classify_held, route_hit and label_path were defined in the MIDDLE of the execution
+# flow -- after the banner, and label_path after the live layers had already run -- so nothing
+# that runs before the scan could call them. That is a large part of why every routing and
+# labelling defect in 7.2.4 shipped untested. They reference globals only at call time, so
+# they belong here with the other pure helpers, where --selftest can reach them.
+
+classify_held(){
+  local cin onl v
+  if [ "$BLINDV" = 1 ]; then
+    [ "$BL_ONLINE" = 0 ] && { echo CUT-input; return; }
+    if ex "$BATT/charge_counter" && [ -n "$(read1 "$BATT/charge_counter")" ]; then
+      _bcc0="$(san "$(read1 "$BATT/charge_counter")")"
+      sleep 4
+      _bcc1="$(san "$(read1 "$BATT/charge_counter")")"
+      _bccd=$(( ${_bcc1:-0} - ${_bcc0:-0} ))
+      _bccda="${_bccd#-}"
+      [ "$_bccd" -lt -500 ] 2>/dev/null && { echo DRAIN; return; }
+      if [ "${_bccda:-99999}" -lt 500 ] 2>/dev/null; then
+        if online_now && [ -n "$CHGIN" ] && ! chgin_low; then echo BYPASS; else echo CUT; fi
+        return
+      fi
+      # 7.2.4: a counter that ROSE means the pack took charge, so the switch did not hold.
+      # The blind path tested the counter for a fall and for flatness and had no arm for a rise, so
+      # a rise fell through to the unconditional `echo CUT` below. On a phone with no usable current
+      # sensor the coulomb counter is the only honest measurement in the whole path -- it was read,
+      # found to contradict the hold, and then discarded in favour of the status/voltage inference
+      # that produced the hold in the first place.
+      [ "$_bccd" -gt 500 ] 2>/dev/null && { echo NOT-HELD; return; }
+    fi
+    case "$(read_st)" in Discharging|discharging) [ "${WEAK_CHARGER:-0}" = 1 ] || { echo DRAIN; return; };; esac
+    echo CUT; return
+  fi
+  online_now || { echo CUT-input; return; }
+  if [ "${WEAK_CHARGER:-0}" != 1 ] && [ "$(sgn "$CL")" != "$CHGDIR" ] && [ "$(abs "$CL")" -gt "$IDLE" ] 2>/dev/null; then echo DRAIN; return; fi
+  if [ "$(is_idle "$CL")" = 1 ]; then
+    onl=1; online_now || onl=0
+    cin=0; [ -n "$CHGIN" ] && { v="$(abs "$(san "$(read1 "$CHGIN")")")"; [ "$v" -gt "$IDLE" ] 2>/dev/null && cin=1; }
+    if [ "$onl" = 0 ]; then echo CUT-input
+    elif [ "$cin" = 1 ]; then echo BYPASS
+    else echo CUT; fi
+    return
+  fi
+  # Everything reaching here is ABOVE idle and BELOW the charging threshold -- classify_unheld
+  # already calls that exact window THROTTLE. Calling it CUT sold a node that merely slows charging
+  # as one that stops it, and 24-48s of trickle stays under the coulomb veto.
+  [ "$(abs "$CL")" -le "${THR:-0}" ] 2>/dev/null && { echo THROTTLE; return; }
+  echo CUT; }
+
+# on_sane must be defined before route_hit, which calls it: with it still further down
+# the call resolved to "command not found", the guard read as a REJECT and blanked the
+# config line, so a real CUT was recorded with no pinnable switch attached.
+on_sane(){
+  # $1 = a bare "<node> <on> <off>..." config line, $2 = the label to name in the message.
+  # Returns 0 when the line is safe to offer as a pinnable switch, 1 when its ON value was captured
+  # while the phone was NOT actually charging.
+  #
+  # The ON value is read off the node before the probe, so if the firmware had charging paused or
+  # thermally throttled at that moment, the "restore to" number is the throttled one and pinning it
+  # caps the phone forever. Measured on a bramble (Pixel 4a 5G) scanned while the charger sat in
+  # CHARGE_PAUSE with icl=0: main/constant_charge_current_max read 0 and the suggested line was
+  # "... 450000 0", i.e. pin this phone at 450 mA, on hardware whose own
+  # battery/constant_charge_current reports 3800000. A current-type ON value under 1 A on a node
+  # that also carries a much larger reference is that bug, not a real default.
+  #
+  # 7.2.4: this used to live inside route_hit, and route_hit is NOT the path a working switch takes.
+  # Every switch that actually HOLDS exits through route_stab, and the fcc-zero, value-sweep, NEW,
+  # SUPER and SHAPE probes all hand route_stab a live read of the node as the ON value. So the guard
+  # protected only the switches that had already failed to hold.
+  local _os_l _os_on _os_ref
+  _os_l="$1"
+  case "$_os_l" in
+    */constant_charge_current*|*/input_current*|*current_max*) :;;
+    *) return 0;;
+  esac
+  _os_on="$(printf '%s' "$_os_l" | awk '{print $2}')"
+  case "${_os_on:-x}" in ''|*[!0-9]*) return 0;; esac
+  [ "$_os_on" -lt 1000000 ] 2>/dev/null || return 0
+  _os_ref="$(rd1 /sys/class/power_supply/battery/constant_charge_current)"
+  case "${_os_ref:-x}" in ''|*[!0-9]*) _os_ref=0;; esac
+  [ "$_os_ref" -gt $(( _os_on * 2 )) ] 2>/dev/null || return 0
+  log "  [on-value rejected] ${2:-$_os_l} -- ON=${_os_on} was read while charging was paused/throttled (node elsewhere reports ${_os_ref}); not offered as a config line"
+  return 1
+}
+
+route_hit(){
+  rh_cfg="$(printf '%s' "$3" | sed 's/ (.*$//')"
+  on_sane "$rh_cfg" "$2" || rh_cfg=
+  # A verdict that is not a hold must never reach the CUT catch-all. test_switch grew a NOT-HELD
+  # guard of its own, but the six group/combo callers hand their verdict straight here, and `*)`
+  # filed it as a working CUT -- CFG_CUT set, have_clean_winner satisfied, and AccA offered a
+  # switch the coulomb counter had just proved did not hold. Guard the router, not each caller.
+  case "$1" in
+    NOT-HELD)
+      NOTHELD="$NOTHELD|$2"; reg_add not-held "" no-effect "$2"
+      log "  [not a switch] $2 -- charge_counter kept RISING through the hold window; not offered"
+      return 1;;
+    THROTTLE)
+      THROTTLE="$THROTTLE|$2"; reg_add throttle "$rh_cfg" throttle "$2"
+      log "  [throttle] $2 -- current reduced but not stopped; recorded as THROTTLE, not a cut"
+      return 1;;
+  esac
+  case "$1" in
+    BYPASS) BYPASS="$BYPASS|$2"; [ -n "$CFG_BYPASS" ] || [ -z "$rh_cfg" ] || CFG_BYPASS="$rh_cfg";;
+    DRAIN) DRAIN="$DRAIN|$2"; [ -n "$CFG_DRAIN" ] || [ -z "$rh_cfg" ] || CFG_DRAIN="$rh_cfg";;
+    *) CUT="$CUT|$2"; [ -n "$CFG_CUT" ] || [ -z "$rh_cfg" ] || CFG_CUT="$rh_cfg";;
+  esac
+  reg_add "$1" "$rh_cfg" holds-alone "$2"
+  WORKING="${WORKING:-$2 ($1)}"
+  # 7.2.4: a rejected line must not come back through ADDLINES. Blanking rh_cfg stopped the CFG_*
+  # copy but the raw "$3" was appended here regardless, and cfg_lookup builds SUGGEST by grepping
+  # ADDLINES for the label's path -- so the very line just refused was handed to AccA as
+  # charging_switch= anyway.
+  [ -n "$rh_cfg" ] && ADDLINES="$ADDLINES
+    $3"
+  return 0; }
+
+label_path(){ local lpp; lpp="$1"
+  case "$lpp" in
+    "fcc-zero "*) lpp="${lpp#fcc-zero }";;
+    "voltage-cap "*) lpp="${lpp#voltage-cap }";;
+    "[ACC] "*) lpp="${lpp#\[ACC\] }";;
+    "[NEW] "*) lpp="${lpp#\[NEW\] }";;
+    "[NEW:safe] "*) lpp="${lpp#\[NEW:safe\] }";;
+    # Every label test_switch builds is "[TAG] <path>=<val>", and hand-listing the tags meant
+    # [SUPER], [SHAPE] and [F5a] kept their prefix: the exact grep in cfg_lookup then missed and the
+    # basename fallback returned whichever node shared the leaf name -- a path that was never
+    # tested, handed to AccA as charging_switch=. Strip the bracket form itself.
+    "["*"] "*) lpp="${lpp#*] }";;
+  esac
+  printf '%s' "${lpp%%=*}"; }
+
 selftest(){ _sp=0; _sf=0
   _ck(){ if [ "$2" = "$3" ]; then _sp=$((_sp+1)); else echo "  FAIL $1: got='$2' want='$3'"; _sf=$((_sf+1)); fi; }
   echo "== AMPS v$V self-test (pure polarity + state) =="
@@ -766,6 +980,71 @@ selftest(){ _sp=0; _sf=0
   _ck ft_zero        "$(fstress_thermal 0 && echo T || echo F)"    F
   _ck ft_empty       "$(fstress_thermal '' && echo T || echo F)"   F
   _ck ft_garbage     "$(fstress_thermal x9 && echo T || echo F)"   F
+  # ---- 7.2.5 regression cases. Every defect fixed in this release lived in code no test could
+  # reach: --selftest covered pure helpers only and the suites are source greps, so a verdict
+  # could be misrouted for a whole release without anything going red. These four cover the
+  # routing and label paths that decide what AccA is finally handed.
+
+  # route_hit: a verdict that is NOT a hold must never reach the CUT catch-all.
+  _rh(){ CUT=; CFG_CUT=; BYPASS=; CFG_BYPASS=; DRAIN=; CFG_DRAIN=; NOTHELD=; THROTTLE=; WORKING=; ADDLINES=
+    route_hit "$1" testlbl "battery/foo 1 0" >/dev/null 2>&1
+    _rhr=none
+    [ -n "$CUT" ] && _rhr=cut
+    [ -n "$NOTHELD" ] && _rhr=nothold
+    [ -n "$THROTTLE" ] && _rhr=throttle
+    [ -n "$BYPASS" ] && _rhr=bypass
+    printf %s "$_rhr:${CFG_CUT:-nocfg}"; }
+  _ck rh_cut       "$(_rh CUT)"       "cut:battery/foo 1 0"
+  _ck rh_bypass    "$(_rh BYPASS)"    "bypass:nocfg"
+  _ck rh_nothold   "$(_rh NOT-HELD)"  "nothold:nocfg"
+  _ck rh_throttle  "$(_rh THROTTLE)"  "throttle:nocfg"
+
+  # label_path: every "[TAG] <path>" form must reduce to the bare path, or cfg_lookup falls back
+  # to a basename match and can hand over a node that was never tested.
+  _ck lp_acc     "$(label_path "[ACC] battery/input_suspend=1")"       battery/input_suspend
+  _ck lp_new     "$(label_path "[NEW] battery/input_suspend=1")"       battery/input_suspend
+  _ck lp_newsafe "$(label_path "[NEW:safe] battery/input_suspend=1")"  battery/input_suspend
+  _ck lp_gen     "$(label_path "[GEN:x] battery/input_suspend=1")"     battery/input_suspend
+  _ck lp_learn   "$(label_path "[LEARN r1] battery/input_suspend=1")"  battery/input_suspend
+  _ck lp_super   "$(label_path "[SUPER] battery/input_suspend=1")"     battery/input_suspend
+  _ck lp_shape   "$(label_path "[SHAPE] battery/input_suspend=1")"     battery/input_suspend
+  _ck lp_f5a     "$(label_path "[F5a] battery/input_suspend=1")"       battery/input_suspend
+  _ck lp_fcc     "$(label_path "fcc-zero battery/foo=0")"              battery/foo
+  _ck lp_plain   "$(label_path "battery/foo=0")"                       battery/foo
+
+  # level_enf: a level node that is read-only, or that accepts a value without enforcing it, is
+  # not a switch. Counting either one turned the SUPER fallback off on unknown-vendor phones.
+  _le(){ LEVELOK="$1"; level_enf; }
+  _ck le_ro       "$(_le "nodeA(ro)")"                ""
+  _ck le_accepts  "$(_le "nodeB(accepts)")"           ""
+  _ck le_both     "$(_le "nodeA(ro)|nodeB(accepts)")" ""
+  _ck le_real     "$(_le "nodeA(ro)|nodeC")"          nodeC
+  _ck le_empty    "$(_le "")"                         ""
+
+  # level_writable: everything that took a value at least once. Read-only entries never did, and
+  # the wording at several report sites says the node ACCEPTS values -- that claim must not cover
+  # a (ro) entry, and the RECOMMENDED pick must never be one.
+  _lw(){ LEVELOK="$1"; level_writable; }
+  _ck lw_ro        "$(_lw "nodeA(ro)")"                        ""
+  _ck lw_accepts   "$(_lw "nodeB(accepts)")"                   "nodeB(accepts)"
+  _ck lw_enforced  "$(_lw "nodeC")"                            "nodeC"
+  _ck lw_mixed     "$(_lw "nodeA(ro)|nodeB(accepts)")"         "nodeB(accepts)"
+  _ck lw_reco_pick "$(_lw "nodeA(ro)|nodeC" | sed -n '1p')"    "nodeC"
+  _ck lw_empty     "$(_lw "")"                                 ""
+
+  # classify_held: the window above idle but below the charging threshold is a THROTTLE, which is
+  # what classify_unheld already calls it. Selling it as CUT offered a node that only slows
+  # charging as one that stops it.
+  # classify_held asks online_now/read_st, which live further down the file and do not exist yet at
+  # self-test time. Stub them for these cases only -- --selftest exits immediately afterwards, so
+  # the stubs never reach a real scan.
+  _chd(){ BLINDV=0; CHGDIR=p; CHGIN=; WEAK_CHARGER=0; THR=50000; IDLE=10000; CL="$1"
+    online_now(){ return 0; }; read_st(){ echo Charging; }; ex(){ return 1; }
+    classify_held; }
+  _ck ch_idle     "$(_chd 5000)"    CUT
+  _ck ch_trickle  "$(_chd 30000)"   THROTTLE
+  _ck ch_near_thr "$(_chd 49999)"   THROTTLE
+  _ck ch_zero     "$(_chd 0)"       CUT
   echo "== self-test: $_sp passed, $_sf failed =="
   [ "$_sf" = 0 ]; }
 
@@ -1268,7 +1547,11 @@ present_now(){
     [ "$pv" = 1 ] && return 0
   done
   online_now && return 0
-  [ -n "${CHGIN:-}" ] && { _pcv="$(abs "$(san "$(read1 "$CHGIN")")")"; [ "$_pcv" -gt "${IDLE:-10}" ] 2>/dev/null && return 0; }
+  # IDLE is not computed until the unit is known (uA phones use 10000, mA phones 10). This runs at
+  # LAYER 1, before that, and "${IDLE:-10}" meant a 10 microamp floor on a uA phone -- residual
+  # charger-input leakage read as "plugged", so the run skipped the plug-in prompt and tested live
+  # on battery. Until the unit is settled, let present/online/status answer instead.
+  [ -n "${IDLE:-}" ] && [ -n "${CHGIN:-}" ] && { _pcv="$(abs "$(san "$(read1 "$CHGIN")")")"; [ "$_pcv" -gt "$IDLE" ] 2>/dev/null && return 0; }
   case "$(read_st)" in Charging|charging|Full|full) return 0;; esac
   return 1
 }
@@ -1329,7 +1612,16 @@ if [ -n "$GATE_MSG" ]; then
   exit 3
 fi
 [ "$CAP" -ge 80 ] && [ "$CAP" -lt 85 ] && warn "battery ${CAP}% is a little high -- 40-75% gives the clearest result. Continuing."
-[ "$CAP" -ge 15 ] && [ "$CAP" -lt 30 ] 2>/dev/null && warn "battery ${CAP}% is low -- you're plugged in so charging offsets the short drain tests, but 30-80% gives the cleanest result. Continuing."
+# The "you're plugged in" half was stated unconditionally, so an UNPLUGGED run warned the user that
+# charging was offsetting the drain tests while nothing was charging at all -- and on a low battery
+# with no charger the advice is the opposite one. Say what is actually true of this run.
+if [ "$CAP" -ge 15 ] && [ "$CAP" -lt 30 ] 2>/dev/null; then
+  if plugged; then
+    warn "battery ${CAP}% is low -- you're plugged in so charging offsets the short drain tests, but 30-80% gives the cleanest result. Continuing."
+  else
+    warn "battery ${CAP}% is low and there is NO charger attached -- the drain tests have nothing offsetting them. Plug in, or charge to 30-80% and re-run, for a result worth trusting."
+  fi
+fi
 [ "$GATE_TEMP_C" -ge 35 ] && [ "$GATE_TEMP_C" -lt "$MAXTEMP_C" ] && warn "battery ${GATE_TEMP_C}C is warm (under the ${MAXTEMP_C}C ceiling) -- cooler is better; any firmware thermal-throttle here is still classified THROTTLE (not a real switch) by the verify step. Continuing."
 log "==== LAYER 2 - stop ACC + reset to NATIVE charging (honest baseline) ===="
 ACC_WAS=0; ACC_BIN=; DJS_WAS=0; DJS_BIN=; ACCV=; ST_POL=; ST_UNIT=; ST_TRUST=; POLARITY=normal; POL_SRC=
@@ -1491,7 +1783,7 @@ if [ "$_bp" = 1 ] && [ "${_bcap:-0}" -lt 95 ] 2>/dev/null; then
   case "$BASE_STATE" in
     CHARGING) ;;
     DRAIN|DISCHARGING) WEAK_CHARGER=1; warn "WEAK CHARGER: plugged at ${_bcap}% but the native baseline is $BASE_STATE (current=$_bcur $UNIT). The source can't outpace the load -- use a stronger wall charger or the switch verdicts below may be wrong.";;
-    BYPASS|STANDBY) WEAK_CHARGER=1; warn "native baseline is $BASE_STATE at ${_bcap}% (battery not gaining charge) -- charger may be weak or the battery near full; switch verdicts may be unreliable.";;
+    BYPASS|STANDBY) WEAK_CHARGER=1; warn "WEAK CHARGER: plugged at ${_bcap}% but the native baseline is $BASE_STATE (battery not gaining charge) -- charger may be weak or the battery near full; switch verdicts may be unreliable.";;
   esac
 fi
 log "  baseline (native, no switch): $BASE_STATE at ${_bcap}% weak_charger=$WEAK_CHARGER"
@@ -1508,6 +1800,17 @@ if [ "$_bp" = 1 ] && [ "${_bcap:-0}" -lt 95 ] 2>/dev/null && [ "$BASE_STATE" != 
     sleep 5; stop_check; acc_hold_off
     _bp=0; present_now && _bp=1; _bo=0; online_now && _bo=1; _bcur="$(med_cur)"
     BASE_STATE="$(classify_state "$_bp" "$_bo" "$_bcur" "$POLARITY" "$IDLE")"
+    # classify_state takes no status argument, and a phone with no usable sensor reports current=0,
+    # so from inside this loop it can only ever answer BYPASS. The status override applied just
+    # above the loop was discarded on the first iteration, and a phone that HAD started charging
+    # still fell through to "stopping -- re-run once the status reads Charging". Re-apply it.
+    if [ "$BASE_STATE" != CHARGING ] && cur_blind; then
+      case "$(read_st)" in
+        Charging|charging|Full|full)
+          BASE_STATE=CHARGING
+          log "  (no usable current sensor -- charging status '$(read_st)' accepted as the baseline)" ;;
+      esac
+    fi
     [ "$BASE_STATE" = CHARGING ] && break
     [ "$_bp" = 1 ] || break
     _sni=$((_sni+1))
@@ -1599,17 +1902,18 @@ if [ "$ACTIVE" = 1 ] && [ "$CUR_USABLE" = 0 ]; then
 fi
 [ "$ACTIVE" = 1 ] && [ "$CUR_USABLE" = 1 ] && [ "$SIGN_CONF" != high ] && warn "charge sign/unit confidence not high -> using status+charge_type+voltage as corroboration."
 
-is_charging(){ local c m; c="$1"; case "$c" in ''|*[!0-9-]*) echo 1; return;; esac
-  m="${c#-}"; [ "$m" -gt "$THR" ] 2>/dev/null || { echo 0; return; }
-  [ "$(sgn "$c")" = "$CHGDIR" ] && echo 1 || echo 0; }
-is_idle(){ local bct bd bs bv m; m="$(abs "$1")"; [ "$m" -le "$IDLE" ] 2>/dev/null && echo 1 || echo 0; }
 bcharge(){
   bs="$(read_st)"
   st_notchg "$bs" && { echo 0; return; }
   if ex "$BATT/charge_type"; then bct="$(chg_type)"; [ "$(ctype_charging "$bct")" = 0 ] && [ "$(ctype_charging "$CTYPE0")" = 1 ] && { echo 0; return; }; fi
   if [ -n "$VOLTF" ] && [ "$V0" -gt 0 ] 2>/dev/null; then bv="$(vmv)"; bd=$(( V0 - bv )); [ "$bd" -ge "$VDROP" ] 2>/dev/null && { echo 0; return; }; fi
   echo 1; }
-chg_now(){ if [ "$BLINDV" = 1 ]; then bcharge; else cc="$(med_cur)"; { [ "$(is_charging "$cc")" = 1 ] || [ "$(read_st)" = Charging ]; } && echo 1 || echo 0; fi; }
+# gate() requires a real, correctly-signed current before it will run a test. chg_now accepted the
+# STATUS STRING instead, so on any latch that leaves status=Charging at 0mA (fcc-zero,
+# current_max=0) resume_check wrote "resume: OK" for a resume that never happened, and 6e decided
+# the teacher "did not stop". Status is only evidence when there is no current to read at all.
+chg_now(){ if [ "$BLINDV" = 1 ]; then bcharge; else cc="$(med_cur)"
+    { [ "$(is_charging "$cc")" = 1 ] || { [ "${CUR_USABLE:-1}" = 0 ] && [ "$(read_st)" = Charging ]; }; } && echo 1 || echo 0; fi; }
 resume_desc(){ if [ "$BLINDV" = 1 ]; then printf 'status=%s %smV' "$(read_st)" "$(vmv)"; else med_cur; fi; }
 
 reset_native_verify(){
@@ -1708,7 +2012,15 @@ hold_probe(){
   _xs=0; { [ "${WEAK_CHARGER:-0}" = 1 ] || [ "${WANT_UNPLUG:-0}" = 1 ]; } && _xs=1
   sleep "$POLL"; C1="$(med_cur)"; SAMP_FIRST="$(is_charging "$C1")"; g1="$SAMP_FIRST"
   if [ "$_xs" = 0 ] && [ "$g1" = 1 ] && [ "$(abs "$C1")" -ge "$NEAR" ] 2>/dev/null; then
-    SAMP_N=3; SAMP_LAST=1; CL="$C1"; return
+    # One POLL is not enough to call a switch inert. A node that takes ~4-6s to bite still reads
+    # full current on the first sample, so this early exit skipped it on a wall charger while the
+    # same phone on --unplug (where _xs=1) saw the hold. Confirm with a second sample before
+    # forging SAMP_N=3; only two consecutive near-native readings mean nothing happened.
+    sleep "$POLL"; _hb="$(med_cur)"
+    if [ "$(is_charging "$_hb")" = 1 ] && [ "$(abs "$_hb")" -ge "$NEAR" ] 2>/dev/null; then
+      SAMP_N=3; SAMP_LAST=1; CL="$_hb"; return
+    fi
+    g1="$(is_charging "$_hb")"; C1="$_hb"; SAMP_FIRST="$g1"
   fi
   sleep "$POLL"; c2="$(med_cur)"; g2="$(is_charging "$c2")"
   if [ "$_xs" = 0 ] && [ "$g1" = 0 ] && [ "$g2" = 0 ]; then _hs="$(read_st)"; st_notchg "$_hs" && { SAMP_N=0; SAMP_LAST=0; CL="$c2"; ST3="$_hs"; ST4="$_hs"; return; }; fi
@@ -1740,43 +2052,6 @@ st_notchg(){ local v; case "$1" in Discharging|discharging|"Not charging"|"not c
 chgin_low(){ [ -n "$CHGIN" ] || return 1
   v="$(abs "$(san "$(read1 "$CHGIN")")")"; [ "$v" -le "$IDLE" ] 2>/dev/null; }
 
-classify_held(){
-  local cin onl v
-  if [ "$BLINDV" = 1 ]; then
-    [ "$BL_ONLINE" = 0 ] && { echo CUT-input; return; }
-    if ex "$BATT/charge_counter" && [ -n "$(read1 "$BATT/charge_counter")" ]; then
-      _bcc0="$(san "$(read1 "$BATT/charge_counter")")"
-      sleep 4
-      _bcc1="$(san "$(read1 "$BATT/charge_counter")")"
-      _bccd=$(( ${_bcc1:-0} - ${_bcc0:-0} ))
-      _bccda="${_bccd#-}"
-      [ "$_bccd" -lt -500 ] 2>/dev/null && { echo DRAIN; return; }
-      if [ "${_bccda:-99999}" -lt 500 ] 2>/dev/null; then
-        if online_now && [ -n "$CHGIN" ] && ! chgin_low; then echo BYPASS; else echo CUT; fi
-        return
-      fi
-      # 7.2.4: a counter that ROSE means the pack took charge, so the switch did not hold.
-      # The blind path tested the counter for a fall and for flatness and had no arm for a rise, so
-      # a rise fell through to the unconditional `echo CUT` below. On a phone with no usable current
-      # sensor the coulomb counter is the only honest measurement in the whole path -- it was read,
-      # found to contradict the hold, and then discarded in favour of the status/voltage inference
-      # that produced the hold in the first place.
-      [ "$_bccd" -gt 500 ] 2>/dev/null && { echo NOT-HELD; return; }
-    fi
-    case "$(read_st)" in Discharging|discharging) [ "${WEAK_CHARGER:-0}" = 1 ] || { echo DRAIN; return; };; esac
-    echo CUT; return
-  fi
-  online_now || { echo CUT-input; return; }
-  if [ "${WEAK_CHARGER:-0}" != 1 ] && [ "$(sgn "$CL")" != "$CHGDIR" ] && [ "$(abs "$CL")" -gt "$IDLE" ] 2>/dev/null; then echo DRAIN; return; fi
-  if [ "$(is_idle "$CL")" = 1 ]; then
-    onl=1; online_now || onl=0
-    cin=0; [ -n "$CHGIN" ] && { v="$(abs "$(san "$(read1 "$CHGIN")")")"; [ "$v" -gt "$IDLE" ] 2>/dev/null && cin=1; }
-    if [ "$onl" = 0 ]; then echo CUT-input
-    elif [ "$cin" = 1 ]; then echo BYPASS
-    else echo CUT; fi
-    return
-  fi
-  echo CUT; }
 
 reg_add(){ _rga="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"; case "$_rga" in cut-*) _rga=cut;; esac
   # 7.2.4: an empty field cannot go into a tab-separated row. Tab is IFS whitespace, so `read -r`
@@ -1784,60 +2059,23 @@ reg_add(){ _rga="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"; case "$_rga" in cut-*) _
   # route_hit passes an empty ctrl whenever the ON-value guard fired, and emit_alts then read the
   # STABILITY word as the switch itself: alt1_switch=holds-alone, handed to AccA as a node path.
   printf '%s\t%s\t%s\t%s\n' "$_rga" "${2:--}" "${3:--}" "${4:--}" >> "$REG" 2>/dev/null; }
-on_sane(){
-  # $1 = a bare "<node> <on> <off>..." config line, $2 = the label to name in the message.
-  # Returns 0 when the line is safe to offer as a pinnable switch, 1 when its ON value was captured
-  # while the phone was NOT actually charging.
-  #
-  # The ON value is read off the node before the probe, so if the firmware had charging paused or
-  # thermally throttled at that moment, the "restore to" number is the throttled one and pinning it
-  # caps the phone forever. Measured on a bramble (Pixel 4a 5G) scanned while the charger sat in
-  # CHARGE_PAUSE with icl=0: main/constant_charge_current_max read 0 and the suggested line was
-  # "... 450000 0", i.e. pin this phone at 450 mA, on hardware whose own
-  # battery/constant_charge_current reports 3800000. A current-type ON value under 1 A on a node
-  # that also carries a much larger reference is that bug, not a real default.
-  #
-  # 7.2.4: this used to live inside route_hit, and route_hit is NOT the path a working switch takes.
-  # Every switch that actually HOLDS exits through route_stab, and the fcc-zero, value-sweep, NEW,
-  # SUPER and SHAPE probes all hand route_stab a live read of the node as the ON value. So the guard
-  # protected only the switches that had already failed to hold.
-  local _os_l _os_on _os_ref
-  _os_l="$1"
-  case "$_os_l" in
-    */constant_charge_current*|*/input_current*|*current_max*) :;;
-    *) return 0;;
-  esac
-  _os_on="$(printf '%s' "$_os_l" | awk '{print $2}')"
-  case "${_os_on:-x}" in ''|*[!0-9]*) return 0;; esac
-  [ "$_os_on" -lt 1000000 ] 2>/dev/null || return 0
-  _os_ref="$(rd1 /sys/class/power_supply/battery/constant_charge_current)"
-  case "${_os_ref:-x}" in ''|*[!0-9]*) _os_ref=0;; esac
-  [ "$_os_ref" -gt $(( _os_on * 2 )) ] 2>/dev/null || return 0
-  log "  [on-value rejected] ${2:-$_os_l} -- ON=${_os_on} was read while charging was paused/throttled (node elsewhere reports ${_os_ref}); not offered as a config line"
-  return 1
-}
 
-route_hit(){
-  rh_cfg="$(printf '%s' "$3" | sed 's/ (.*$//')"
-  on_sane "$rh_cfg" "$2" || rh_cfg=
-  case "$1" in
-    BYPASS) BYPASS="$BYPASS|$2"; [ -n "$CFG_BYPASS" ] || [ -z "$rh_cfg" ] || CFG_BYPASS="$rh_cfg";;
-    DRAIN) DRAIN="$DRAIN|$2"; [ -n "$CFG_DRAIN" ] || [ -z "$rh_cfg" ] || CFG_DRAIN="$rh_cfg";;
-    *) CUT="$CUT|$2"; [ -n "$CFG_CUT" ] || [ -z "$rh_cfg" ] || CFG_CUT="$rh_cfg";;
-  esac
-  reg_add "$1" "$rh_cfg" holds-alone "$2"
-  WORKING="${WORKING:-$2 ($1)}"
-  # 7.2.4: a rejected line must not come back through ADDLINES. Blanking rh_cfg stopped the CFG_*
-  # copy but the raw "$3" was appended here regardless, and cfg_lookup builds SUGGEST by grepping
-  # ADDLINES for the label's path -- so the very line just refused was handed to AccA as
-  # charging_switch= anyway.
-  [ -n "$rh_cfg" ] && ADDLINES="$ADDLINES
-    $3"
-  return 0; }
 
 route_stab(){
   _rc="$1"; _rl="$2"; _rp="$3"; _ron="$4"; _roff="$5"; _rs="$6"
   printf '%s\t%s\n' "$_rl" "$_rs" >> "$BK/stab" 2>/dev/null
+  # Same guard as route_hit: this router has the identical `*)` catch-all, so a non-hold verdict
+  # arriving here would be filed as a working CUT too.
+  case "$_rc" in
+    NOT-HELD)
+      NOTHELD="$NOTHELD|$_rl"; reg_add not-held "" no-effect "$_rl"
+      log "  [not a switch] $_rl -- the pack went on taking charge; not offered"
+      return 1;;
+    THROTTLE)
+      THROTTLE="$THROTTLE|$_rl"; reg_add throttle "$_rp $_ron $_roff" throttle "$_rl"
+      log "  [throttle] $_rl -- reduced, not stopped; recorded as THROTTLE, not a cut"
+      return 1;;
+  esac
   if [ "$_rs" = leaky ]; then
     LEAKY="$LEAKY|$_rl"; reg_add "$_rc" "$_rp $_ron $_roff" leaky "$_rl"
     ADDLINES="$ADDLINES
@@ -2366,8 +2604,11 @@ if [ "$ACTIVE" = 1 ] && [ "${UNKNOWN:-0}" != 1 ]; then
       wr "$PSY/battery/charging_enabled" 0; wr "$PSY/battery/op_disable_charge" 1
       hold_probe; ghit=0
       if [ "$SAMP_LAST" = 0 ] && [ "$SAMP_N" -lt 3 ]; then
-        k="$(classify_held)"; ghit=1; log "  oneplus[charging_enabled=0 + op_disable_charge=1] -> last=$CL HELD-15s [$k]"
-        route_hit "$k" "oneplus-seq" "battery/charging_enabled 0 0 battery/op_disable_charge 0 1 battery/charging_enabled 1 1 ($k, ordered)"
+        # ghit gates resume_check. Setting it before the router meant a refused verdict
+        # (NOT-HELD / THROTTLE) still triggered a full resume wait on a node that was never
+        # recorded as a switch -- minutes of it, and a STUCK mark on something that is not one.
+        k="$(classify_held)"; log "  oneplus[charging_enabled=0 + op_disable_charge=1] -> last=$CL HELD-15s [$k]"
+        route_hit "$k" "oneplus-seq" "battery/charging_enabled 0 0 battery/op_disable_charge 0 1 battery/charging_enabled 1 1 ($k, ordered)" && ghit=1
       elif [ "$SAMP_FIRST" = 0 ] && [ "$SAMP_LAST" = 1 ]; then
         REASSERT="$REASSERT|oneplus-seq"; log "  oneplus[seq] -> DROPPED-THEN-RESUMED [no-hold]"
       else
@@ -2383,8 +2624,11 @@ if [ "$ACTIVE" = 1 ] && [ "${UNKNOWN:-0}" != 1 ]; then
       wr /proc/mtk_battery_cmd/current_cmd "0 1"
       hold_probe; ghit=0
       if [ "$SAMP_LAST" = 0 ] && [ "$SAMP_N" -lt 3 ]; then
-        k="$(classify_held)"; ghit=1; log "  mtk[current_cmd '0 1' + en_power_path] -> last=$CL HELD-15s [$k]"
-        route_hit "$k" "mtk-current_cmd" "/proc/mtk_battery_cmd/current_cmd 0::0 0::1 /proc/mtk_battery_cmd/en_power_path 1 0 ($k; verify long-term, current_cmd often re-asserts)"
+        # ghit gates resume_check. Setting it before the router meant a refused verdict
+        # (NOT-HELD / THROTTLE) still triggered a full resume wait on a node that was never
+        # recorded as a switch -- minutes of it, and a STUCK mark on something that is not one.
+        k="$(classify_held)"; log "  mtk[current_cmd '0 1' + en_power_path] -> last=$CL HELD-15s [$k]"
+        route_hit "$k" "mtk-current_cmd" "/proc/mtk_battery_cmd/current_cmd 0::0 0::1 /proc/mtk_battery_cmd/en_power_path 1 0 ($k; verify long-term, current_cmd often re-asserts)" && ghit=1
       elif [ "$SAMP_FIRST" = 0 ] && [ "$SAMP_LAST" = 1 ]; then
         REASSERT="$REASSERT|mtk-current_cmd"; log "  mtk[current_cmd '0 1'] -> DROPPED-THEN-RESUMED [no-hold: WOULD OVERCHARGE - do NOT use; prefer input_suspend]"
       else
@@ -2404,9 +2648,12 @@ if [ "$ACTIVE" = 1 ] && [ "${UNKNOWN:-0}" != 1 ]; then
       for f in $GP; do wr "$f" 0; done
       hold_probe; ghit=0
       if [ "$SAMP_LAST" = 0 ] && [ "$SAMP_N" -lt 3 ]; then
-        k="$(classify_held)"; ghit=1; log "  pixel-group[$gn current paths -> 0] -> last=$CL HELD-15s [$k]"
+        # ghit gates resume_check. Setting it before the router meant a refused verdict
+        # (NOT-HELD / THROTTLE) still triggered a full resume wait on a node that was never
+        # recorded as a switch -- minutes of it, and a STUCK mark on something that is not one.
+        k="$(classify_held)"; log "  pixel-group[$gn current paths -> 0] -> last=$CL HELD-15s [$k]"
         gl=""; for f in $GP; do gl="$gl$f 5000000 0 "; done
-        route_hit "$k" "pixel-group($gn paths)" "$gl($k, GROUPED: one ctrl-files line, all paths together)"
+        route_hit "$k" "pixel-group($gn paths)" "$gl($k, GROUPED: one ctrl-files line, all paths together)" && ghit=1
       elif [ "$SAMP_FIRST" = 0 ] && [ "$SAMP_LAST" = 1 ]; then
         REASSERT="$REASSERT|pixel-group"; log "  pixel-group[$gn paths] -> DROPPED-THEN-RESUMED [no-hold]"
       else
@@ -2451,6 +2698,53 @@ if [ "$ACTIVE" = 1 ] && [ "${MODE:-quick}" = complete ] && [ "${UNKNOWN:-0}" != 
       over && { log "  [deadline] stop ACC-list tests"; break; }
       [ "$_ac" -ge "$MAX_NEW" ] && { log "  [cap] reached"; break; }
       set -f; set -- $_cl; set +f
+      # ACC's ch-switches carries GROUPED entries too ("node on off node on off ..."), which is how
+      # Pixel 5-node and OnePlus ordered switches are stored. `-eq 3` dropped every one of them
+      # while the header promised "test every one ACC knows", so the phones that most need a
+      # grouped switch were the ones 4c never tested. Test them as a group, exactly as 4b does.
+      if [ "$#" -gt 3 ] && [ $(( $# % 3 )) -eq 0 ]; then
+        over && { log "  [deadline] stop ACC-list tests"; break; }
+        _gok=1; _gl=""; : > "$BK/acc_grp.tsv"
+        # Pure-shell stride. `seq` is not used anywhere else in this script and is an external
+        # binary that a recovery/minimal environment may not have; a counter needs nothing.
+        _gi=1
+        while [ "$_gi" -le "$#" ]; do
+          eval "_gnode=\${$_gi}"
+          case "$_gnode" in /*) :;; *) _gnode="$PSY/$_gnode";; esac
+          ex "$_gnode" || { _gok=0; break; }
+          printf '%s' "$_gnode" | grep -Eiq "$DANGER_RE" && { _gok=0; break; }
+          printf '%s' "$_gnode" | grep -Eiq "$SUPERDENY_RE" && { _gok=0; break; }
+          _gi=$(( _gi + 3 ))
+        done
+        if [ "$_gok" = 1 ] && gate; then
+          _gn=0
+          _gi=1
+          while [ "$_gi" -le "$#" ]; do
+            eval "_gnode=\${$_gi}"; _gj=$(( _gi + 1 )); _gk=$(( _gi + 2 ))
+            eval "_gon=\${$_gj}"; eval "_gof=\${$_gk}"
+            case "$_gnode" in /*) :;; *) _gnode="$PSY/$_gnode";; esac
+            snap_add "$_gnode"; printf '%s	%s
+' "$_gnode" "$(rd "$_gnode" | sed -n '1p')" >> "$BK/acc_grp.tsv"
+            _gl="$_gl$_gnode $_gon $_gof "
+            wr "$_gnode" "$_gof"; _gn=$(( _gn + 1 ))
+            _gi=$(( _gi + 3 ))
+          done
+          hold_probe; _ghit=0
+          if [ "$SAMP_LAST" = 0 ] && [ "$SAMP_N" -lt 3 ]; then
+            _gk2="$(classify_held)"
+            log "  [ACC group] $_gn nodes together -> last=$CL HELD [$_gk2]"
+            route_hit "$_gk2" "acc-group($_gn nodes)" "$_gl($_gk2, GROUPED: one ctrl-files line, all nodes together)" && _ghit=1
+          elif [ "$SAMP_FIRST" = 0 ] && [ "$SAMP_LAST" = 1 ]; then
+            REASSERT="$REASSERT|acc-group"; log "  [ACC group] $_gn nodes -> DROPPED-THEN-RESUMED [no-hold]"
+          else
+            log "  [ACC group] $_gn nodes -> last=$CL [no effect]"
+          fi
+          while IFS="	" read -r _rf _rv; do [ -n "$_rf" ] && wr "$_rf" "$_rv"; done < "$BK/acc_grp.tsv"
+          [ "$_ghit" = 1 ] && resume_check "acc-group" || sleep 1
+          _ac=$((_ac+1))
+        fi
+        continue
+      fi
       [ "$#" -eq 3 ] || continue
       _cp="$1"; _con="$2"; _cof="$3"
       case "$_cp" in /*) :;; *) _cp="$PSY/$_cp";; esac
@@ -2496,9 +2790,7 @@ if [ "$ACTIVE" = 1 ] && [ -s "$BK/deferred" ]; then
   # print "input-cut switches stayed deferred -- a battery-side switch already holds, so the USB
   # input was never disturbed". On a phone whose only level node is read-only that sentence is false
   # in both halves, and the last layer that could have found a working switch never ran.
-  _le_enf="$(printf '%s' "$LEVELOK" | tr '|' '
-' | grep -v '(ro)$' | grep -v '(accepts)$' | tr -d '
-')"
+  _le_enf="$(level_enf)"
   if [ -z "$BYPASS$CUT$DRAIN$_le_enf$BYPASS_HELD" ]; then
     log ""; stop_check; acc_hold_off
     log "==== LAYER 4d - deferred input-cut switches (last resort -- nothing safer held) ===="
@@ -2535,7 +2827,10 @@ tested_new=0
 if [ "$ACTIVE" = 1 ] && [ -s "$DISC" ]; then
   log ""
   log "  -- LAYER 6b - test NEW *trusted-named* switches ACC's list missed (unknown names are reported, not written) --"
-  SUPER_RUN=0; { [ "${UNKNOWN:-0}" = 1 ] || [ "${MODE:-quick}" = complete ] || [ -z "$BYPASS$CUT$DRAIN$LEVELOK$BYPASS_HELD" ]; } && SUPER_RUN=1
+  # 4d learned that LEVELOK carries "(ro)" and "(accepts)" entries which are NOT switches; this
+  # sibling still counted them, so a writable level node that takes CAP-5 and enforces nothing
+  # turned the SUPER fallback OFF -- exactly the unknown-vendor phone it exists for.
+  SUPER_RUN=0; { [ "${UNKNOWN:-0}" = 1 ] || [ "${MODE:-quick}" = complete ] || [ -z "$BYPASS$CUT$DRAIN$(level_enf)$BYPASS_HELD" ]; } && SUPER_RUN=1
   [ "$SUPER_RUN" = 1 ] && [ "${UNKNOWN:-0}" != 1 ] && log "  (SUPER fallback ON: the DB found no switch yet -- discovering + testing unknown candidates by shape)"
   while IFS='|' read -r path w; do
     over && { log "  [deadline] stop new tests"; break; }
@@ -2700,7 +2995,10 @@ COMBO="$BK/combo.tsv"
 if [ -s "$GENC" ]; then
   while IFS='|' read -r score path von voff; do
     [ -n "$path" ] && [ -w "$path" ] || continue
-    safe_to_write "$path" || continue
+    # 6c/SUPER already TEST these nodes individually, admitted by shape via super_safe.
+    # Requiring the trusted-NAME list here meant a vendor pair that only holds TOGETHER
+    # could never be combined -- the one thing this layer exists to find. Same write class.
+    { safe_to_write "$path" || { [ "${SUPER:-1}" = 1 ] && super_safe "$path"; }; } || continue
     case "$path" in */current_cmd) continue;; esac
     val_class "$von" && val_class "$voff" || continue
     [ "$von" = "$voff" ] && continue
@@ -2717,24 +3015,16 @@ if [ "$ACTIVE" = 1 ] && q_more && [ "$SKIPALL" = 0 ] && [ "$cn" -ge 2 ] 2>/dev/n
     while IFS="	" read -r p von voff; do wr "$p" "$voff"; done < "$COMBO"
     hold_probe; cheld=0
     if [ "$SAMP_LAST" = 0 ] && [ "$SAMP_N" -lt 3 ]; then
-      k="$(classify_held)"; cheld=1
+      # cheld gates resume_check below AND whether the pair-combo layer runs. Like ghit and
+      # tcheld before it, it may only be set once the ROUTER accepted the verdict: a refused
+      # NOT-HELD/THROTTLE spent a full resume wait on a node recorded as no switch, and
+      # suppressed the pair layer that should run precisely because nothing had held.
+      k="$(classify_held)"
       log "  combo[$cn observed nodes together] -> last=$CL HELD-15s [$k] -- minimizing..."
-      minimal=""
-      while IFS="	" read -r p von voff; do
-        over && { minimal="$minimal$p $von $voff "; continue; }
-        wr "$p" "$von"
-        sleep 6
-        if [ "$(chg_now)" = 1 ]; then
-          wr "$p" "$voff"; minimal="$minimal$p $von $voff "
-          log "    $p : REQUIRED (re-enabling it resumed charging)"
-          sleep 2
-        else
-          log "    $p : not needed (hold persists without it)"
-        fi
-      done < "$COMBO"
-      [ -n "$minimal" ] || { minimal="$(awk -F'\t' '{printf "%s %s %s ", $1, $2, $3}' "$COMBO")"; log "    (minimization inconclusive -- keeping the full set)"; }
-      route_hit "$k" "firmware-combo($cn)" "$minimal($k, COMBO learned by watching the firmware -- one grouped ctrl-files line)"
-      GENHITS="$GENHITS|COMBO: $minimal($k)"
+      minimize_combo "$COMBO"
+      if route_hit "$k" "firmware-combo($cn)" "$minimal($k, COMBO learned by watching the firmware -- one grouped ctrl-files line)"; then
+        GENHITS="$GENHITS|COMBO: $minimal($k)"; cheld=1
+      fi
     elif [ "$SAMP_FIRST" = 0 ] && [ "$SAMP_LAST" = 1 ]; then
       REASSERT="$REASSERT|firmware-combo"; log "  combo[$cn nodes] -> DROPPED-THEN-RESUMED [no-hold]"
     else
@@ -2773,8 +3063,9 @@ if [ "$ACTIVE" = 1 ] && [ "${MODE:-quick}" = complete ] && [ "$SKIPALL" = 0 ] &&
           # space-separated list -- write-config.sh word-splits it straight into an array -- so a
           # semicolon became the OFF value of the first node and shifted every field after it. Every
           # other grouped emitter in this file already uses plain spaces.
-          route_hit "$k" "pair-combo($p1+$p2)" "$p1 $von1 $voff1 $p2 $von2 $voff2 ($k, COMBO 2-node pair from firmware-observed set)"
-          GENHITS="$GENHITS|PAIR-COMBO: $p1+$p2 ($k)"
+          if route_hit "$k" "pair-combo($p1+$p2)" "$p1 $von1 $voff1 $p2 $von2 $voff2 ($k, COMBO 2-node pair from firmware-observed set)"; then
+            GENHITS="$GENHITS|PAIR-COMBO: $p1+$p2 ($k)"
+          fi
         fi
         wr "$p1" "$von1"; wr "$p2" "$von2"; sleep 2
         _p_n=$((_p_n+1))
@@ -2858,18 +3149,14 @@ if [ "$ACTIVE" = 1 ] && [ "${EARLY_DONE:-0}" = 0 ] && q_more && [ "$SKIPALL" = 0
       while IFS='	' read -r p von voff; do wr "$p" "$voff"; done < "$BK/teach_combo.tsv"
       hold_probe; tcheld=0
       if [ "$SAMP_LAST" = 0 ] && [ "$SAMP_N" -lt 3 ]; then
-        k="$(classify_held)"; tcheld=1
+        # Same as the group paths: tcheld gates resume_check, so it may only be set once the
+        # router has actually accepted the verdict.
+        k="$(classify_held)"
         log "  teach-combo[$lc] -> HELD [$k] -- minimizing to the essential line(s)..."
-        minimal=""
-        while IFS='	' read -r p von voff; do
-          over && { minimal="$minimal$p $von $voff "; continue; }
-          wr "$p" "$von"; sleep 6
-          if [ "$(chg_now)" = 1 ]; then wr "$p" "$voff"; minimal="$minimal$p $von $voff "; log "    $p : REQUIRED (re-enabling it resumed charging)"; sleep 2
-          else log "    $p : not needed (hold persists without it)"; fi
-        done < "$BK/teach_combo.tsv"
-        [ -n "$minimal" ] || minimal="$(awk -F'	' '{printf "%s %s %s ", $1,$2,$3}' "$BK/teach_combo.tsv")"
-        route_hit "$k" "teach-combo($lc)" "$minimal($k, BUILT from firmware-taught co-moving nodes -- one grouped ctrl line)"
-        BUILT="$BUILT|$minimal($k)"
+        minimize_combo "$BK/teach_combo.tsv"
+        if route_hit "$k" "teach-combo($lc)" "$minimal($k, BUILT from firmware-taught co-moving nodes -- one grouped ctrl line)"; then
+          BUILT="$BUILT|$minimal($k)"; tcheld=1
+        fi
       else
         log "  teach-combo[$lc] -> no hold (those nodes were effects, not causes)"
       fi
@@ -2940,15 +3227,15 @@ if [ "$ACTIVE" = 0 ]; then
   log "INCONCLUSIVE: active hold-tests skipped (see warnings). Re-run plugged in, battery 40-80%."
   log "Discovery + level-limit write/readback above still show what this phone exposes."
   [ "$CUR_FROZEN" = 1 ] && log "Note: current_now is frozen on this ROM; blind verification needs the charger actively charging (status=Charging) at 40-80%."
-  if [ -n "$LEVELOK" ]; then
+  if [ -n "$(level_writable)" ]; then
     log ""
     log "GOOD NEWS: a native firmware charge-limit node is present and accepts values (Pixel/Samsung style):"
-    printf '%s\n' "$LEVELOK" | tr '|' '\n' | sed '/^$/d' | while read -r l; do log "     - $l"; done
+    level_writable | while read -r l; do log "     - $l"; done
     log "  -> ACC can almost certainly cap charging on this phone. Re-run plugged in (40-80%) to confirm enforcement."
   fi
-elif [ -n "$LEVELOK" ] && printf '%s\n' "$LEVELOK" | tr '|' '\n' | sed '/^$/d' | grep -vqE '\(accepts\)|\(ro\)'; then
+elif [ -n "$LEVELOK" ] && [ -n "$(level_enf)" ]; then
   log "YES (BEST): native firmware level-limit works, enforcement confirmed -- the most reliable cap (firmware can't overshoot); ACC drives it and the battery holds flat."
-  printf '%s\n' "$LEVELOK" | tr '|' '\n' | sed '/^$/d' | while read -r l; do log "     - $l"; done
+  level_enf | while read -r l; do log "     - $l"; done
 elif [ -n "${BYPASS_HELD:-}" ]; then
   log "YES (BEST bypass): verified-held TRUE BYPASS -- battery idle while the charger powers the phone, and it held through the long re-arm/leak test (no creep, no fake-idle). Gentlest on the battery with cut-grade reliability, so it is preferred over a hard cut here."
   printf '%s\n' "$BYPASS_HELD" | tr '|' '\n' | sed '/^$/d' | while read -r l; do log "     - $l"; done
@@ -2971,9 +3258,9 @@ elif [ -n "$CUT" ]; then
 elif [ -n "$DRAIN" ]; then
   log "PARTIAL: only switches that DISCHARGE while plugged hold. Usable but battery drains slowly when capped."
   printf '%s\n' "$DRAIN" | tr '|' '\n' | sed '/^$/d' | while read -r l; do log "     - $l"; done
-elif [ -n "$LEVELOK" ]; then
+elif [ -n "$(level_writable)" ]; then
   log "MAYBE: native limit node ACCEPTS values but enforcement not observed at this SOC. Likely works at the real threshold (Pixel/Samsung)."
-  printf '%s\n' "$LEVELOK" | tr '|' '\n' | sed '/^$/d' | while read -r l; do log "     - $l"; done
+  level_writable | while read -r l; do log "     - $l"; done
 elif [ -n "$THROTTLE" ]; then
   log "MAYBE: only THROTTLE nodes responded (reduce, not stop). ACC may not hold a hard limit."
 elif [ -n "$ACC_IDLE1$ACC_DRAIN1" ]; then
@@ -2985,7 +3272,7 @@ log ""
 log "---- Can the phone run on the cable WITHOUT charging the battery? ----"
 if [ -n "$BYPASS" ]; then
   log "  YES (lowest wear): TRUE BYPASS -- charger powers the phone directly, battery stays IDLE (no charge, no discharge). Gentlest on the battery, though a hard CUT is the more reliable cap (see RECOMMENDED)."
-elif [ -n "$LEVELOK" ] && printf '%s\n' "$LEVELOK" | tr '|' '\n' | sed '/^$/d' | grep -vqE '\(accepts\)|\(ro\)'; then
+elif [ -n "$LEVELOK" ] && [ -n "$(level_enf)" ]; then
   log "  YES (native limit): at/above the set limit the firmware holds the battery flat and the phone keeps running on the charger."
 elif [ -n "$CUT" ]; then
   log "  YES (charge-cut): charging stops but the phone keeps running on the charger; battery stays ~flat (only tiny self-discharge)."
@@ -3054,16 +3341,6 @@ pick_usable(){ local l puf; puf="$BK/pickusable"; printf '%s\n' "$1" | tr '|' '\
     [ -n "$pu_pick" ] && break
   done
   printf '%s' "$pu_pick"; }
-label_path(){ local lpp; lpp="$1"
-  case "$lpp" in
-    "fcc-zero "*) lpp="${lpp#fcc-zero }";;
-    "voltage-cap "*) lpp="${lpp#voltage-cap }";;
-    "[ACC] "*) lpp="${lpp#\[ACC\] }";;
-    "[NEW] "*) lpp="${lpp#\[NEW\] }";;
-    "[NEW:safe] "*) lpp="${lpp#\[NEW:safe\] }";;
-    "[GEN:"*|"[LEARN"*) lpp="${lpp#*] }";;
-  esac
-  printf '%s' "${lpp%%=*}"; }
 cfg_lookup(){ clp="$(label_path "$1")"; [ -n "$clp" ] || return
   _clr="$(printf '%s\n' "$ADDLINES" | sed 's/^[ 	]*//' | grep -F "$clp " | sed -n '1p' | sed 's/ (.*$//')"
   [ -n "$_clr" ] || { _clb="${clp##* }"; _clb="${_clb##*/}"; [ -n "$_clb" ] && _clr="$(printf '%s\n' "$ADDLINES" | sed 's/^[ 	]*//' | grep -E "/${_clb}( |$)" | sed -n '1p' | sed 's/ (.*$//')"; }
@@ -3109,10 +3386,11 @@ emit_alts(){
   done < "$REG"
   printf 'alt_count=%s\n' "$_an"; }
 
-le_enf="$(printf '%s\n' "$LEVELOK" | tr '|' '\n' | sed '/^$/d' | grep -vE '\(accepts\)|\(ro\)' | sed -n '1p')"
+# Third copy of the same filter lived here; use the one definition, first enforcing entry.
+le_enf="$(level_enf | sed -n '1p')"
 LVL_BY_ACC=0
 if [ -z "$le_enf" ]; then
-  _lvlacc="$(printf '%s\n' "$LEVELOK" | tr '|' '\n' | sed '/^$/d' | grep -v '(ro)' | sed -n '1p' | sed 's/(accepts)$//')"
+  _lvlacc="$(level_writable | sed -n '1p' | sed 's/(accepts)$//')"
   if [ -n "$_lvlacc" ]; then
     _accnow="$(grep -m1 '^chargingSwitch=' /data/adb/vr25/acc-data/config.txt 2>/dev/null | sed -e 's/^chargingSwitch=(//' -e 's/).*$//')"
     case "$_accnow" in
@@ -3163,7 +3441,10 @@ if [ -z "$RECO_LBL" ]; then
     elif [ -n "$BYPASS" ]; then RECO_LBL="$(pick1 "$BYPASS")"; RECO="$RECO_LBL (BYPASS, but LATCHES -- needs re-arm)"
     else RECO_LBL="$(pick1 "$DRAIN")"; RECO="$RECO_LBL (CUT/drain, but LATCHES -- needs re-arm)"; fi
   else
-    la="$(printf '%s\n' "$LEVELOK" | tr '|' '\n' | sed '/^$/d' | sed -n '1p')"
+    # This took the FIRST LEVELOK entry with no filter and recommended it as "accepts
+    # values". A "(ro)" entry never accepted anything, so a read-only node could become
+    # the recommended switch. Only a writable one can.
+    la="$(level_writable | sed -n '1p')"
     [ -n "$la" ] && { RECO="$la (native level limit, accepts values -- re-run at the real threshold to confirm enforcement)"; RECO_LBL="$la"; }
   fi
 fi
@@ -3229,7 +3510,7 @@ log "  current reporting: $UNIT, charging reads $([ "$CHGDIR" = p ] && echo POSI
 log "  verification method: $([ "$BLINDV" = 1 ] && echo "BLIND (charging-state + charge_type + voltage)" || echo "current delta (sensor live)")"
 log "  battery now: $(rd $BATT/capacity | sed -n '1p' | pclean)% (started ${CAP}%)  $(( $(batt_temp) / 10 )).$(( $(batt_temp) % 10 ))C  status=$(read_st) (this instant; may read mid re-arm during restore)"
 log "  control classes found on this phone:"
-log "    native %-limit : $([ -n "$CFG_LEVEL" ] && echo "YES ($CFG_LEVEL)" || { [ -n "$LEVELOK" ] && echo "accepts values (enforcement unproven this run)" || echo no; })"
+log "    native %-limit : $([ -n "$CFG_LEVEL" ] && echo "YES ($CFG_LEVEL)" || { [ -n "$(level_writable)" ] && echo "accepts values (enforcement unproven this run)" || echo no; })"
 log "    bypass (idle)  : $([ -n "$BYPASS" ] && echo "YES -- true battery idle, lowest wear" || echo "not proven")"
 log "    charge-cut     : $([ -n "$CUT" ] && echo "YES ($(pick1 "$CUT"))" || echo no)"
 log "    input-cut/drain: $([ -n "$DRAIN" ] && echo "YES ($(pick1 "$DRAIN")) -- discharges while held" || echo no)"
@@ -3306,11 +3587,11 @@ log ""
 log "==== LAYER RECAP ($_scanmode scan -- what ran) ===="
 log "  L0-3 setup/baseline      : OK ($([ "$BLINDV" = 1 ] && echo "BLIND verify: status/charge_type/voltage" || echo "current-delta verify"))"
 log "  L4/4b known + groups     : tested (hits routed above)"
-log "  L5  native level-limits  : $([ -n "$LEVELOK" ] && echo "present / accepts values" || echo "none")"
+log "  L5  native level-limits  : $([ -n "$(level_writable)" ] && echo "present / accepts values" || echo "none")"
 log "  S2  unplug fingerprint   : ${OBS_UNPLUG:-0} node(s) moved"
 log "  L6  discovery            : ${n_disc:-0} charge-control node(s)"
 log "  L6b new-line auto-test   : ${tested_new:-0} trusted switch(es) tested; ${obs_n:-0} unrecognized flagged read-only"
-log "  write policy             : trusted reversible switches + native %-limits ONLY; unknown/vendor/learned nodes observed, never written"
+log "  write policy             : trusted reversible switches + native %-limits, plus unknown/vendor/learned nodes that pass the safety deny-list (SUPER/6c/6e/6f/6g) -- every write snapshotted and replayed; deny-listed hardware never touched"
 log "  L6c firmware-observed    : ${tested_gen:-0} candidate(s) tested"
 log "  L6d combo engine         : ${cn:-0} grouped candidate(s)"
 log "  L6e firmware-teaching    : teacher=${TEACH_P:-none}; learned $NLEARN, tested $TEACHED, VERIFIED $TBUILT new switch(es)$([ -n "$BUILT" ] && echo " + built 1 combo")"
@@ -3344,6 +3625,9 @@ log "BYPASS=${BYPASS#\|}"
 log "CUT=${CUT#\|}"
 log "DRAIN=${DRAIN#\|}"
 log "THROTTLE=${THROTTLE#\|}"
+# Nodes the coulomb counter caught still taking charge. They used to be filed as working CUTs, so
+# naming them explicitly is how the report shows the difference.
+log "NOT_HELD=${NOTHELD#\|}"
 log "BYPASS_HELD=${BYPASS_HELD#\|}"
 log "REASSERT=${REASSERT#\|}"
 log "LEVELOK=${LEVELOK#\|}"
@@ -3369,7 +3653,9 @@ if [ "${MODE:-quick}" = complete ]; then
   log ""
   log "================ ALL WORKING SWITCHES (best first) ================"
   [ -n "${RECO_LBL:-}" ] && log "  * RECOMMENDED   $RECO"
-  printf '%s\n' "$BYPASS|$LEVELOK|$CUT|$DRAIN" | tr '|' '\n' | sed '/^$/d' | awk '!s[$0]++' | while read -r _sl; do
+  # $LEVELOK carries "(ro)" and "(accepts)" entries, which are NOT switches: listing them
+  # printed "node(accepts)  + also works" under a heading that says ALL WORKING SWITCHES.
+  printf '%s\n' "$BYPASS|$(level_enf)|$CUT|$DRAIN" | tr '|' '\n' | sed '/^$/d' | awk '!s[$0]++' | while read -r _sl; do
     [ -n "$_sl" ] || continue
     case "${RECO_LBL:-}" in *"$_sl"*) continue;; esac
     case "$_sl" in *"${RECO_LBL:-zzz_none}"*) continue;; esac
@@ -3385,7 +3671,7 @@ if [ "${MODE:-quick}" = complete ]; then
     # opposite advice for one node, which makes the whole list untrustworthy. The working
     # classification wins: it was verified to hold, whereas the risky lists are earlier
     # observations that the verify step superseded.
-    _wk="$BYPASS|$LEVELOK|$CUT|$DRAIN"
+    _wk="$BYPASS|$(level_enf)|$CUT|$DRAIN"
     printf '%s\n' "$LEAKY|$REASSERT|$THROTTLE" | tr '|' '\n' | sed '/^$/d' | awk '!s[$0]++' | while read -r _sl; do
       [ -n "$_sl" ] || continue
       case "|$_wk|" in *"|$_sl|"*) continue;; esac
