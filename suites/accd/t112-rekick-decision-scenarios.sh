@@ -57,14 +57,28 @@ if _hv_may_kick; then echo KICK; else echo HOLD; fi
 XEOF
 
 step(){ # $1 vbus_uv  $2 iin_ua  $3 type  $4 present
-  echo "$1" > $W/ps/usb/voltage_now
-  echo "$2" > $W/ps/usb/input_current_now
-  echo "$3" > $W/ps/usb/real_type
-  echo "$4" > $W/ps/.present
+  # ATOMIC writes. These four files are written here and read by a SEPARATE shell, and under load
+  # that shell could open one mid-write and read it short. _iin_ma then fails, _hv_may_kick fails
+  # closed (correct: a kick is only justified against a supply PROVEN dead), and the step reports
+  # HOLD where the scenario expects KICK. That is the whole "NOT deterministic" failure: the gate
+  # was right every time and the harness was handing it torn input. Never reproduced when the
+  # suite ran alone, which is exactly how a race presents. Write then rename, so a reader sees
+  # either the old file or the whole new one.
+  _wr(){ printf '%s
+' "$2" > "$1.tmp" && mv -f "$1.tmp" "$1"; }
+  _wr $W/ps/usb/voltage_now      "$1"
+  _wr $W/ps/usb/input_current_now "$2"
+  _wr $W/ps/usb/real_type         "$3"
+  _wr $W/ps/.present              "$4"
   W=$W /system/bin/sh $W/step.sh 2>/dev/null | tail -1
 }
 
-reset_plug(){ rm -f $W/.hvcontract $W/.hvpeak $W/.hvkicked $W/.hvrecover 2>/dev/null; }
+# Wipe EVERY per-plug marker, not a hand-listed four. The latch block also writes .hvaim, .hvfloor,
+# .hvlost and .hvzero, none of which the old list cleared, so one replay could start on state left
+# by the one before it and reach a different verdict. With REPEATS=5 that surfaced as an
+# intermittent 'NOT deterministic' failure that only appeared under load, and never when the suite
+# was run on its own. A glob cannot fall behind the code the way a list does.
+reset_plug(){ rm -f $W/.hv* $W/.rekick 2>/dev/null; }
 
 # scenario <name> <expected-sequence> <steps...>  where each step is "uv:ua:type:present"
 scenario(){
@@ -79,6 +93,9 @@ scenario(){
       _ua=${_rest%%:*}; _rest=${_rest#*:}
       _ty=${_rest%%:*}; _pr=${_rest#*:}
       _v=$(step "$_uv" "$_ua" "$_ty" "$_pr")
+      # An empty verdict means the step shell died, not that the gate held. Left unchecked it
+      # silently shortens the sequence and reads as a decision change.
+      [ -n "$_v" ] || { no "$_name: step produced no verdict - the harness failed, not the gate"; return; }
       _got="$_got${_v:0:1}"
     done
     [ -z "$_first" ] && _first=$_got

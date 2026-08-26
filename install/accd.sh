@@ -2792,10 +2792,29 @@ if ! $_INIT; then
       unset pause_capacity resume_capacity 2>/dev/null || :
       case "${capacity[*]-}" in
         *' '*' '*' '*)
-          if [ "${capacity[*]}" != "${_cfggood-}" ]; then
-            cat $config > $dataDir/.config-good 2>/dev/null || :
-            _cfggood="${capacity[*]}"
-          fi
+          # NEVER cache a throwaway. $config is not always the user's config: `acc -f 90` points the
+          # daemon at $TMPDIR/.acc-f-config, and accd itself uses $TMPDIR/.config and $TMPDIR/.cfg. All
+          # three parse fine and carry a full capacity array, so this branch happily copied them over
+          # the known-good fallback. Device-proven on a Mi A3: after one charge-once to 100,
+          #   .config-good  capacity=(5 101 98 100 false)   + the -f restore hook
+          # and it STAYED that way after the daemon went back to the real config, because .config-good
+          # lives in $dataDir and outlives the tmpfs file it was copied from. The fallback for a config
+          # that will not parse had become "charge to 100% with no cooldown, no current cap and no
+          # limits" -- the most aggressive profile the module can hold, reached silently and kept
+          # across reboots. acc.sh reads the same file when the live config is unreadable.
+          #
+          # Keyed on the path rather than on -f: the rule is that a file in tmpfs cannot be a persistent
+          # fallback, which covers the two daemon temporaries as well. A user running accd on their own
+          # persistent config still caches it, as before.
+          case $config in
+            "$TMPDIR"/*) ;;
+            *)
+              if [ "${capacity[*]}" != "${_cfggood-}" ]; then
+                cat $config > $dataDir/.config-good 2>/dev/null || :
+                _cfggood="${capacity[*]}"
+              fi
+            ;;
+          esac
         ;;
         *)
           _srcgood

@@ -149,4 +149,27 @@ printf '%s' "$_ac" | grep -qF '"$TMPDIR/acca" "$config" "$@"'   && ok "the pass-
 
 grep -qF 'additional opts/args' $execDir/strings.sh 2>/dev/null   && ok "the help still documents the pass-through the loop now accepts"   || no "the help no longer documents additional opts/args - code and help disagree again"
 
+# ---- 8: a throwaway config must never become the known-good fallback ----------------------------
+# _srccfg caches whatever config it just parsed into $dataDir/.config-good, and $config is not
+# always the user's file: -f points the daemon at $TMPDIR/.acc-f-config. That copy parsed, so the
+# fallback became the one-shot profile. Device-proven on a Mi A3 before the guard: one charge-once
+# to 100 left .config-good holding capacity=(5 101 98 100 false) AND the -f restore hook, so a
+# config that later failed to parse would fall back to "charge to 100, no cooldown, no caps", and
+# the fallback itself carried an exec.
+_scblock=$(sed 's/^[[:space:]]*#.*//' "$AD" | grep -B8 -F 'cat $config > $dataDir/.config-good')
+
+printf '%s' "$_scblock" | grep -qF '"$TMPDIR"/*'   && ok "the known-good cache refuses a config living in tmpfs"   || no "no tmpfs guard on .config-good - a -f session poisons the fallback with its own profile"
+
+# The guard has to sit BEFORE the copy, not merely somewhere in the file.
+_gline=$(sed 's/^[[:space:]]*#.*//' "$AD" | grep -nF '"$TMPDIR"/*' | head -1 | cut -d: -f1)
+_cline=$(sed 's/^[[:space:]]*#.*//' "$AD" | grep -nF 'cat $config > $dataDir/.config-good' | head -1 | cut -d: -f1)
+if [ -n "$_gline" ] && [ -n "$_cline" ] && [ "$_gline" -lt "$_cline" ]; then
+  ok "the guard is above the copy, so the copy cannot run first"
+else
+  no "the tmpfs guard is not above the .config-good copy (guard=${_gline:-none} copy=${_cline:-none})"
+fi
+
+# The path -f actually uses must be under $TMPDIR, or the guard matches nothing.
+printf '%s' "$_ac" | grep -qF 'config=$TMPDIR/.acc-f-config'   && ok "-f's throwaway is under \$TMPDIR, which is what the guard keys on"   || no "-f's throwaway is no longer under \$TMPDIR - the tmpfs guard no longer covers it"
+
 fin
