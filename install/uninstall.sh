@@ -83,6 +83,12 @@ magisk_busybox="$(ls /data/adb/*/bin/busybox /data/adb/magisk/busybox 2>/dev/nul
     ${BB_OPTIONAL:-false} && echo "-> BB_OPTIONAL set: continuing with /system tools (some steps limited)" || exit 3
   }
 }
+# rc23b: test $busybox_dir, not $bin_dir. The applets live in $busybox_dir; $bin_dir is only where
+# a user MAY drop a static busybox and is empty on a normal install. Asking whether $bin_dir led
+# PATH meant any caller that had prepended it itself turned this into a no-op, and $busybox_dir
+# was never added -- so every busybox applet silently vanished. That is how acc-switch-scan.sh
+# lost start-stop-daemon, and with it the daemon it restarts on the way out. Colons anchor the
+# match so one directory name containing another cannot satisfy it.
 case ":$PATH:" in
   *":$busybox_dir:"*) ;;
   *) export PATH="$bin_dir:$busybox_dir:$PATH";;
