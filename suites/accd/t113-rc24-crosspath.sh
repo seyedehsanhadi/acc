@@ -202,15 +202,19 @@ else
 fi
 
 # R6. The installer must keep exit 0 and warn. Magisk drops the module on a nonzero installer.
-for _f in "$execDir/../../../install.sh" /data/local/tmp/install.sh; do
+# BOTH installers carry this code and they drift: install.sh is the tarball/online path,
+# customize.sh is the Magisk flash path, and only one of them was being checked.
+_t113any=0
+for _f in "$execDir/../../../install.sh" "$execDir/../../../customize.sh"           /data/local/tmp/install.sh /data/local/tmp/customize.sh; do
   [ -f "$_f" ] || continue
+  _t113any=1
   if grep -q 'daemon did NOT start' "$_f" && grep -q '^exit 0' "$_f"; then
-    ok "installer warns loudly and still exits 0"
+    ok "$(basename "$_f") warns loudly and still exits 0"
   else
-    no "installer no longer warns, or no longer exits 0"
+    no "$(basename "$_f") no longer warns, or no longer exits 0"
   fi
-  break
 done
+[ "$_t113any" = 1 ] || sk "no installer script reachable from here"
 
 rm -rf "$T"
 fin
