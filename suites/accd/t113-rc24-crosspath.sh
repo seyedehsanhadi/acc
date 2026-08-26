@@ -121,5 +121,33 @@ grep -q '_se_supply_nodes online' "$execDir/state-export.sh" \
   && ok "the online fallback is filtered (no battery/online)" \
   || no "the online fallback still globs battery/online"
 
+# ---- review round 2: the two leftovers that were safe to fix --------------------
+# R1. apply_on_plug's arg=default branch is the restore that runs when the USER CLEARS a current
+# cap -- the most likely of the five restore paths to fire, and the last one still writing
+# 5000000 to usb/current_max.
+if grep -q 'restore skip' "$execDir/misc-functions.sh"; then
+  ok "the clear-a-cap restore skips negotiation supplies"
+else
+  no "apply_on_plug default still lifts usb/"
+fi
+
+# R4. The leak hold `continue`s past is_charging(), which carries the thermal cutoff. The hold can
+# last hours, and CPU load heats the pack whether or not the input is cut.
+# grep -E, not BRE alternation: toybox grep has no backslash-pipe and would match nothing.
+if grep -qE '_lst|_ltn' "$execDir/accd.sh"; then
+  ok "the thermal cutoff runs during a leak hold"
+else
+  no "shutdown_temp is still skipped for the whole hold"
+fi
+
+# ...and it must stay ADDITIVE: the hold must not start calling is_charging(), which is what the
+# `continue` exists to avoid. Comments are stripped first -- the block's own comment explains why
+# it avoids is_charging(), and the word in prose is not a call.
+if awk '/if leak_backstop; then/,/^      fi$/' "$execDir/accd.sh"      | grep -v '^[[:space:]]*#' | grep -q 'is_charging'; then
+  no "the leak hold now calls is_charging - that reintroduces the resume fight"
+else
+  ok "the leak hold still does not call is_charging"
+fi
+
 rm -rf "$T"
 fin

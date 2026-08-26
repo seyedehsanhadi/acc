@@ -1548,6 +1548,18 @@ if ! $_INIT; then
       # evaluates the hysteresis against what the user now actually wants.
       if leak_backstop; then
         _srccfg
+        # The thermal cutoff also lives inside is_charging(), so it was skipped for as long as the
+        # hold lasted -- and a hold can last hours while the cell drains to the limit. Not charging
+        # usually means cooling, but CPU load does not care that the input is cut, so the one check
+        # that must never be missed is added here directly. Deliberately NOT a call to
+        # is_charging(): that would run the resume logic this `continue` exists to keep away from
+        # the leak cut. Additive and fail-safe, exactly like the copy above -- coerce a garbage
+        # threshold, band-check it, demand a real reading, and do nothing without one.
+        _lst=${temperature[3]}; case "$_lst" in ''|*[!0-9]*) _lst=55;; esac
+        { [ "$_lst" -ge 40 ] && [ "$_lst" -le 70 ]; } 2>/dev/null || _lst=55
+        _ltn=$(temp_now 2>/dev/null) || _ltn=
+        case "${_ltn:-x}" in ''|*[!0-9-]*) _ltn=;; esac
+        [ -z "$_ltn" ] || [ "$_ltn" -lt $(( _lst * 10 )) ] || shutdown
         _nap ${loopDelay[1]:-9}
         continue
       fi

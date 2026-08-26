@@ -140,6 +140,21 @@ apply_on_plug() {
     # An unreadable or non-numeric live value still writes, and so does a non-numeric default:
     # leaving a node capped is the failure this path exists to prevent, so it fails toward writing.
     if [ "$arg" = default ]; then
+      # The negotiation supplies are not ours to release either. Every OTHER restore path -- the
+      # daemon's init restore, the re-kick lift, the uninstaller's config replay and its name-glob
+      # sweep -- already skips usb/ dc/ pc_port/ tcpm*, because one write there renegotiates the
+      # port down to ~100mA. This is the restore that runs when the USER CLEARS a current cap, so
+      # it was the most likely of the five to fire, and it was the one still writing 5000000 to
+      # usb/current_max.
+      #
+      # Skipping does not leave the pack uncapped: main-charger/current_max and
+      # battery/constant_charge_current are lifted as before. If usb/ was holding the user's cap it
+      # keeps that value until the next unplug, which is strictly better than collapsing the port
+      # to 100mA.
+      if command -v is_nego_node >/dev/null 2>&1 && is_nego_node "$file"; then
+        command -v _wlog >/dev/null 2>&1 && _wlog "restore skip $file (input negotiation)" || :
+        continue
+      fi
       case "$file" in
         */current_max|*/input_current|*/input_current_max|*/input_current_limit|*/input_current_settled|*/restrict_cur)
           # restrict_cur belongs here too, and it was missed because the pattern above is written
