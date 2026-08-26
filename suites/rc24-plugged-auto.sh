@@ -63,6 +63,41 @@ say "Decides whether a 5000000 write renegotiates the port down, or whether the 
 say "was the cable. Does NOT touch the cap-clear paths either way."
 sh $P/lift-exp.sh 2>&1 || say "(lift experiment returned $?)"
 
+# ---- 2b. idle-avoidance, live ---------------------------------------------------------------
+# t125 proves the RULE off-hardware. This proves the phone acts on it: set the documented
+# forever-plugged pair (pause 60 / resume 40, aiapc=false) and watch whether the level actually
+# leaves the limit instead of parking at it. That parking is the reported symptom -- a phone stuck
+# at 59% with exactly this config -- and it is what the removed `pause > 60` gate caused.
+hr "2b LIVE IDLE-AVOIDANCE (pause 60 / resume 40 / aiapc=false)"
+_ia_lv=$($A/acca --state 2>/dev/null | sed -n 's/.*"capacityPct":\([0-9]*\).*/\1/p')
+if [ "${_ia_lv:-0}" -lt 62 ]; then
+  say "SKIP: level ${_ia_lv}% is not above a pause of 60 yet; nothing to observe."
+else
+  $A/acca -s shutdown_capacity=5 cooldown_capacity=101 resume_capacity=40 pause_capacity=60 >/dev/null 2>&1
+  $A/acca -s allow_idle_above_pcap=false >/dev/null 2>&1
+  say "config: $(grep -E '^capacity=|^allowIdleAbovePcap=' $D/config.txt | tr '
+' ' ')"
+  _ia0=$_ia_lv; _i=0
+  while [ $_i -lt 12 ]; do
+    sleep 30; _i=$(( _i + 1 ))
+    _ia1=$($A/acca --state 2>/dev/null | sed -n 's/.*"capacityPct":\([0-9]*\).*/\1/p')
+    _cur=$($A/acca --state 2>/dev/null | sed -n 's/.*"current_raw":\(-*[0-9]*\).*/\1/p')
+    say "  t+$(( _i * 30 ))s level=${_ia1}% raw=${_cur}"
+    [ "${_ia1:-0}" -lt "${_ia0:-0}" ] && break
+  done
+  if [ "${_ia1:-0}" -lt "${_ia0:-0}" ]; then
+    say "RESULT: level fell ${_ia0}% -> ${_ia1}% - it is discharging toward resume, not parked."
+  else
+    say "RESULT: level did NOT fall in 6 minutes. Either this switch bypasses (phone runs off the"
+    say "        charger, which is what aiapc=false exists to prevent) or idle-avoidance is not"
+    say "        engaging. Check the flight log for cutByAcc and the switch that is in force."
+  fi
+  cp $P/config.autobak $D/config.txt 2>/dev/null || :
+  $A/acc -D restart >/dev/null 2>&1 || :
+  sleep 15
+  say "restored: $(grep -E '^capacity=' $D/config.txt)"
+fi
+
 # ---- 3. the plugged suites ----------------------------------------------------------------------
 hr "3  PLUGGED SUITES"
 PASS=0; FAIL=0; NOV=0; FAILED=""

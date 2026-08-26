@@ -483,10 +483,30 @@ if ! $_INIT; then
     # rc(6.3.1): guard unset/garbage pause_capacity (hand-corrupted config) -- return 1
     # (do not special-case idle) rather than let an unset ${capacity[3]} abort under set -u.
     case ${capacity[3]-} in ''|*[!0-9]*) return 1;; esac
+    # The `pause > 60` / `pause > 3900mV` gates are GONE, and they were a real defect: they made
+    # allowIdleAbovePcap=false do nothing across the exact range default-config.txt recommends it
+    # for. That file says, forty lines apart:
+    #     "If set to false, accd will avoid idle mode (if possible) when capacity > pause_capacity."
+    #     "The recommended capacity range for long-term/forever-plugged is 40-60%."
+    # and then the code required pause > 60, so every value in 40-60 turned the feature off. A
+    # field report of a phone parked at 59% with pause=60, resume=40 and aiapc=false is exactly
+    # this: 60 -gt 60 is false, so the daemon took the plain disable_charging branch and idled at
+    # the limit instead of discharging toward resume. Nothing in the file ever justified the 60.
+    #
+    # THE OVERSHOOT MARGIN STAYS, and it is not cosmetic. The force-discharge branch this gates
+    # (accd.sh ~1583) and the settle branch at ~1911 BOTH increment xIdleCount, and the budget is
+    # only 2. They are mutually exclusive today solely because this returns false until the level
+    # is at least pause+1, while the settle branch needs level <= pause. Relaxing to `>= pause`
+    # would let both fire in ONE pass: the budget would be spent immediately, and site B's
+    # enable_charging/disable_charging pair would toggle the switch at the limit -- which is the
+    # sweet/M2101K6G churn (~40 toggles in 21 minutes) that the budget exists to stop.
+    #
+    # So this now means what the documentation says -- "capacity > pause_capacity" -- for every
+    # pause value, instead of only above 60.
     if [ ${capacity[3]} -gt 3000 ]; then
-      [ ${capacity[3]} -gt 3900 ] && [ $(volt_now) -gt $(( ${capacity[3]} + 50 )) ]
+      [ $(volt_now) -gt $(( ${capacity[3]} + 50 )) ]
     else
-      [ ${capacity[3]} -gt 60 ] && [ $(batt_cap) -gt $(( ${capacity[3]} + 1 )) ]
+      [ $(batt_cap) -gt ${capacity[3]} ]
     fi
   }
 

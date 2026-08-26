@@ -186,12 +186,24 @@ runCmdOnPause=''
 # allow_idle_above_pcap (aiapc) #
 #
 # Type: Boolean
-# Default: true
+# Default: false
+#
+# The stated default said "true" while line 3 of this file has always SHIPPED false, so a fresh
+# install never matched its own documentation. write-config.sh independently coerced a missing or
+# garbage value to true, which meant the first config write could silently flip a user's setting.
+# All three now say false.
 #
 # If set to false, accd will avoid idle mode (if possible) when capacity > pause_capacity.
 # This is useful for forever-plugged setups, where battery longevity is a top priority.
 # Idle mode is good, but "storing" a highly charged battery for a LONG time is a bad idea.
 # The recommended capacity range for long-term/forever-plugged is 40-60%.
+#
+# "capacity > pause_capacity" is now literally what the daemon tests. It used to additionally
+# require pause_capacity > 60 (or > 3900 mV), which switched this feature OFF for every value in
+# the 40-60 range recommended two lines above -- a phone set to pause 60 / resume 40 with aiapc
+# false simply idled at the limit. The daemon still waits for the level to be ABOVE the pause
+# level rather than exactly at it, because the force-discharge and the settle branch share a
+# two-attempt budget and would otherwise both fire in one pass and toggle the switch at the limit.
 
 
 # amp_factor (af) # volt_factor (vf) #
