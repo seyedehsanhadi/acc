@@ -3260,13 +3260,6 @@ if ! $_INIT; then
       case "$_ccf" in
         */current_max|*/input_current|*/input_current_limit|*/input_current_settled) _ccd=5000000;;
       esac
-      # ...but not on a negotiation supply. The uninstaller stopped writing these in rc24 because
-      # one write to usb/current_max renegotiates the port down to ~100mA; this sibling kept doing
-      # it on every daemon init, which is the more frequent path of the two.
-      if command -v is_nego_node >/dev/null 2>&1 && is_nego_node "$_ccf"; then
-        command -v _wlog >/dev/null 2>&1           && _wlog "init restore skip $_ccf (input negotiation)" || :
-        continue
-      fi
       echo "$_ccd" > "$_ccf" 2>/dev/null || :
       command -v _wlog >/dev/null 2>&1 \
         && _wlog "init restore $_ccf <- $_ccd (was $_ccn; no current limit configured)" || :

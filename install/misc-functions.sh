@@ -140,21 +140,6 @@ apply_on_plug() {
     # An unreadable or non-numeric live value still writes, and so does a non-numeric default:
     # leaving a node capped is the failure this path exists to prevent, so it fails toward writing.
     if [ "$arg" = default ]; then
-      # The negotiation supplies are not ours to release either. Every OTHER restore path -- the
-      # daemon's init restore, the re-kick lift, the uninstaller's config replay and its name-glob
-      # sweep -- already skips usb/ dc/ pc_port/ tcpm*, because one write there renegotiates the
-      # port down to ~100mA. This is the restore that runs when the USER CLEARS a current cap, so
-      # it was the most likely of the five to fire, and it was the one still writing 5000000 to
-      # usb/current_max.
-      #
-      # Skipping does not leave the pack uncapped: main-charger/current_max and
-      # battery/constant_charge_current are lifted as before. If usb/ was holding the user's cap it
-      # keeps that value until the next unplug, which is strictly better than collapsing the port
-      # to 100mA.
-      if command -v is_nego_node >/dev/null 2>&1 && is_nego_node "$file"; then
-        command -v _wlog >/dev/null 2>&1 && _wlog "restore skip $file (input negotiation)" || :
-        continue
-      fi
       case "$file" in
         */current_max|*/input_current|*/input_current_max|*/input_current_limit|*/input_current_settled|*/restrict_cur)
           # restrict_cur belongs here too, and it was missed because the pattern above is written
@@ -1127,12 +1112,6 @@ rekick_usb() {
             _rkd=${_rkl##*::}
             case "${_rkd:-x}" in ''|x|*[!0-9]*) continue;; esac
             [ -w "$_rkn" ] || continue
-            # Never lift a negotiation supply: that is the write rc24 measured dropping a Pixel
-            # port to 100mA, and this loop walked every recorded */current_max including usb/.
-            if is_nego_node "$_rkn"; then
-              command -v _wlog >/dev/null 2>&1 && _wlog "rekick skip $_rkn (input negotiation)" || :
-              continue
-            fi
             # rc24 LIFT: release HIGH and let the driver clamp - the rule apply_on_plug already
             # uses. The recorded default is a SNAPSHOT of whatever the node read when ACC first
             # identified it; taken on a computer port that is 500000, and replaying it on a wall
@@ -1709,23 +1688,6 @@ config_=$config
 # hot path and is already tested; this is the same three lines without its bookkeeping.
 . $execDir/cfg-guard.sh
 
-# Is this an input-NEGOTIATION supply? The canonical list; uninstall.sh keeps a copy inline
-# because it runs at flash time with no module files loadable, and any change here belongs there.
-#
-# These nodes are owned by the charger/USB negotiation. rc24 measured ONE write to usb/current_max
-# dropping a Pixel (bluejay) port to ~100 mA until the value was written back, so a "restore" to a
-# safe-looking 5000000, or a replay of a recorded default, is not neutral here: it renegotiates the
-# port downward and leaves the phone trickle-charging.
-#
-# This gates RESTORE and LIFT writes only. Applying the user's own maxChargingCurrent to these
-# nodes is how the limit works on most modern platforms -- the cap genuinely acts on input current
-# -- and apply_on_plug has its own back-off for a node that refuses to hold a value.
-is_nego_node() {
-  case "${1#/sys/class/power_supply/}" in
-    usb/*|dc/*|pc_port/*|tcpm*) return 0;;
-  esac
-  return 1
-}
 
 srccfg_try() {
   _sctf=${1:-$config}

@@ -66,26 +66,34 @@ grep -q 'cfg_check_kv' "$execDir/acca.sh" && ok "acca -s validates before writin
 grep -q 'cfg_parses' "$execDir/acca.sh"   && ok "acca sources the config parse-safely" \
                                           || no "acca still has a bare . \$config under set -eu"
 
-# ---- 4. negotiation supplies ------------------------------------------------
-# is_nego_node lives in misc-functions.sh. Source it in a guarded way: it is a big file with an
-# execDir dependency, and a failure to load must skip these cases rather than fail the suite.
-command -v is_nego_node >/dev/null 2>&1 || { . "$execDir/misc-functions.sh" 2>/dev/null || :; trap - EXIT; }
-if command -v is_nego_node >/dev/null 2>&1; then
-  for n in usb/current_max dc/current_max pc_port/current_max tcpm-source-psy-x/current_max; do
-    is_nego_node "$n" && ok "negotiation node recognised: $n" || no "$n not recognised"
-  done
-  for n in battery/constant_charge_current_max main/current_max main-charger/current_max; do
-    is_nego_node "$n" && no "$n wrongly treated as negotiation" || ok "battery-side node allowed: $n"
-  done
-  is_nego_node /sys/class/power_supply/usb/current_max \
-    && ok "absolute paths are recognised too" || no "absolute path not recognised"
+# ---- 4. negotiation supplies: NOT a blanket rule ---------------------------
+# rc24 forbids writing usb/ dc/ pc_port/ tcpm* from the UNINSTALLER'S name-glob sweep, and that
+# skip is deliberate and stays. It was briefly generalised into a predicate applied to every
+# RELEASE path too, and that was wrong -- the code's own measurements say so:
+#   * apply_on_plug APPLIES the user's cap to usb/current_max. Skipping the release means ACC can
+#     cap the node and never let go: "the cap will not clear", reproduced on a Pixel 6a and a Mi A3.
+#   * the init restore exists SPECIFICALLY to undo a leftover usb/current_max cap -- the reporter's
+#     ledger names that node, `usb/current_max <- 50000 (was 1800000)`.
+#   * the re-kick lift targets the input-negotiation nodes BY DESIGN; skipping them makes it inert.
+#   * the ~100mA collapse that motivated the generalisation was later explained by a cable with
+#     ~500 milliohm of series resistance, whose input collapses identically with ACC uninstalled.
+# So the assertion here is the opposite of what it briefly was: the release paths must still be
+# able to let go of an input node.
+if grep -q 'never LOWER a live value on a restore' "$execDir/misc-functions.sh"; then
+  ok "apply_on_plug can still release an input node (the cap can clear)"
 else
-  sk "is_nego_node not exported into this shell"
+  no "the restore path no longer releases input nodes - 'the cap will not clear' is back"
 fi
-grep -q 'is_nego_node' "$execDir/misc-functions.sh" && ok "the re-kick lift skips negotiation nodes" \
-                                                    || no "re-kick still lifts usb/"
-grep -q 'is_nego_node' "$execDir/accd.sh" && ok "init restore skips negotiation nodes" \
-                                          || no "init restore still writes 5000000 to usb/"
+if grep -q 'usb/current_max <- 50000' "$execDir/accd.sh"; then
+  ok "the init restore still repairs a leftover input cap"
+else
+  no "the init restore no longer repairs the node it was written for"
+fi
+if grep -q 'usb/\*|dc/\*|pc_port/\*|tcpm\*' "$execDir/uninstall.sh"; then
+  ok "the uninstaller's name-glob sweep keeps its rc24 skip"
+else
+  no "the uninstaller lost its rc24 negotiation skip"
+fi
 
 # ---- 5. journal_check needs panic evidence ---------------------------------
 grep -q 'panic\*|\*watchdog' "$execDir/probe-journal.sh" 2>/dev/null \
@@ -122,14 +130,9 @@ grep -q '_se_supply_nodes online' "$execDir/state-export.sh" \
   || no "the online fallback still globs battery/online"
 
 # ---- review round 2: the two leftovers that were safe to fix --------------------
-# R1. apply_on_plug's arg=default branch is the restore that runs when the USER CLEARS a current
-# cap -- the most likely of the five restore paths to fire, and the last one still writing
-# 5000000 to usb/current_max.
-if grep -q 'restore skip' "$execDir/misc-functions.sh"; then
-  ok "the clear-a-cap restore skips negotiation supplies"
-else
-  no "apply_on_plug default still lifts usb/"
-fi
+# R1 was REVERTED. apply_on_plug's arg=default branch must still lift an input node -- that is
+# the release that clears a user's cap, and section 4 above already pins it. Nothing to assert
+# here beyond what section 4 says.
 
 # R4. The leak hold `continue`s past is_charging(), which carries the thermal cutoff. The hold can
 # last hours, and CPU load heats the pack whether or not the input is cut.
@@ -162,7 +165,7 @@ else
   no "the usb/ fallback was removed - a Tensor ignoring charge_stop_level would overcharge"
 fi
 # and the saved restore value must match the node's domain, not always 2000000
-if grep -q 'nvb_cut:-0} = 1 ] && echo 0 > $TMPDIR/.nvb-restore' "$execDir/accd.sh"; then
+if grep -q 'echo 0 > $TMPDIR/.nvb-restore' "$execDir/accd.sh"; then
   ok "the restore default matches the cut node's domain"
 else
   no "the restore fallback would write a current value into a 0/1 node"

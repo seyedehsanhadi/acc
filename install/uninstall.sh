@@ -171,13 +171,6 @@ rm -rf \
         _node=${_tok%%::*}; _def=${_tok##*::}
         case "$_def" in ''|*[!0-9]*) continue;; esac
         case "$_node" in /*) ;; *) _node=/sys/class/power_supply/$_node;; esac
-        # Same rule as the name-glob sweep further down, which has skipped these since rc24: never
-        # write a negotiation supply. That skip only covered the glob, so this config replay still
-        # wrote a recorded default to usb/current_max and left the port renegotiated down -- the
-        # exact failure the later skip exists to prevent, on the path that runs first.
-        # Canonical definition: is_nego_node() in misc-functions.sh. Inline here because uninstall
-        # runs at flash time with no module files loadable.
-        case "${_node#/sys/class/power_supply/}" in usb/*|dc/*|pc_port/*|tcpm*) continue;; esac
         [ -w "$_node" ] && echo "$_def" > "$_node" 2>/dev/null || :
       done
     done
