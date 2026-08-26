@@ -325,7 +325,7 @@ case "${_V_batt:-}" in ''|*[!0-9]*) _V_batt= ;; esac
   echo "  bootreason: sys=$(getprop sys.boot.reason) raw=$(getprop ro.boot.bootreason) last=$(getprop sys.boot.reason.last)"
   echo "  reboot-signal=$REBOOT_SIGNAL   crash-signal=$CRASH_SIGNAL"
   echo "  pstore: $(ls /sys/fs/pstore/ 2>/dev/null | tr '\n' ' ' || echo none)  tombstones: $(ls /data/tombstones/ 2>/dev/null | wc -l)  anr: $(ls /data/anr/ 2>/dev/null | wc -l)"
-  echo "  reboot archive: $([ -f $DD/reboot-history.log ] && echo "$(grep -c '^====' $DD/reboot-history.log 2>/dev/null) boots recorded (persistent)" || echo "none yet")"
+  echo "  reboot archive: $([ -f $DD/reboot-history.log ] && echo "$(grep -c '^====' $DD/reboot-history.log 2>/dev/null || :) boots recorded (persistent)" || echo "none yet")"
   echo "  last app-crash: $(logcat -d -b crash 2>/dev/null | grep -A2 'FATAL EXCEPTION' | grep -m1 "$PKG" | tr -d ' ' | head -c 60)"
   echo
   echo "[privacy] scope: charging, reboot, root modules, and THIS app only."

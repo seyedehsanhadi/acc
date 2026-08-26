@@ -120,7 +120,9 @@ grep -q '_jcblame' "$execDir/probe-journal.sh" && ok "blacklist + notify + strik
 
 # ---- 8. shipped default vs first write --------------------------------------
 _dc=$(sed -n 's/^allowIdleAbovePcap=//p' "$execDir/default-config.txt" 2>/dev/null | head -1)
-_wc=$(grep -c 'aiapc=false' "$execDir/write-config.sh" 2>/dev/null || echo 0)
+# grep -c PRINTS 0 and EXITS non-zero on no match, so `|| echo 0` emits two values and any
+# arithmetic on the result breaks. grep already supplied the count; `|| :` only swallows the status.
+_wc=$(grep -c 'aiapc=false' "$execDir/write-config.sh" 2>/dev/null || :)
 if [ "$_dc" = false ] && [ "${_wc:-0}" -ge 1 ]; then
   ok "write-config agrees with the shipped allowIdleAbovePcap=$_dc"
 else

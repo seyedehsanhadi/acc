@@ -63,13 +63,28 @@ if [ -f "$PJ" ]; then
   chk "the armed line is exactly what was passed" "battery/killer_node 0 1" "$(cat $probePending 2>/dev/null)"
 
   # Now the phone "reboots" with the marker still present.
+  #
+  # A SURVIVING MARKER IS NOT PROOF OF A PANIC, and this suite used to assume it was. cycle_switches
+  # arms the journal, writes the switch and disarms it, so any SIGKILL in between -- AccA's 150s
+  # timeout on `acc -t`, a killed foreground scan, an lmkd reap -- leaves the file behind with no
+  # crash having happened. Blacklisting is PERMANENT and can cost the user their only working
+  # switch, so it now demands the same panic evidence post-fs-data.sh demands for early-cap: latch
+  # always, blame only on a panic/watchdog boot reason. Both directions are asserted.
+  getprop(){ case "$1" in *reason*) echo kernel_panic;; *) echo "";; esac; }
   journal_check 2>/dev/null || :
-  grep -qxF 'battery/killer_node 0 1' "$probeBlacklist" 2>/dev/null \
-    && ok "after a crash-reboot the candidate is permanently blacklisted" \
-    || no "the crashing candidate was NOT blacklisted - the next scan would crash the phone again"
-  journal_blacklisted 'battery/killer_node 0 1' 2>/dev/null \
-    && ok "and journal_blacklisted reports it" \
-    || no "journal_blacklisted does not see the entry it just wrote"
+  grep -qxF 'battery/killer_node 0 1' "$probeBlacklist" 2>/dev/null     && ok "after a PANIC reboot the candidate is permanently blacklisted"     || no "the crashing candidate was NOT blacklisted - the next scan would crash the phone again"
+  journal_blacklisted 'battery/killer_node 0 1' 2>/dev/null     && ok "and journal_blacklisted reports it"     || no "journal_blacklisted does not see the entry it just wrote"
+
+  # The case that motivated the gate: same surviving marker, ordinary reboot.
+  _t51keep=$(cat "$probeBlacklist" 2>/dev/null)
+  rm -f "$probePending" "$probeBlacklist"
+  journal_arm 'battery/innocent_node 0 1'
+  getprop(){ case "$1" in *reason*) echo reboot,shell;; *) echo "";; esac; }
+  journal_check 2>/dev/null || :
+  grep -qxF 'battery/innocent_node 0 1' "$probeBlacklist" 2>/dev/null     && no "a killed scan permanently blacklisted a switch that never crashed anything"     || ok "a surviving marker without panic evidence does NOT blacklist"
+  unset -f getprop 2>/dev/null || :
+  printf '%s
+' "$_t51keep" > "$probeBlacklist" 2>/dev/null || :
   journal_blacklisted 'battery/other_node 0 1' 2>/dev/null \
     && no "an unrelated node reports as blacklisted" \
     || ok "an unrelated node is not blacklisted"
@@ -86,12 +101,18 @@ if [ -f "$PJ" ]; then
 
   # Idempotence: two crashes on the same node must not duplicate the entry, or the file grows without
   # bound on a device that keeps crashing.
+  #
+  # Blacklisting now requires panic evidence, so the stub has to be in scope for a scenario about
+  # what happens AFTER a blame decision -- otherwise this measures the gate, which the two
+  # assertions above already cover, and reports it as a duplication fault.
+  getprop(){ case "$1" in *reason*) echo kernel_panic;; *) echo "";; esac; }
   rm -f "$probeBlacklist"
   journal_arm 'battery/dup 0 1'; journal_check 2>/dev/null || :
   journal_arm 'battery/dup 0 1'; journal_check 2>/dev/null || :
   _n=$(grep -cxF 'battery/dup 0 1' "$probeBlacklist" 2>/dev/null || :)
   case "${_n:-0}" in 1) ok "a repeated crash does not duplicate the blacklist entry";;
                      *) no "blacklist has ${_n:-0} copies of the same node";; esac
+  unset -f getprop 2>/dev/null || :
 
   # An empty marker must not blacklist an empty line, which would then match everything or nothing
   # depending on the grep.

@@ -89,7 +89,7 @@ while [ $_w -lt 90 ]; do
   [ -f $TD/ch-curr-ctrl-files ] && grep -q / $TD/ch-curr-ctrl-files 2>/dev/null && break
   sleep 10; _w=$((_w+10))
 done
-_n=$(grep -c / $TD/ch-curr-ctrl-files 2>/dev/null || echo 0)
+_n=$(grep -c / $TD/ch-curr-ctrl-files 2>/dev/null || :); _n=${_n:-0}
 [ "$_n" -ge 1 ] && ok "resolved $_n current-control node(s) after ${_w}s" \
                 || no "no current-control nodes resolved in ${_w}s - a cap has nothing to write"
 
@@ -116,7 +116,7 @@ _h=$(holding $MA)
 [ "$_h" -eq 0 ] && ok "no node left at ${MA}000" || no "$_h node(s) still pinned at ${MA}000"
 
 sec "4  VOLTAGE ${MV}mV"
-_vn=0; [ -f $TD/ch-volt-ctrl-files ] && _vn=$(grep -c / $TD/ch-volt-ctrl-files 2>/dev/null || echo 0)
+_vn=0; [ -f $TD/ch-volt-ctrl-files ] && { _vn=$(grep -c / $TD/ch-volt-ctrl-files 2>/dev/null || :); _vn=${_vn:-0}; }
 if [ "$_vn" -eq 0 ]; then
   sk "this phone exposes no battery voltage-limit node"
 else

@@ -68,7 +68,7 @@ run(){
   : > $W/wrote
   /system/bin/sh $W/run.sh 2>/dev/null
   sort $W/wrote 2>/dev/null | sed 's/^/       /'
-  grep -c WROTE $W/wrote 2>/dev/null || echo 0
+  grep -c WROTE $W/wrote 2>/dev/null || :
 }
 
 cnt(){ run "$@" | tail -1; }

@@ -86,7 +86,15 @@ cd /sys/class/power_supply/
 if [ -f $execDir/cfg-guard.sh ]; then
   . $execDir/cfg-guard.sh
 else
-  cfg_parses() { [ -f "$1" ]; }
+  cfg_parses() {
+    [ -f "$1" ] || return 1
+    for _cfpsh in /system/bin/sh /system/xbin/sh /bin/sh; do
+      [ -x "$_cfpsh" ] || continue
+      "$_cfpsh" -n "$1" 2>/dev/null || return 1
+      return 0
+    done
+    return 0
+  }
   cfg_srcsafe() { . "$1" 2>/dev/null || :; }
   cfg_check_kv() { return 0; }
 fi

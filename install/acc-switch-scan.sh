@@ -510,7 +510,10 @@ fi
 [ -n "$ACCA" ] && "$ACCA" -D stop >/dev/null 2>&1 || :
 nap
 
-total=$(grep -cvE '^#|^$' "$SW" 2>/dev/null || echo "?")
+# `|| :`, not `|| echo "?"`: grep -c prints its count and THEN exits non-zero when that count is
+# zero, so the fallback appended a second value and $total became "0 ?" -- which every later
+# arithmetic and comparison on it then mis-read.
+total=$(grep -cvE '^#|^$' "$SW" 2>/dev/null || :)
 say "testing $total switches (max ${MAX_S}s each)..."
 say ""
 

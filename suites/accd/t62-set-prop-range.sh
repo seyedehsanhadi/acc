@@ -35,6 +35,7 @@ ID=t62
 P=0; F=0
 ok(){ P=$((P+1)); echo "  PASS  $*"; }
 no(){ F=$((F+1)); echo "  FAIL  $*"; }
+sk(){ echo "  SKIP  $*"; }
 fin(){ echo "$ID: $P passed, $F failed"; [ "$F" -eq 0 ] && exit 0 || exit 1; }
 
 execDir=${execDir:-/data/adb/vr25/acc}
@@ -42,7 +43,11 @@ SP=$execDir/set-prop.sh
 WC=$execDir/write-config.sh
 [ -f "$SP" ] || { no "set-prop.sh not found"; fin; }
 
-_sp=$(sed 's/^[[:space:]]*#.*//' "$SP")
+# The rule set moved out of set-prop.sh into cfg-guard.sh, because acca.sh's -s branch needed the
+# identical check and had none -- so `acc -s pause_capacity=999` was refused while
+# `acca -s pause_capacity=999` stored a clamped 80 and reported success. AccA drives acca. Read the
+# whole guard chain, not one file, or this suite pins where the code lives rather than what it does.
+_sp=$(sed 's/^[[:space:]]*#.*//' "$SP" ; [ -f "$execDir/cfg-guard.sh" ] && sed 's/^[[:space:]]*#.*//' "$execDir/cfg-guard.sh")
 
 # ---- 1: the -s path validates a capacity at all -------------------------------------------------------
 printf '%s' "$_sp" | grep -qE 'pause_capacity|resume_capacity|shutdown_capacity' \
@@ -97,6 +102,30 @@ if grep -q 'Capacity out of range' $execDir/acc.sh 2>/dev/null; then
   ok "the shorthand check (acc 999) is intact"
 else
   no "the shorthand range check has been lost"
+fi
+
+# ---- BEHAVIOUR, not source text -----------------------------------------------------------------
+# Everything above reads the shipped code. These four RUN it, so the suite survives the rule moving
+# file again. Skipped when acc is not installed (a source-only checkout).
+ACC=/dev/.vr25/acc/acc
+CFG=${dataDir:-/data/adb/vr25/acc-data}/config.txt
+if [ -x "$ACC" ] && [ -f "$CFG" ]; then
+  _t62b=$(grep -E '^capacity=' "$CFG")
+  for _bad in 999 101 abc; do
+    "$ACC" -s pause_capacity=$_bad >/dev/null 2>&1
+    _rc=$?
+    _now=$(grep -E '^capacity=' "$CFG")
+    if [ "$_rc" -ne 0 ] && [ "$_now" = "$_t62b" ]; then
+      ok "acc -s pause_capacity=$_bad is refused and stores nothing"
+    else
+      no "acc -s pause_capacity=$_bad returned $_rc and the config is now: $_now"
+    fi
+  done
+  # ...and a legitimate value must still land, or the guard is just breaking the feature.
+  _pc=$(printf '%s' "$_t62b" | sed -e 's/^capacity=(//' -e 's/).*$//' | { read -r a b c d e; echo "$d"; })
+  "$ACC" -s pause_capacity=$_pc >/dev/null 2>&1     && ok "a valid pause capacity is still accepted"     || no "a valid pause capacity was refused too - the guard is over-broad"
+else
+  sk "acc not installed here - behavioural checks skipped"
 fi
 
 fin

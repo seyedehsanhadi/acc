@@ -1694,7 +1694,15 @@ config_=$config
 if [ -f $execDir/cfg-guard.sh ]; then
   . $execDir/cfg-guard.sh
 else
-  cfg_parses() { [ -f "$1" ]; }
+  cfg_parses() {
+    [ -f "$1" ] || return 1
+    for _cfpsh in /system/bin/sh /system/xbin/sh /bin/sh; do
+      [ -x "$_cfpsh" ] || continue
+      "$_cfpsh" -n "$1" 2>/dev/null || return 1
+      return 0
+    done
+    return 0
+  }
   cfg_srcsafe() { . "$1" 2>/dev/null || :; }
   cfg_check_kv() { return 0; }
 fi
@@ -1726,7 +1734,23 @@ srccfg_try() {
   # If no interpreter can be found at all, skip validation and source anyway: wrongly rejecting
   # a good config is worse than not catching a bad one, and the caller already tolerates a
   # failed source.
-  cfg_parses "$_sctf" || return 1
+  # Degrade to "source it" if the parse test is unavailable, never to "reject it". This function's
+  # own rule is that wrongly rejecting a good config is worse than not catching a bad one -- it
+  # already says so about a missing interpreter -- and a hard call here inverted that: with
+  # cfg_parses out of scope, srccfg_try returned 1 for EVERY config, including valid ones.
+  if command -v cfg_parses >/dev/null 2>&1; then
+    cfg_parses "$_sctf" || return 1
+  else
+    # cfg_parses out of scope: do the parse test inline rather than skip it. Skipping would accept
+    # a TRUNCATED config, and a truncated config is precisely the fatal case -- a parse error in
+    # mksh aborts the shell before any `||` can act. Same three-line test, same fail-open ending:
+    # no usable interpreter means source it anyway.
+    for _sctsh in /system/bin/sh /system/xbin/sh /bin/sh; do
+      [ -x "$_sctsh" ] || continue
+      "$_sctsh" -n "$_sctf" 2>/dev/null || return 1
+      break
+    done
+  fi
   # mksh does NOT honour `|| :` for a failure INSIDE a dot-sourced file: under set -e a config
   # whose last command exits non-zero (applyOnBoot/applyOnPlug rules routinely end in a failing
   # test, and `acc -e ... auto` appends ":; online || exec $TMPDIR/accd") aborted the whole

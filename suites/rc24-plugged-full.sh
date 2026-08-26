@@ -266,7 +266,7 @@ echo "  iin after mcc clear: ${_iin_rel:-?} mA"
 #
 # So: report what the device can actually do, and require a drop big enough not to be taper.
 _ccf=$TD/ch-curr-ctrl-files
-_nnodes=0; [ -f "$_ccf" ] && _nnodes=$(grep -c / "$_ccf" 2>/dev/null || echo 0)
+_nnodes=0; [ -f "$_ccf" ] && { _nnodes=$(grep -c / "$_ccf" 2>/dev/null || :); _nnodes=${_nnodes:-0}; }
 echo "  current-control nodes ACC discovered: $_nnodes"
 if [ "$_nnodes" -eq 0 ]; then
   sk "amp: ACC discovered NO current-control nodes on this device - maxChargingCurrent cannot be enforced here (pre-existing, not an rc24 change)"
