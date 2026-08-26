@@ -3513,9 +3513,31 @@ else
       $TMPDIR/${id}d, $TMPDIR/${id}d. \
       $TMPDIR/${id}a $TMPDIR/${id}d
     do
-      ln -fs $h /sbin/ 2>/dev/null || break
+      # `|| :`, not `|| break`. One name failing says nothing about the next -- a stale
+      # non-symlink left by another tool blocks only itself -- and breaking abandoned every
+      # remaining link over it. A Magisk phone here carries five /sbin acc entries; one
+      # early failure used to leave as few as one.
+      ln -fs $h /sbin/ 2>/dev/null || :
     done
   fi
+
+  # ...and the same for a root provider whose own bin is already on PATH. /sbin only works where it
+  # is a writable tmpfs overlay, which is Magisk; KernelSU and APatch have no /sbin at all, and
+  # SuperSU has a read-only one with a non-tmpfs /, so the remount above is never even attempted
+  # there and `su -c acc` is simply not found. The installer does this once at flash time; doing it
+  # here too restores links an update removed, on the next daemon start rather than the next flash.
+  #
+  # Existence AND writability are checked first and every link is `|| :`, so a provider that lacks
+  # the directory costs nothing. NOT VERIFIED ON SUPERSU -- there is no such device here. /su/bin
+  # is the documented SuperSU location and the operation is inert when it is absent; the /dev/
+  # prefix the installer prints stays the guaranteed answer there.
+  for _pbin in /data/adb/ksu/bin /data/adb/ap/bin /su/bin /su/xbin; do
+    [ -d "$_pbin" ] && [ -w "$_pbin" ] || continue
+    ln -sf $execDir/${id}.sh   "$_pbin/$id"    2>/dev/null || :
+    ln -sf $execDir/${id}a.sh  "$_pbin/${id}a" 2>/dev/null || :
+    ln -sf $execDir/service.sh "$_pbin/${id}d" 2>/dev/null || :
+  done
+  unset _pbin
 
 
   # fix Termux's PATH (missing /sbin/)

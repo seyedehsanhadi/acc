@@ -546,16 +546,31 @@ $overlayMount || {
 }
 
 
-# KernelSU/APatch: expose acc on a bin that's already on PATH, pointing at the stable
-# install path so the plain `acc` command works immediately -- no reboot/overlay wait (B7).
-! $KSU || {
-  for kbin in /data/adb/ksu/bin /data/adb/ap/bin; do
-    [ -d $kbin ] || continue
-    ln -sf /data/adb/$domain/$id/${id}.sh $kbin/$id 2>/dev/null || :
-    ln -sf /data/adb/$domain/$id/${id}a.sh $kbin/${id}a 2>/dev/null || :
-    ln -sf /data/adb/$domain/$id/service.sh $kbin/${id}d 2>/dev/null || :
-  done
-}
+# Expose acc on a bin directory that is ALREADY on PATH, pointing at the stable install path, so
+# the plain `acc` command works immediately with no reboot or overlay wait (B7).
+#
+# Runs for every root provider, not just KernelSU. It used to be gated on $KSU, which meant only
+# /data/adb/ksu/bin and /data/adb/ap/bin were ever tried -- and those are the two providers that
+# were already fine. The providers that actually needed help got nothing:
+#   Magisk    /sbin is a writable tmpfs overlay, so accd.sh links there at runtime. Fine.
+#   KernelSU  /data/adb/ksu/bin is on PATH and writable. Fine.
+#   SuperSU   / is not tmpfs, so accd.sh never even attempts the remount, and /sbin is read-only.
+#             Nothing lands on PATH and `su -c acc` is not found. SuperSU's own bin -- /su/bin,
+#             which it bind-mounts and puts on PATH -- is the direct analogue of ksu/bin.
+#
+# Every directory is tested for existence AND writability first, and every link is `|| :`, so a
+# provider that does not have one, or has it read-only, costs nothing.
+#
+# NOT VERIFIED ON SUPERSU: there is no SuperSU device here. /su/bin is added because it is the
+# documented SuperSU path and the operation is inert when it is absent, not because it was proven
+# to fix that case. The /dev/ prefix note below remains the guaranteed answer.
+for kbin in /data/adb/ksu/bin /data/adb/ap/bin /su/bin /su/xbin; do
+  [ -d "$kbin" ] && [ -w "$kbin" ] || continue
+  ln -sf /data/adb/$domain/$id/${id}.sh   $kbin/$id      2>/dev/null || :
+  ln -sf /data/adb/$domain/$id/${id}a.sh  $kbin/${id}a   2>/dev/null || :
+  ln -sf /data/adb/$domain/$id/service.sh $kbin/${id}d   2>/dev/null || :
+done
+unset kbin
 
 
 set +eu
