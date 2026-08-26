@@ -507,10 +507,20 @@ _se_input() {
 _se_charge() {
   local inmv="$1" inma="$2" bcur="$3" bvolt="$4" st="$5" tdc="$6" cap="$7"
   local w=null cls=null why=null approx=false bma bmv ct
+  # Input power is MEASURED, and it is real whether or not the battery is taking it. While ACC
+  # holds an input-cut switch the charger still runs the phone -- a Mi A3 held at its pause level
+  # was drawing 1797 mA from the wall with the battery at -170 mA -- but the whole block used to
+  # sit behind `status = Charging`, so watts read null and every consumer concluded "no charger".
+  # Compute it first and unconditionally; only the CLASS stays charging-only, because slow/fast
+  # describes how quickly the battery fills and means nothing when it is not filling. A non-null
+  # watts with a null class is therefore the honest reading of a hold: power in, none of it to the
+  # battery. The battery-side fallback below stays inside the charging branch -- it is a proxy for
+  # input power, and during a hold the battery current is flowing the wrong way to stand in for it.
+  if [ "$inmv" != null ] && [ "$inma" != null ] && [ "$inmv" -gt 1000 ] 2>/dev/null && [ "${inma#-}" -gt 50 ] 2>/dev/null; then
+    w=$(( inmv * ${inma#-} / 1000000 ))
+  fi
   if [ "$st" = "Charging" ]; then
-    if [ "$inmv" != null ] && [ "$inma" != null ] && [ "$inmv" -gt 1000 ] 2>/dev/null && [ "${inma#-}" -gt 50 ] 2>/dev/null; then
-      w=$(( inmv * ${inma#-} / 1000000 ))
-    elif [ "$bcur" != null ] && [ "$bvolt" != null ]; then
+    if [ "$w" = null ] && [ "$bcur" != null ] && [ "$bvolt" != null ]; then
       _se_ma "${bcur#-}"; bma=$_sema
       bmv="$bvolt";    [ "$bmv" -ge 100000 ] 2>/dev/null && bmv=$(( bmv / 1000 ))
       if [ "$bma" -gt 50 ] 2>/dev/null && [ "$bmv" -gt 1000 ] 2>/dev/null; then
