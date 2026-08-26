@@ -48,6 +48,16 @@ if ! $_INIT; then
 
   _ge_cooldown_cap() {
     case ${capacity[1]-} in ''|*[!0-9]*) return 1;; esac
+    # Same domain rule the pause and resume comparators enforce, which this one never got: a
+    # capacity is valid ONLY as a percent or as millivolts. Cooldown's percent range runs to 101,
+    # not 100, because 101 is how it says "disabled" -- rejecting it here would turn the documented
+    # off switch into a garbage value.
+    #
+    # Out-of-range already ended up harmless by arithmetic rather than by intent: 150 fails
+    # `-gt 3000`, so it is compared as a percent that batt_cap can never reach, and cooldown simply
+    # never engages. Stating it makes the fail direction deliberate -- return 1, do not throttle --
+    # instead of a coincidence that the next refactor could quietly invert.
+    { [ ${capacity[1]} -le 101 ] || { [ ${capacity[1]} -gt 3000 ] && [ ${capacity[1]} -le 5000 ]; }; } || return 1
     if [ ${capacity[1]} -gt 3000 ]; then
       [ $(volt_now) -ge ${capacity[1]} ]
     else
@@ -1523,14 +1533,15 @@ if ! $_INIT; then
         # limit has already been synced above, so it keeps holding either way.
         #
         # Narrow on purpose: only when the user explicitly set the non-default false AND the
-        # battery is at or above the pause level. Default (true) phones keep the pure native path
+        # battery is at or above the pause level. Phones leaving it TRUE keep the pure native path
         # exactly as before, so the common case is untouched.
         # Cleared on EVERY pass before it can be set, so it can never leak into a later loop
         # where the user has raised the limit, turned the setting back on, or dropped below it.
         _nativeIdleAvoid=false
         if $allowIdleAbovePcap || ! _ge_pause_cap 2>/dev/null; then
           # rc23b: this is the exit a default firmware-limit phone takes on EVERY pass
-          # (allowIdleAbovePcap defaults true), measured 8 of 8 naps on a Pixel 6a. See _nap_native.
+          # (allowIdleAbovePcap set true; the SHIPPED default is false), measured 8 of 8 naps on
+          # a Pixel 6a. See _nap_native.
           _nap_native
           continue
         fi

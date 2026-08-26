@@ -88,6 +88,19 @@ then
   # non-empty output -- otherwise the redirect would truncate README.html to 0 bytes
   # (this box has no `markdown` binary). Write to a temp and move only on success.
   command -v markdown >/dev/null 2>&1 && markdown README.md > README.html.tmp 2>/dev/null && [ -s README.html.tmp ] && mv -f README.html.tmp README.html; rm -f README.html.tmp 2>/dev/null || :
+
+  # ...and say so when it did not. README.html SHIPS (`cp -R ... README.*`) and acc.sh hands it to
+  # the Android viewer as $dataDir/README.html, with the markdown only as a fallback, so a stale
+  # copy is the documentation most users actually read. Without this the skip was silent: the
+  # shipped HTML sat three months behind README.md, still showing allowIdleAbovePcap=true after the
+  # default became false, and still documenting `acc 3900` as resuming at 3870 rather than 3750.
+  # Not fatal - there is no converter on every build box, and blocking the build over a doc format
+  # helps nobody - but it must never again be invisible.
+  if [ README.html -ot README.md ]; then
+    echo "BUILD WARNING: README.html is older than README.md and was NOT regenerated." >&2
+    echo "  The shipped HTML readme will contradict the shipped defaults." >&2
+    command -v markdown >/dev/null 2>&1       || echo "  Cause: no 'markdown' converter on this box. Install one, or update README.html by hand." >&2
+  fi
 fi
 
 

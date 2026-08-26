@@ -80,8 +80,18 @@ chk "a path that does not exist -> the string"    "$W/nope" "$(parse_value $W/no
 
 # ---- cap_idle_threshold --------------------------------------------------------------------------
 # Hysteresis above the pause level. Without it a phone sitting at its limit re-evaluates every loop.
-# The percent arm only engages above 60% and the millivolt arm only above 3900mV, so a user who
-# pauses at 50% gets no hysteresis at all - deliberate, and worth pinning so it is not "fixed".
+#
+# This block used to pin `pause > 60` and `pause > 3900mV` entry gates as deliberate. They were not:
+# they turned allowIdleAbovePcap=false into a no-op across 40-60%, the exact range default-config.txt
+# recommends for a forever-plugged phone, and a phone parked at 59% with pause=60 was the field
+# report that found it. The gates are gone; the contract is now what the documentation always said,
+# "capacity > pause_capacity", at every pause value.
+#
+# What did NOT go is the overshoot margin, and these assertions are the reason it cannot be relaxed
+# to >=. The force-discharge branch gated here and the settle branch both spend the same xIdleCount
+# budget of 2, and the only thing keeping them mutually exclusive is that this needs level > pause
+# while settle needs level <= pause. The pair at the pause level below pins that directly: make this
+# >= and they overlap in one pass, the budget is gone, and the switch churns at the limit.
 _s=$(xf cap_idle_threshold "$AD")
 [ -n "$_s" ] || { no "could not extract cap_idle_threshold"; fin; }
 eval "$_s"
@@ -91,15 +101,26 @@ volt_now(){ echo $MV; }
 cit(){ capacity[3]=$1; CAP=$2; MV=$3; if cap_idle_threshold 2>/dev/null; then echo yes; else echo no; fi; }
 
 chk "pause 80%, level 82% -> above threshold"     yes "$(cit 80 82 3800)"
-chk "pause 80%, level 81% -> exactly +1, not yet" no  "$(cit 80 81 3800)"
+chk "pause 80%, level 81% -> one over the limit"  yes "$(cit 80 81 3800)"
 chk "pause 80%, level 80% -> no"                  no  "$(cit 80 80 3800)"
-chk "pause 50% (<=60) -> hysteresis disabled"     no  "$(cit 50 99 3800)"
-chk "pause 60% (boundary, not >60) -> disabled"   no  "$(cit 60 99 3800)"
+chk "pause 50%, level 99% -> above (no 60 gate)"  yes "$(cit 50 99 3800)"
+chk "pause 60%, level 99% -> above (the 40-60 range works)" yes "$(cit 60 99 3800)"
 chk "pause 61% -> enabled, level 63 above"        yes "$(cit 61 63 3800)"
 chk "pause 4100mV, pack 4200mV -> above"          yes "$(cit 4100 50 4200)"
 chk "pause 4100mV, pack 4150mV -> exactly +50"    no  "$(cit 4100 50 4150)"
-chk "pause 3900mV (not >3900) -> disabled"        no  "$(cit 3900 50 4999)"
+chk "pause 3900mV, pack 4999 -> above (no mV gate)" yes "$(cit 3900 50 4999)"
 chk "pause '' -> refused"                         no  "$(cit '' 99 3800)"
+
+# The mutual exclusion the margin exists to guarantee, asserted as one property rather than left
+# implicit in the cases above: at the pause level itself the settle branch owns the tick, and this
+# must stand down. If both ever answer yes for the same level, the shared xIdleCount budget is spent
+# in a single pass.
+for _p in 40 50 60 75 80 100; do
+  _at=$(cit $_p $_p 3800)
+  [ "$_at" = no ] || { no "cap_idle_threshold says yes AT pause=$_p - it overlaps the settle branch"; break; }
+done
+[ "$_at" = no ] && ok "at the pause level this stands down at every tested limit (no settle overlap)"
+
 chk "pause 'zz' -> refused"                       no  "$(cit zz 99 3800)"
 
 # ---- the ls_* discovery functions ----------------------------------------------------------------

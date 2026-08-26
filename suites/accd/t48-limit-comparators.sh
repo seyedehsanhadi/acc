@@ -124,6 +124,22 @@ chk "cooldown 60%, level 59% -> not due"           no  "$(run _ge_cooldown_cap 5
 chk "cooldown 4000mV, pack 4000mV -> due"          yes "$(run _ge_cooldown_cap 5 4000 3900 4100 50 4000)"
 chk "cooldown '' -> not due"                       no  "$(run _ge_cooldown_cap 5 '' 75 80 100 3800)"
 
+# Out-of-range values. _le_pause_cap and _gt_resume_cap have always refused anything outside
+# 0-100 or 3001-5000; _ge_cooldown_cap did not, and got the same answer only by accident of the
+# arithmetic - 150 fails the -gt 3000 test, so it was compared as a percent no gauge can reach.
+# These pin the OUTCOME, so the accident cannot be refactored into a throttle that never lifts.
+# 101 stays valid: it is how cooldown says "disabled", which is why the guard reads -le 101.
+chk "cooldown 150 (not a percent, not mV) -> not due" no  "$(run _ge_cooldown_cap 5 150 75 80 100 3800)"
+chk "cooldown 2000 (between domains) -> not due"      no  "$(run _ge_cooldown_cap 5 2000 75 80 100 4200)"
+# The gauge here reads 5500, ABOVE the bogus 5001 limit, and that is the point: it is the one
+# case where the guard changes the answer rather than agreeing with the arithmetic. With the
+# guard, 5001 is refused outright. Without it, 5500 >= 5001 reads as due and cooldown throttles
+# on a limit no one configured. Every other out-of-range value below is unreachable arithmetic
+# either way, so this is the assertion that actually fails if the guard is deleted.
+chk "cooldown 5001 with a 5500 gauge -> not due"      no  "$(run _ge_cooldown_cap 5 5001 75 80 100 5500)"
+chk "cooldown 100%, level 100 -> due (top of range)"  yes "$(run _ge_cooldown_cap 5 100 75 80 100 3800)"
+chk "cooldown 5000mV, pack 5000 -> due (top of mV)"   yes "$(run _ge_cooldown_cap 5 5000 3900 4100 50 5000)"
+
 # ---- _le_shutdown_cap : the most dangerous one ---------------------------------------------------
 # A numeric shutdown_temp of 9 once powered a phone off at room temperature. The capacity equivalent
 # is worse: an inverted config could power the phone off at a level the user considers normal.

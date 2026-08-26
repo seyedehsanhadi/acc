@@ -627,7 +627,7 @@ Kullanım
     e.g.,
       acc 75 70
       acc 80 (resume_capacity 80% - 5 yapılır)
-      acc 3900 (acc 3900 3870 ile aynı, idle mod için alternatif)
+      acc 3900 (acc 3900 3750 ile aynı, idle mod için alternatif)
 
   acc [options] [args]   Opsiyonlar listesi için aşağıya bakın
 
@@ -1311,7 +1311,7 @@ Yüksek voltajlar için bu yöntem iyi değildir.
 Bizler bataryaya binen stresi azaltmaya çalışıyoruz.
 Uzun bir süre boyunca 3900 üstü bir voltaj tavsiye _edilmemektedir_.
 
-4 - `acc 3900`: kısaca _acc 3900 3870_ (50 mV fark).
+4 - `acc 3900`: kısaca _acc 3900 3750_ (150 mV fark).
 Voltaj kontrol desteği olmadan 3900mV aralığında kalmaya çalışır.
 Evet, şaka falan değil.
 Bu sıradan şarj portları ile çalışır.

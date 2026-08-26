@@ -21,7 +21,7 @@ Fixed
 - A stalled charger is answered by lifting its input current limit, which cannot disturb a voltage contract, instead of by re-detecting the charger.
 - Your charge limit is no longer silently absent after install. The installer reported the exit code of a fork rather than of the daemon, so a daemon that never came up looked like a successful install and the phone charged to 100% with nothing to show it was wrong.
 - The limit can no longer stop being enforced part-way through a session, from an abort inside the first-install probe or the leak backstop taking the daemon with it.
-- The USB port no longer drops to roughly 100 mA on a good charger. Releasing a current ceiling used to write the negotiation side of the port; it now writes charger-owned supplies only, through the normal write path, so the blacklist and the ledger apply.
+- Releasing a current ceiling still writes the negotiation side of the port, because that is where the ceiling was applied: apply_on_plug sets usb/current_max, so a release that skipped it would strand the cap instead of clearing it. An earlier rc24 build skipped that write and was reverted after both phones reproduced the stranded cap. The roughly 100 mA reading that prompted it was traced to a cable of about 500 milliohms, not to ACC. What does stay off the negotiation side is the stall repair, _hv_lift, which lifts a charger-owned input limit only.
 - Uninstalling ACC no longer leaves the phone barely charging, for the same reason.
 - Charging no longer renegotiates every time it resumes from a pause, which cost you fast charge after the first pause of the session.
 - Plugging in charges again on phones whose switch is an input cut. The re-arm gated on a node that an input cut masks to zero while the cable is still in.
@@ -37,7 +37,7 @@ Fixed
 - "Show config" works in AccA, and a config value containing a command substitution is stored rather than run.
 
 Note
-- Almost every change here makes ACC do less: do not renegotiate, do not write the negotiation side, fail closed when a supply cannot be proven dead, bound the sweep. The price is a rarer missed repair, where a stalled charger that rc23 might have kicked back to life is answered only by lifting its input current limit.
+- Almost every change here makes ACC do less: do not renegotiate, do not lift the negotiation side during a stall repair, fail closed when a supply cannot be proven dead, bound the sweep. The price is a rarer missed repair, where a stalled charger that rc23 might have kicked back to life is answered only by lifting its input current limit.
 
 **v2025.5.18-6.5.1-rc23 (202505331)**
 

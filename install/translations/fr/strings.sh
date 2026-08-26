@@ -93,7 +93,7 @@ Utilisation
     ex,
       acc 75 70
       acc 80 (resume_capacity par défaut 80% - 5)
-      acc 3900 (pareil que acc 3900 3870, bonne alternative au mode inactif (idle)
+      acc 3900 (pareil que acc 3900 3750, bonne alternative au mode inactif (idle)
 
   acc [options] [args]   Se référer à la liste des options en-dessous
 

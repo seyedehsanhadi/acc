@@ -454,7 +454,7 @@ runCmdOnPause=''
 # allow_idle_above_pcap (aiapc) #
 #
 # Type: Boolean
-# Default: true
+# Default: false
 #
 # If set to false, accd will avoid idle mode (if possible) when capacity > pause_capacity.
 # This is useful for forever-plugged setups, where battery longevity is a top priority.
@@ -823,7 +823,7 @@ Usage
     e.g.,
       acc 75 70
       acc 80 (resume_capacity defaults to 80% - 5)
-      acc 3900 (same as acc 3900 3870, great idle mode alternative)
+      acc 3900 (same as acc 3900 3750, great idle mode alternative)
 
   acc [options] [args]   Refer to the list of options below
 

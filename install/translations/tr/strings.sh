@@ -93,7 +93,7 @@ Kullanım
     e.g.,
       acc 75 70
       acc 80 (resume_capacity 80% - 5 yapılır)
-      acc 3900 (acc 3900 3870 ile aynı, idle mod için alternatif)
+      acc 3900 (acc 3900 3750 ile aynı, idle mod için alternatif)
 
   acc [options] [args]   Opsiyonlar listesi için aşağıya bakın
 

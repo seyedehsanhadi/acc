@@ -631,7 +631,7 @@ Utilisation
     ex,
       acc 75 70
       acc 80 (resume_capacity par défaut 80% - 5)
-      acc 3900 (pareil que acc 3900 3870, bonne alternative au mode inactif (idle)
+      acc 3900 (pareil que acc 3900 3750, bonne alternative au mode inactif (idle)
 
   acc [options] [args]   Se référer à la liste des options en-dessous
 
@@ -1315,7 +1315,7 @@ This is not good with higher voltages.
 We're trying to minimize battery stress as much as possible.
 Maintaining a voltage higher than 3900 for a long time is _not_ recommended.
 
-4 - `acc 3900`: this is short for _acc 3900 3870_ (a 50 mV difference).
+4 - `acc 3900`: this is short for _acc 3900 3750_ (a 150 mV difference).
 It tries to maintain 3900 mV without voltage control support.
 Yes, it's definitely not a joke.
 This works with regular charging switches and voltage readings.
