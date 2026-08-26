@@ -2373,7 +2373,28 @@ if ! $_INIT; then
     # reversible input cut each loop; restore it at/below the limit or on unplug. No-op on
     # phones without the node or the counter.
     local stop=${capacity[3]:-80} cap cc prev
-    nvb_node=${NVB_NODE:-/sys/class/power_supply/usb/input_current_max}
+    # PREFER A CHARGER-OWNED CUT. usb/input_current_max is an input NEGOTIATION node: writing it
+    # renegotiates the port, and the restore (`cat .nvb-restore >`) is the same write in reverse,
+    # which is the class of write measured dropping a Pixel port to ~100mA. leak_backstop already
+    # solves this for the generic path by cutting on battery/input_suspend and friends, so use the
+    # same candidates here.
+    #
+    # The usb/ node is deliberately KEPT as the last resort rather than removed. This backstop is
+    # the only thing standing between a Tensor that ignores charge_stop_level and an overcharge
+    # (filmed on bramble), so on a phone with no charger-owned cut the old behaviour must remain.
+    # Worst case is therefore exactly what shipped; best case is no negotiation write at all.
+    #
+    # NOT LIVE-PROVEN: this path only runs when the firmware ignores its own stop level, which
+    # cannot be provoked on demand. The selection below is unit-tested; the cut itself is not.
+    nvb_node=
+    if [ -z "${NVB_NODE-}" ]; then
+      for _nvbn in input_suspend charge_disable batt_slate_mode op_disable_charge; do
+        [ -w "/sys/class/power_supply/battery/$_nvbn" ] || continue
+        if command -v sw_blacklisted >/dev/null 2>&1 && sw_blacklisted "battery/$_nvbn"; then continue; fi
+        nvb_node=/sys/class/power_supply/battery/$_nvbn; nvb_cut=1; break
+      done
+    fi
+    [ -n "$nvb_node" ] || { nvb_node=${NVB_NODE:-/sys/class/power_supply/usb/input_current_max}; nvb_cut=0; }
     [ -f "$nvb_node" ] || return 0
     cap=$(batt_cap) || return 0
     if [ "$cap" -le $(( stop + 1 )) ] || ! online; then
@@ -2396,15 +2417,19 @@ if ! $_INIT; then
       nvb_count=0; return 0
     fi
     [ ${nvb_count:-0} -ge 2 ] || return 0
-    [ -f $TMPDIR/.nvb-on ] || { cat "$nvb_node" > $TMPDIR/.nvb-restore 2>/dev/null || echo 2000000 > $TMPDIR/.nvb-restore; }
+    # The saved value is what the node read BEFORE the cut. The fallback when that read fails must
+    # match the node's own domain: 0 for a charger-owned 0/1 cut, a high current for the usb
+    # ceiling. Writing 2000000 into input_suspend would be garbage, and this file is what the
+    # release path pours back in.
+    [ -f $TMPDIR/.nvb-on ] || { cat "$nvb_node" > $TMPDIR/.nvb-restore 2>/dev/null       || { [ "${nvb_cut:-0}" = 1 ] && echo 0 > $TMPDIR/.nvb-restore || echo 2000000 > $TMPDIR/.nvb-restore; }; }
     # This cut is deliberate and reversible, so the node stays -- but it must go through write(),
     # which honours the crash blacklist and records the ledger entry. A raw echo here bypassed
     # both, on the one node (usb/input_current_max) most likely to be blacklisted.
     chmod 0644 "$nvb_node" 2>/dev/null || :
     if command -v write >/dev/null 2>&1; then
-      write 0 "$nvb_node" 0 && touch $TMPDIR/.nvb-on || :
+      write ${nvb_cut:-0} "$nvb_node" 0 && touch $TMPDIR/.nvb-on || :
     else
-      echo 0 > "$nvb_node" 2>/dev/null && touch $TMPDIR/.nvb-on || :
+      echo ${nvb_cut:-0} > "$nvb_node" 2>/dev/null && touch $TMPDIR/.nvb-on || :
     fi
     warn_once_per nvbackstop 21600 "⚠️ ACC: the firmware ignored the native charge limit (still charging past ${capacity[3]:-?}%); holding a reversible input cut until the battery is back at the limit."
   }

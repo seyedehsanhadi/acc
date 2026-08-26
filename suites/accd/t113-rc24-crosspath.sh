@@ -149,5 +149,48 @@ else
   ok "the leak hold still does not call is_charging"
 fi
 
+# R2. native_verify_backstop must PREFER a charger-owned cut and keep usb/ only as a fallback.
+if grep -q 'nvb_cut' "$execDir/accd.sh"; then
+  ok "the native backstop picks a cut node instead of always using usb/"
+else
+  no "the native backstop still writes usb/input_current_max unconditionally"
+fi
+# the usb fallback must still be there -- deleting it lets a Tensor overcharge
+if grep -q 'NVB_NODE:-/sys/class/power_supply/usb/input_current_max' "$execDir/accd.sh"; then
+  ok "the usb/ fallback is retained for phones with no charger-owned cut"
+else
+  no "the usb/ fallback was removed - a Tensor ignoring charge_stop_level would overcharge"
+fi
+# and the saved restore value must match the node's domain, not always 2000000
+if grep -q 'nvb_cut:-0} = 1 ] && echo 0 > $TMPDIR/.nvb-restore' "$execDir/accd.sh"; then
+  ok "the restore default matches the cut node's domain"
+else
+  no "the restore fallback would write a current value into a 0/1 node"
+fi
+
+# R5. force_off's background loop cannot see a later change to chargingSwitch[]: `done &` forks,
+# and a forked subshell holds a COPY. Proven here rather than assumed -- this is the reasoning
+# that decided NOT to add a redundant snapshot.
+_fo=$T/fo.out; _fof=$T/fo.flag; : > "$_fo"; touch "$_fof"
+_fov=alpha
+( while [ -f "$_fof" ]; do echo "$_fov" >> "$_fo"; sleep 1; done ) &
+sleep 2; _fov=BRAVO; sleep 2; rm -f "$_fof"; sleep 2
+if grep -q BRAVO "$_fo" 2>/dev/null; then
+  no "a backgrounded loop SAW the parent's later change - force_off needs an explicit snapshot"
+else
+  ok "a backgrounded loop keeps its fork-time copy (force_off needs no snapshot)"
+fi
+
+# R6. The installer must keep exit 0 and warn. Magisk drops the module on a nonzero installer.
+for _f in "$execDir/../../../install.sh" /data/local/tmp/install.sh; do
+  [ -f "$_f" ] || continue
+  if grep -q 'daemon did NOT start' "$_f" && grep -q '^exit 0' "$_f"; then
+    ok "installer warns loudly and still exits 0"
+  else
+    no "installer no longer warns, or no longer exits 0"
+  fi
+  break
+done
+
 rm -rf "$T"
 fin
