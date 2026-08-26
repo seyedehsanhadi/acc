@@ -256,7 +256,10 @@ case ${cdc-} in
 esac
 case ${cch-} in *[!0-9]*) cch=;; esac             # cooldown_charge: null or integer seconds
 case ${cp-} in *[!0-9]*) cp=;; esac               # cooldown_pause:  null or integer seconds
-case ${aiapc-} in true|false) :;; *) aiapc=true;; esac
+# default-config.txt ships allowIdleAbovePcap=false. This coerced a missing or garbage value to
+# TRUE, so a fresh install and its first config write disagreed about the shipped default, and the
+# user's setting flipped without them touching it. The shipped value is the intended one.
+case ${aiapc-} in true|false) :;; *) aiapc=false;; esac
 case ${bsw-} in true|false) :;; *) bsw=true;; esac
 case ${cw-} in true|false) :;; *) cw=false;; esac
 case ${fo-} in true|false) :;; *) fo=false;; esac
@@ -352,7 +355,7 @@ _wcVer=$(cat $TMPDIR/.config-ver 2>/dev/null) || _wcVer=
 [ -n "$_wcVer" ] || _wcVer=$(sed -n '/^configVerCode=/s/.*=//p' $execDir/default-config.txt 2>/dev/null)
 printf '%s\n' "configVerCode=$_wcVer
 
-allowIdleAbovePcap=${aiapc:-true}
+allowIdleAbovePcap=${aiapc:-false}
 ampFactor=$af
 battStatusWorkaround=${bsw:-true}
 capacity=(${sc:-5} ${cc:-101} $rc $pc ${cm:-false})

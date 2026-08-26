@@ -41,62 +41,13 @@ set_prop() {
       # default and the command reports success while changing nothing. The config header
       # documents the array shape, so users type this. charging_switch is NOT listed: it is a
       # scalar setter and the daemon itself uses it.
+      # One rule, one place: cfg-guard.sh. acca.sh's -s branch needs the identical check and had
+      # its own loop, so the two drifted -- the guard below refused `acc -s pause_capacity=999`
+      # while `acca -s pause_capacity=999` wrote a clamped 80 and reported success.
       for _spk in "$@"; do
-        case "$_spk" in
-          capacity=*|temperature=*|cooldownRatio=*|cooldown_ratio=*|loopDelay=*|loop_delay=*)
-            echo "Cannot set ${_spk%%=*} directly: it is an array in the config." >&2
-            echo "Use the individual settings, for example:" >&2
-            echo "  acc -s shutdown_capacity=5 cooldown_capacity=60 resume_capacity=70 pause_capacity=75 capacity_mask=false" >&2
-            echo "  acc -s cooldown_temp=45 max_temp=50 resume_temp=40 shutdown_temp=55" >&2
-            echo "  acc 75 70    (shortcut for pause and resume capacity)" >&2
-            return 2
-          ;;
-
-          # rc22: REFUSE an out-of-range capacity here, the way the shorthand already does.
-          #
-          # rc21 added this check to `acc 999` only. The -s form never got it, so it stayed the
-          # "success tick over a value you did not ask for" that the shorthand fix exists to stop:
-          #
-          #     acc -s pause_capacity=999  ->  exit 0, prints the tick, stores 80
-          #     acc -s pause_capacity=101  ->  exit 0, prints the tick, stores 80
-          #     acc -s pause_capacity=abc  ->  exit 0, prints the tick, stores 75
-          #
-          # write-config clamps anything outside the documented ranges to 80 and drops a
-          # non-numeric value entirely, so the number on screen is not the number in force and
-          # nothing says so. Measured on a Mi A3 running rc22; a non-numeric pause capacity also
-          # moved shutdown_capacity to 0, so garbage in one field disabled protection in another.
-          #
-          # This is the more important of the two paths: `-s key=value` is what AccA sends for
-          # every setting the app writes, and what the daemon uses internally.
-          #
-          # Ranges are the documented ones and match acc.sh exactly: percent, or millivolts. An
-          # EMPTY value is allowed through untouched - clearing a key is a legitimate operation and
-          # the daemon relies on it. cooldown_capacity is deliberately NOT checked here: it uses
-          # 101 to mean "disabled", a different domain that this rule would wrongly reject.
-          # write-config's own clamp stays exactly as it is, as the backstop for a corrupt config
-          # file rather than for a user command.
-          pause_capacity=*|resume_capacity=*|shutdown_capacity=*)
-            _spv=${_spk#*=}
-            if [ -n "${_spv:-}" ]; then
-              case "$_spv" in
-                *[!0-9]*)
-                  echo "Invalid ${_spk%%=*}: $_spv" >&2
-                  echo "Expected a number: 0-100 (percent) or 3001-5000 (mV)" >&2
-                  return 2
-                ;;
-                *)
-                  if [ "$_spv" -le 100 ] 2>/dev/null; then :
-                  elif [ "$_spv" -ge 3001 ] 2>/dev/null && [ "$_spv" -le 5000 ] 2>/dev/null; then :
-                  else
-                    echo "Capacity out of range: $_spv" >&2
-                    echo "Expected 0-100 (percent) or 3001-5000 (mV)" >&2
-                    return 2
-                  fi
-                ;;
-              esac
-            fi
-          ;;
-        esac
+        if command -v cfg_check_kv >/dev/null 2>&1; then
+          cfg_check_kv "$_spk" || return $?
+        fi
       done
 
       # mksh ARRAY SEMANTICS. `name=value` assigns to name[0] and leaves name[1..n] alone, so

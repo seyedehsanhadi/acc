@@ -1112,6 +1112,12 @@ rekick_usb() {
             _rkd=${_rkl##*::}
             case "${_rkd:-x}" in ''|x|*[!0-9]*) continue;; esac
             [ -w "$_rkn" ] || continue
+            # Never lift a negotiation supply: that is the write rc24 measured dropping a Pixel
+            # port to 100mA, and this loop walked every recorded */current_max including usb/.
+            if is_nego_node "$_rkn"; then
+              command -v _wlog >/dev/null 2>&1 && _wlog "rekick skip $_rkn (input negotiation)" || :
+              continue
+            fi
             # rc24 LIFT: release HIGH and let the driver clamp - the rule apply_on_plug already
             # uses. The recorded default is a SNAPSHOT of whatever the node read when ACC first
             # identified it; taken on a computer port that is 500000, and replaying it on a wall
@@ -1686,6 +1692,26 @@ config_=$config
 # front-end had nothing: `acc -i`, `acc -s` and `acc -D` all died on the very file a user would
 # run acc to repair. Deliberately NOT folded into accd's _srccfg -- that one is on the per-loop
 # hot path and is already tested; this is the same three lines without its bookkeeping.
+. $execDir/cfg-guard.sh
+
+# Is this an input-NEGOTIATION supply? The canonical list; uninstall.sh keeps a copy inline
+# because it runs at flash time with no module files loadable, and any change here belongs there.
+#
+# These nodes are owned by the charger/USB negotiation. rc24 measured ONE write to usb/current_max
+# dropping a Pixel (bluejay) port to ~100 mA until the value was written back, so a "restore" to a
+# safe-looking 5000000, or a replay of a recorded default, is not neutral here: it renegotiates the
+# port downward and leaves the phone trickle-charging.
+#
+# This gates RESTORE and LIFT writes only. Applying the user's own maxChargingCurrent to these
+# nodes is how the limit works on most modern platforms -- the cap genuinely acts on input current
+# -- and apply_on_plug has its own back-off for a node that refuses to hold a value.
+is_nego_node() {
+  case "${1#/sys/class/power_supply/}" in
+    usb/*|dc/*|pc_port/*|tcpm*) return 0;;
+  esac
+  return 1
+}
+
 srccfg_try() {
   _sctf=${1:-$config}
   [ -f "$_sctf" ] || return 1
@@ -1712,11 +1738,7 @@ srccfg_try() {
   # If no interpreter can be found at all, skip validation and source anyway: wrongly rejecting
   # a good config is worse than not catching a bad one, and the caller already tolerates a
   # failed source.
-  for _sctsh in /system/bin/sh /system/xbin/sh /bin/sh; do
-    [ -x "$_sctsh" ] || continue
-    "$_sctsh" -n "$_sctf" 2>/dev/null || return 1
-    break
-  done
+  cfg_parses "$_sctf" || return 1
   # mksh does NOT honour `|| :` for a failure INSIDE a dot-sourced file: under set -e a config
   # whose last command exits non-zero (applyOnBoot/applyOnPlug rules routinely end in a failing
   # test, and `acc -e ... auto` appends ":; online || exec $TMPDIR/accd") aborted the whole

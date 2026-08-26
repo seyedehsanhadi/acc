@@ -73,10 +73,26 @@ journal_check() {
   line="$(cat "$probePending" 2>/dev/null || :)"
   if [ -n "$line" ]; then
     mkdir -p "$dataDir" 2>/dev/null || :
+    # A leftover pending record is NOT proof of a panic, and post-fs-data.sh already settled what
+    # to do about that: latching is cheap and reversible, blacklisting is permanent and can cost
+    # the user their only working switch, so blacklist only with the same panic evidence AMPS
+    # demands, and always latch. This function never got that rule. cycle_switches arms the
+    # journal, writes the switch and disarms it, so ANY SIGKILL in between -- AccA's 150s timeout
+    # on `acc -t`, a killed foreground scan, a phantom process reaped by lowmemorykiller -- left
+    # the file behind and permanently blacklisted a switch that had done nothing wrong. Three of
+    # those and .no-probe turns auto-discovery off for good.
+    _jcbr="$(getprop sys.boot.reason 2>/dev/null)$(getprop ro.boot.bootreason 2>/dev/null)"
+    case "$_jcbr" in
+      *panic*|*watchdog*|*wdog*|*kernel_panic*) _jcblame=true;;
+      *) _jcblame=false;;
+    esac
     # Append only if not already blacklisted (idempotent across repeated boots).
-    if [ ! -f "$probeBlacklist" ] || ! grep -qxF "$line" "$probeBlacklist" 2>/dev/null; then
-      printf '%s\n' "$line" >> "$probeBlacklist" 2>/dev/null || :
+    if $_jcblame && { [ ! -f "$probeBlacklist" ] || ! grep -qxF "$line" "$probeBlacklist" 2>/dev/null; }; then
+      printf '%s
+' "$line" >> "$probeBlacklist" 2>/dev/null || :
     fi
+    $_jcblame || printf '%s probe pending survived, reboot reason not a panic (%s); latched this boot, NOT blacklisted (%s)
+'       "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" "$_jcbr" "$line" >> "$dataDir/probe-journal.log" 2>/dev/null || :
     # Remove the offending switch from the in-memory probe list so this boot does not
     # re-trigger the panic. Match the whole line (same anchoring accd uses elsewhere).
     if [ -f "$TMPDIR/ch-switches" ]; then
@@ -85,7 +101,7 @@ journal_check() {
     # rc6 (C2): tell the user WHY a switch vanished. A node that panic-rebooted the device is now
     # permanently blacklisted; without this the switch silently disappears and the phone can be left
     # with no working limit and no explanation.
-    command -v notif >/dev/null 2>&1 && notif "⚠️ ACC: a charging switch crash-rebooted this phone and was permanently disabled for safety ($line). If charging no longer stops at your limit, run a switch scan in AccA → Scripts." || :
+    $_jcblame && command -v notif >/dev/null 2>&1 && notif "⚠️ ACC: a charging switch crash-rebooted this phone and was permanently disabled for safety ($line). If charging no longer stops at your limit, run a switch scan in AccA → Scripts." || :
     # rc21: trip the global latch once probing has taken this phone down too many times. Counted
     # from the blacklist itself, which only ever grows by a crash attribution -- no extra state to
     # keep in sync. Guarded so a device with a legitimately odd driver still gets its 3 attempts.
@@ -97,7 +113,7 @@ journal_check() {
     # -- and `rm -f "$probePending"` below never ran, stranding .probe-pending on persistent
     # storage, which makes the NEXT boot look like a probe crash. Same failed-open class as the
     # `acc -sb list` abort fixed in acc.sh.
-    if [ -r "$probeBlacklist" ]; then
+    if $_jcblame && [ -r "$probeBlacklist" ]; then
       # The case WORD was unquoted. A device shell field-splits it, so a whitespace-only line
       # collapses to '' and an indented '#' loses its leading blank and reads as a comment --
       # both get skipped, the strike count comes out short, and the latch never trips on a

@@ -3,7 +3,14 @@ _get_prop() { sed -n "\|^$1=|s|.*=||p" ${2:-$config} 2>/dev/null || :; }
 _is_board() { getprop ro.product.board | grep -Eiq "$1"; }
 
 # patch/reset [broken/obsolete] config
-if (set +x; . $config) >/dev/null 2>&1; then
+#
+# cfg_parses, not `( . $config )`. The else branch here OVERWRITES the user's config with
+# default-config.txt, so a false "malformed" silently resets their pause and resume levels -- and
+# the old test returned false for any config whose last command exits non-zero, which ordinary
+# applyOnBoot/applyOnPlug rules and `acc -e ... auto` both are. It also EXECUTED the config, on
+# every daemon start, purely to decide whether it was readable. Nothing below needs the source:
+# configVerCode is read with _get_prop, which greps the file.
+if cfg_parses $config; then
   configVer=0$(_get_prop configVerCode)
   # Same tmpfs dependency as write-config.sh: a missing .config-ver made this read 0, which never
   # equals the stored version, so every run force-rewrote the config through acca. The constant

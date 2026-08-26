@@ -15,8 +15,12 @@
 #
 # RUN (must be plugged in and actively charging):
 #   su -c 'sh /sdcard/acc-switch-scan.sh'         # scan only (recommend a switch)
-#   ...acc-switch-scan.sh --apply                 # + LOCK the "hold at limit" method (DEFAULT)
-#   ...acc-switch-scan.sh --apply --cycle         # + LOCK the "discharge-cycle" method instead
+#   ...acc-switch-scan.sh --apply                 # + LOCK the "discharge-cycle" method (DEFAULT)
+#   ...acc-switch-scan.sh --apply --hold          # + LOCK "Hold@Limit" / bypass instead
+# (This header used to say --apply locked Hold@Limit and named --cycle as the opt-in. The code
+#  has always defaulted METHOD=cycle and every message it prints says "Range Cycle (DEFAULT)", so
+#  the header was the wrong half of the contradiction; the flag is --hold, and --cycle is a no-op
+#  that selects the default.)
 # Optional max seconds-per-switch (default 4):   ...acc-switch-scan.sh 6
 
 set -u

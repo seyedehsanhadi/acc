@@ -74,6 +74,11 @@ export verbose=false
 
 cd /sys/class/power_supply/
 . $execDir/setup-busybox.sh
+# The parse test, the safe source and the value check that acc.sh gets from misc-functions.sh and
+# set-prop.sh. acca is the front-end AccA drives, so it needs them more than acc.sh does, and it
+# had none of them: three bare `. $config` under set -eu, and an -s branch that reaches
+# write-config.sh without ever passing a value through set_prop's guards.
+. $execDir/cfg-guard.sh
 
 mkdir -p $dataDir
 
@@ -102,7 +107,7 @@ case "$@" in
 
   # print charging info
   -i*|--info*)
-    . $config
+    cfg_parses "$config" && cfg_srcsafe "$config" || :
     . $execDir/android.sh
     . $execDir/batt-interface.sh
     . $execDir/batt-info.sh
@@ -130,10 +135,21 @@ case "$@" in
     fi
 
     . $defaultConfig
-    . $config
+    # Parse-safe. A truncated config is a PARSE error in mksh: it aborts the process before any
+    # `||` can act, so `acca -s` died on exactly the file a user runs it to repair. The defaults
+    # are already loaded, so a malformed file leaves those in place and the write below repairs it.
+    if cfg_parses "$config"; then cfg_srcsafe "$config"; fi
 
     # rc24: assign without export, so a value is taken literally - no re-expansion, no word
     # splitting - and only a real config key can be written.
+    # Validate EVERY pair before assigning any of them, with the same rule set-prop.sh applies to
+    # `acc -s`. Without it write-config silently clamped an out-of-range capacity to 80 and dropped
+    # a non-numeric one, and this branch exits 0, so AccA showed a success tick over a value the
+    # user never asked for. Checked in a first pass so a rejected pair cannot leave a half-applied
+    # write behind.
+    for _as; do
+      cfg_check_kv "$_as" || exit $?
+    done
     for _as; do
       case "$_as" in
         *=*) _ak=${_as%%=*}; _av=${_as#*=}
@@ -172,7 +188,7 @@ case "$@" in
       -sp?*) set -- "${1#-sp}";;
       *)     [ $# -ge 2 ] && shift 2 || shift;;
     esac
-    . $config
+    cfg_parses "$config" && cfg_srcsafe "$config" || :
     one="${1-}"; one="${one//,/|}"   # rc7 (F7): guard unset $1 -- after the shift, `acca -s p` / `-s d` with no filter left $1 unset, and `${1//,/|}` aborts under set -u (the app's "show config" refresh hard-fails)
     . $execDir/print-config.sh | grep -E "${one:-.}" | sed 's/^$//' || :
     exit 0

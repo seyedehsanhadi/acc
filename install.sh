@@ -125,12 +125,6 @@ magisk_busybox="$(ls /data/adb/*/bin/busybox /data/adb/magisk/busybox 2>/dev/nul
     ${BB_OPTIONAL:-false} && echo "-> BB_OPTIONAL set: continuing with /system tools (some steps limited)" || exit 3
   }
 }
-# rc23b: test $busybox_dir, not $bin_dir. The applets live in $busybox_dir; $bin_dir is only where
-# a user MAY drop a static busybox and is empty on a normal install. Asking whether $bin_dir led
-# PATH meant any caller that had prepended it itself turned this into a no-op, and $busybox_dir
-# was never added -- so every busybox applet silently vanished. That is how acc-switch-scan.sh
-# lost start-stop-daemon, and with it the daemon it restarts on the way out. Colons anchor the
-# match so one directory name containing another cannot satisfy it.
 case ":$PATH:" in
   *":$busybox_dir:"*) ;;
   *) export PATH="$bin_dir:$busybox_dir:$PATH";;
@@ -624,6 +618,36 @@ else
       nohup $execDir/${id}d.sh --init </dev/null >/dev/null 2>&1 &
     fi
   ) || echo "Note: daemon fallback launch failed; see $data_dir/logs/install.log"
+fi
+
+# ...and then CHECK, because neither branch above can fail the install.
+#
+# service.sh exits 12 when the daemon never comes up, and that was caught by an `echo` into the
+# install log -- which nobody reads -- followed by an unconditional `exit 0`. Magisk printed a
+# clean success over a module that was enforcing nothing, which is the "install looked fine and it
+# charged to 100% overnight" report this check exists to end.
+#
+# Deliberately NOT exit 1: Magisk treats a nonzero installer as a failed install and drops the
+# module, taking the user's config with it, and late_start normally brings the daemon up on the
+# next boot anyway. Losing the module is the worse outcome. So say so, loudly, where the user is
+# actually looking.
+_acc_up=false
+for _i in 1 2 3 4 5 6 7 8 9 10; do
+  if [ -f /dev/.$domain/$id/acc.lock ] || pgrep -f "$id"d.sh >/dev/null 2>&1; then _acc_up=true; break; fi
+  sleep 1
+done
+if $_acc_up; then
+  ui_print "- Daemon is running"
+else
+  ui_print ""
+  ui_print "  ****************************************"
+  ui_print "  * WARNING: the $id daemon did NOT start *"
+  ui_print "  ****************************************"
+  ui_print "  Your charging limit is NOT being enforced yet."
+  ui_print "  REBOOT NOW - it normally starts on boot."
+  ui_print "  If it still does not, send $data_dir/logs/install.log"
+  ui_print ""
+  echo "install: daemon not running after install; warned the user" >> $data_dir/logs/install.log 2>/dev/null || :
 fi
 
 

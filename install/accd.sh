@@ -1403,7 +1403,7 @@ if ! $_INIT; then
         native_unlatch || :
         native_icl_restore || :
         native_verify_backstop || :
-        # rc25: the charging-current and charging-voltage limits, which this branch has never
+        # rc24: the charging-current and charging-voltage limits, which this branch has never
         # reached. They live inside is_charging(), and this branch `continue`s before is_charging()
         # is ever called -- the same hole that already swallowed allowIdleAbovePcap (rc21),
         # idleApps (rc22c), mask_capacity and auto_shutdown (rc23c). Nobody had checked these two.
@@ -1540,7 +1540,17 @@ if ! $_INIT; then
         continue
       fi
 
-      leak_backstop && { _nap ${loopDelay[1]:-9}; continue; }
+      # The `continue` is deliberate -- the caller must not run the resume logic that would fight
+      # this cut -- but it also skips is_charging(), and is_charging() is where _srccfg re-reads
+      # the config. So while the backstop held, ACC stopped looking at config.txt entirely: a user
+      # raising their pause level in AccA, or clearing the limit outright, changed nothing until
+      # the cell had drained all the way to the OLD pause. Re-read here, so the next pass
+      # evaluates the hysteresis against what the user now actually wants.
+      if leak_backstop; then
+        _srccfg
+        _nap ${loopDelay[1]:-9}
+        continue
+      fi
 
       if is_charging; then
 
@@ -2055,6 +2065,12 @@ if ! $_INIT; then
     # so the tmpfs flag could otherwise orphan this background loop and keep current pinned at 0
     # (no charge) until reboot. kill -0 on the daemon pid ends the loop when the daemon dies.
     while [ -f $f ] && kill -0 $_pp 2>/dev/null && _gt_resume_cap; do
+      # Re-read the flag IMMEDIATELY before the write. The guards above are evaluated once per
+      # second and _gt_resume_cap reads the fuel gauge, so enable_charging could delete the flag
+      # after the loop had already decided to proceed -- and the write that followed turned
+      # charging straight back off, about a second after the user turned it on. Re-checking here
+      # narrows that to the gap between two adjacent commands.
+      [ -f $f ] || break
       flip_sw off || break
       sleep 1
     done &
@@ -2369,8 +2385,15 @@ if ! $_INIT; then
     fi
     [ ${nvb_count:-0} -ge 2 ] || return 0
     [ -f $TMPDIR/.nvb-on ] || { cat "$nvb_node" > $TMPDIR/.nvb-restore 2>/dev/null || echo 2000000 > $TMPDIR/.nvb-restore; }
+    # This cut is deliberate and reversible, so the node stays -- but it must go through write(),
+    # which honours the crash blacklist and records the ledger entry. A raw echo here bypassed
+    # both, on the one node (usb/input_current_max) most likely to be blacklisted.
     chmod 0644 "$nvb_node" 2>/dev/null || :
-    echo 0 > "$nvb_node" 2>/dev/null && touch $TMPDIR/.nvb-on
+    if command -v write >/dev/null 2>&1; then
+      write 0 "$nvb_node" 0 && touch $TMPDIR/.nvb-on || :
+    else
+      echo 0 > "$nvb_node" 2>/dev/null && touch $TMPDIR/.nvb-on || :
+    fi
     warn_once_per nvbackstop 21600 "⚠️ ACC: the firmware ignored the native charge limit (still charging past ${capacity[3]:-?}%); holding a reversible input cut until the battery is back at the limit."
   }
 
@@ -2582,6 +2605,25 @@ if ! $_INIT; then
 
 
   pause_now() {
+    # capacity[3] is lowered IN MEMORY so this pass pauses; the next _srccfg restores the real
+    # value from disk. That held while the only caller was the switch path, where write-config.sh
+    # runs BEFORE idle_apps_check. rc22c moved idle_apps_check onto the native branch above
+    # sync_native_limit, and rc24 then added `. write-config.sh` after it on that same branch --
+    # so on a phone with a firmware limit the transient now reaches the writer.
+    #
+    # write-config.sh publishes  pc=${pause_capacity-${pc-${capacity[3]}}}  and the daemon sets
+    # neither pause_capacity nor pc, so it took the overwritten capacity[3] -- the current SOC --
+    # and wrote it to disk as the user's pause level. Permanently: the next _srccfg then reloads
+    # that as the real config. A Pixel with idleApps matching, on the first expand of mcc or mcv,
+    # silently had its limit rewritten to whatever the battery happened to be at.
+    #
+    # Name the user's real levels for the writer before lowering them. Captured only once per
+    # pass -- _srccfg unsets both after every source -- so a second pause_now in the same pass
+    # cannot capture the already-lowered value.
+    if [ -z "${pause_capacity+x}" ]; then
+      pause_capacity=${capacity[3]}
+      resume_capacity=${capacity[2]}
+    fi
     capacity[3]=$(batt_cap)
     capacity[2]=$((capacity[3] - 5))
     [ ${capacity[2]} -ge 0 ] || capacity[2]=0   # rc5 (#11): clamp resume_capacity >=0 at very low SOC
@@ -2634,10 +2676,25 @@ if ! $_INIT; then
   # the daemon at the moment it is trying to recover. Test it in a throwaway subshell first
   # (exit trap cleared so its abort has no side effects); if even the fallback is unusable, keep
   # whatever config is already in memory rather than abort. Enforcement continues either way.
+  # Source a file that is known to parse, without letting its exit status kill the daemon.
+  # mksh does NOT honour `|| :` for a failure INSIDE a dot-sourced file: under set -e a config
+  # whose last command exits non-zero -- which ordinary applyOnBoot/applyOnPlug rules are -- took
+  # the whole daemon down at the dot. Drop errexit across the source only, and restore exactly
+  # what was there so a caller that never enabled it is left alone.
+  _srcsafe() {
+    case $- in
+      *e*) set +e; . "$1" 2>/dev/null; set -e;;
+      *) . "$1" 2>/dev/null || :;;
+    esac
+  }
+
   _srcgood() {
     [ -f $dataDir/.config-good ] || return 0
-    if ( trap - EXIT; . $dataDir/.config-good ) 2>/dev/null; then
-      . $dataDir/.config-good 2>/dev/null || :
+    # cfg_parses, not `( . file )`. The old test judged the file's EXIT STATUS under set -e, so a
+    # known-good config ending in a failing rule read as poisoned and this DELETED it -- throwing
+    # away the only fallback, on a file that was fine.
+    if cfg_parses $dataDir/.config-good; then
+      _srcsafe $dataDir/.config-good
     else
       rm -f $dataDir/.config-good 2>/dev/null || :   # poisoned: never trust it again
     fi
@@ -2659,8 +2716,12 @@ if ! $_INIT; then
     # config we saw. A usable capacity array has >=4 space-joined fields (shutdown
     # cooldown resume pause [mask]); tested with a case-glob, not `set --`, so the
     # caller's positional params are untouched.
-    if ( trap - EXIT; . $config ) 2>/dev/null; then
-      . $config 2>/dev/null || :
+    if cfg_parses $config; then
+      _srcsafe $config
+      # The config just replaced capacity[], so any pause_now override from the previous pass is
+      # gone and the names that shadow it for write-config.sh must go with it -- otherwise the
+      # first pass's levels would be republished forever.
+      unset pause_capacity resume_capacity 2>/dev/null || :
       case "${capacity[*]-}" in
         *' '*' '*' '*)
           if [ "${capacity[*]}" != "${_cfggood-}" ]; then
@@ -3162,6 +3223,13 @@ if ! $_INIT; then
       case "$_ccf" in
         */current_max|*/input_current|*/input_current_limit|*/input_current_settled) _ccd=5000000;;
       esac
+      # ...but not on a negotiation supply. The uninstaller stopped writing these in rc24 because
+      # one write to usb/current_max renegotiates the port down to ~100mA; this sibling kept doing
+      # it on every daemon init, which is the more frequent path of the two.
+      if command -v is_nego_node >/dev/null 2>&1 && is_nego_node "$_ccf"; then
+        command -v _wlog >/dev/null 2>&1           && _wlog "init restore skip $_ccf (input negotiation)" || :
+        continue
+      fi
       echo "$_ccd" > "$_ccf" 2>/dev/null || :
       command -v _wlog >/dev/null 2>&1 \
         && _wlog "init restore $_ccf <- $_ccd (was $_ccn; no current limit configured)" || :

@@ -200,14 +200,38 @@ _se_status() {
 # attached, so the old online-only test returned plugged:false and _se_class then
 # misread the switch as discharging while plugged. Check charger-side */present
 # first (NOT battery/present, always 1), fall back to */online where no present node.
+#
+# The supply set MUST match present_f()/online_f() in batt-interface.sh. A hardcoded
+# usb/ac/dc/mains/pc_port/wireless list missed exactly the phones present() was widened for: a
+# fuxi (Xiaomi) has no usb/present at all and shows its charger only as ucsi-source-psy-.../online,
+# and the same holds for oplus, glink, mtk and smb charger nodes. On those phones an input-cut
+# pause zeroes */online, nothing in the short list reports present, and --state said plugged:false
+# with the cable in -- the fuxi drain-while-charging failure surfacing in the app instead of the
+# daemon.
+#
+# The online fallback is filtered for the same reason online_f() filters: a raw */online glob
+# includes battery/online, which reads 1 on plenty of phones with nothing attached, so the
+# fallback answered "plugged" for every unplugged device that has one.
+_SE_SUPPLY='^ac/|^dc/|^mains/|^main-?charger/|^mtk-.*(chg|charger)/|^pc_port/|^smb[0-9]{3}-usb/|^usb/|ucsi.*pmic|oplus.*chg|.*glink.*charg|^wireless/'
+
+# $1 = present|online ; echoes the matching node list, relative to /sys/class/power_supply
+_se_supply_nodes() {
+  ( cd /sys/class/power_supply 2>/dev/null && ls -1 */"$1" 2>/dev/null | grep -Ei "$_SE_SUPPLY" ) 2>/dev/null || :
+}
+
 _se_plugged() {
-  local _n
-  for _n in usb ac dc mains pc_port wireless; do
-    _n="/sys/class/power_supply/$_n/present"
-    [ -r "$_n" ] && [ "$(cat "$_n" 2>/dev/null)" = 1 ] && { echo true; return; }
+  local _n= _v=
+  for _n in $(_se_supply_nodes present); do
+    _v=; { read -r _v < "/sys/class/power_supply/$_n"; } 2>/dev/null || :
+    case "$_v" in 1) echo true; return;; esac
   done
-  case "$(cat /sys/class/power_supply/*/online 2>/dev/null | tr -d ' \t\n\r')" in
-    *1*) echo true;; *) echo false;; esac
+  # Nothing claims present, which is NOT proof the cable is out -- present() documents the fuxi
+  # case at length. Fall back to online across the SAME filtered set.
+  for _n in $(_se_supply_nodes online); do
+    _v=; { read -r _v < "/sys/class/power_supply/$_n"; } 2>/dev/null || :
+    case "$_v" in 0|'') : ;; *) echo true; return;; esac
+  done
+  echo false
 }
 
 # current units from magnitude: large abs => uA, else mA (works on any kernel)

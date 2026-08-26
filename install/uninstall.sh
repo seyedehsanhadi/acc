@@ -83,12 +83,6 @@ magisk_busybox="$(ls /data/adb/*/bin/busybox /data/adb/magisk/busybox 2>/dev/nul
     ${BB_OPTIONAL:-false} && echo "-> BB_OPTIONAL set: continuing with /system tools (some steps limited)" || exit 3
   }
 }
-# rc23b: test $busybox_dir, not $bin_dir. The applets live in $busybox_dir; $bin_dir is only where
-# a user MAY drop a static busybox and is empty on a normal install. Asking whether $bin_dir led
-# PATH meant any caller that had prepended it itself turned this into a no-op, and $busybox_dir
-# was never added -- so every busybox applet silently vanished. That is how acc-switch-scan.sh
-# lost start-stop-daemon, and with it the daemon it restarts on the way out. Colons anchor the
-# match so one directory name containing another cannot satisfy it.
 case ":$PATH:" in
   *":$busybox_dir:"*) ;;
   *) export PATH="$bin_dir:$busybox_dir:$PATH";;
@@ -177,6 +171,13 @@ rm -rf \
         _node=${_tok%%::*}; _def=${_tok##*::}
         case "$_def" in ''|*[!0-9]*) continue;; esac
         case "$_node" in /*) ;; *) _node=/sys/class/power_supply/$_node;; esac
+        # Same rule as the name-glob sweep further down, which has skipped these since rc24: never
+        # write a negotiation supply. That skip only covered the glob, so this config replay still
+        # wrote a recorded default to usb/current_max and left the port renegotiated down -- the
+        # exact failure the later skip exists to prevent, on the path that runs first.
+        # Canonical definition: is_nego_node() in misc-functions.sh. Inline here because uninstall
+        # runs at flash time with no module files loadable.
+        case "${_node#/sys/class/power_supply/}" in usb/*|dc/*|pc_port/*|tcpm*) continue;; esac
         [ -w "$_node" ] && echo "$_def" > "$_node" 2>/dev/null || :
       done
     done

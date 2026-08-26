@@ -47,6 +47,30 @@ _pause() {
 # Read the battery level from the KERNEL (Android/dumpsys is not up yet at post-fs-data).
 # Prefer the canonical nodes, then any */capacity whose sibling type reads Battery. Empty/garbage
 # is skipped, so a blank read can never become a bogus numeric compare.
+# Battery millivolts, same node-selection rule as _level. Needed because a pause capacity may be
+# expressed in mV: set-prop.sh accepts 3001-5000 as a documented domain and `acc 3900` sets one,
+# but early-cap only ever compared a PERCENT, so an mV config fell straight through its range test
+# and skipped the boot-gap cut entirely -- fail-open, on the one path that exists to close the
+# window before the daemon starts.
+_mvolt() {
+  for _c in "$PS"/battery/voltage_now "$PS"/bms/voltage_now; do
+    [ -f "$_c" ] || continue
+    _v=$(cat "$_c" 2>/dev/null)
+    case ${_v:-x} in ''|*[!0-9]*) continue;; esac
+    [ "$_v" -ge 100000 ] 2>/dev/null && _v=$(( _v / 1000 ))
+    echo "$_v"; return 0
+  done
+  for _d in "$PS"/*/; do
+    [ -f "$_d/voltage_now" ] || continue
+    case "$(cat "$_d/type" 2>/dev/null)" in Battery) ;; *) continue;; esac
+    _v=$(cat "$_d/voltage_now" 2>/dev/null)
+    case ${_v:-x} in ''|*[!0-9]*) continue;; esac
+    [ "$_v" -ge 100000 ] 2>/dev/null && _v=$(( _v / 1000 ))
+    echo "$_v"; return 0
+  done
+  return 1
+}
+
 _level() {
   for _c in "$PS"/battery/capacity "$PS"/bms/capacity; do
     [ -f "$_c" ] || continue
@@ -175,11 +199,21 @@ _run() {
   fi
   pause=$(_pause "$config")
   case ${pause:-x} in ''|*[!0-9]*) echo "$(_ts) bad/absent pause '$pause'; skip" >> "$log" 2>/dev/null; return 0;; esac
-  { [ "$pause" -ge 1 ] && [ "$pause" -le 100 ]; } || { echo "$(_ts) pause $pause out of range; skip" >> "$log" 2>/dev/null; return 0; }
-  level=$(_level) || { echo "$(_ts) cannot read level; skip (fail-open)" >> "$log" 2>/dev/null; return 0; }
-  if [ "$level" -lt "$pause" ]; then
-    echo "$(_ts) level $level < pause $pause; let charge (daemon will manage)" >> "$log" 2>/dev/null
-    return 0
+  # Two domains, both documented and both settable: 1-100 percent, or 3001-5000 millivolts.
+  if [ "$pause" -ge 1 ] 2>/dev/null && [ "$pause" -le 100 ] 2>/dev/null; then
+    level=$(_level) || { echo "$(_ts) cannot read level; skip (fail-open)" >> "$log" 2>/dev/null; return 0; }
+    if [ "$level" -lt "$pause" ]; then
+      echo "$(_ts) level $level < pause $pause; let charge (daemon will manage)" >> "$log" 2>/dev/null
+      return 0
+    fi
+  elif [ "$pause" -ge 3001 ] 2>/dev/null && [ "$pause" -le 5000 ] 2>/dev/null; then
+    level=$(_mvolt) || { echo "$(_ts) cannot read voltage; skip (fail-open)" >> "$log" 2>/dev/null; return 0; }
+    if [ "$level" -lt "$pause" ]; then
+      echo "$(_ts) ${level}mV < pause ${pause}mV; let charge (daemon will manage)" >> "$log" 2>/dev/null
+      return 0
+    fi
+  else
+    echo "$(_ts) pause $pause out of range; skip" >> "$log" 2>/dev/null; return 0
   fi
   cd "$PS" 2>/dev/null || { echo "$(_ts) no $PS; skip" >> "$log" 2>/dev/null; return 0; }
   # Write-ahead journal (1-strike): persist the switch about to be written + flush to disk BEFORE
