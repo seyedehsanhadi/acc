@@ -5,7 +5,7 @@
 <p><strong>AMPS</strong> (<a href="amps.sh"><code>amps.sh</code></a>) - Adaptive Multi-device Probe &amp; Selector - is a standalone, root-only finder that detects which charge-control switch actually works on your device and prints a copy-paste ACC setup. It writes only ACC's standard reversible switches plus native percent-limits, snapshots every change, and restores on exit.</p>
 <p><strong>Run it (rooted phone).</strong> Termux:</p>
 <pre><code>termux-setup-storage          # once, to reach /sdcard/Download
-curl -LsO https://raw.githubusercontent.com/seyedehsanhadi/acc/main/amps.sh
+curl -LsO https://raw.githubusercontent.com/seyedehsanhadi/acc/dev/amps.sh
 sh amps.sh         # auto-elevates to root (or: su -c 'sh amps.sh')
 </code></pre>
 <p>ADB (runs from any path, /sdcard not required):</p>

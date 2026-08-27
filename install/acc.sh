@@ -698,9 +698,13 @@ case "${1-}" in
     #
     # Unplugging early still keeps the override unless -a was given, which is -a's documented job.
     # That case now self-heals on the next charge: the target is reached, this fires, real config.
-    print '\n:; command -v _ge_pause_cap >/dev/null 2>&1 && _ge_pause_cap && exec $TMPDIR/accd || :' >> $config
+    print '\n:; command -v _reexec >/dev/null 2>&1 && _ge_pause_cap && _reexec || :' >> $config
 
-    ! $auto || print '\n:; online || exec $TMPDIR/accd' >> $config
+    # Same _reexec routing as the hook above, and for the same reason: this fires INSIDE the daemon,
+    # so a bare `exec $TMPDIR/accd` makes the daemon kill itself through release-lock. Guarding on
+    # _reexec (defined only in accd.sh) also replaces the older reliance on acca.sh stubbing online()
+    # to a no-op, so the hook is inert in a front-end whether or not that stub is present.
+    ! $auto || print '\n:; command -v _reexec >/dev/null 2>&1 && ! online && _reexec || :' >> $config
     # rc21 SECURITY: was `eval $TMPDIR/acca $config "$@"`. The pass-through options of
     # `acc -f 90 -s mcc=500` are already separate words by the time they reach here, so eval
     # bought nothing and handed the caller's argument to the shell: `acc -f '$(cmd)'` ran cmd
@@ -737,10 +741,15 @@ case "${1-}" in
 
     [ -n "$mAh" ] || { echo "${0##*/} $1 <mAh>"; exit; }
     [ -n "$counter" ] || { echo "!"; exit; }
+    # charge_counter is SIGNED on some gauges, and a negative one broke every check downstream: it
+    # is "less than 10000" so it never got divided to mAh, and the final -le 99 test passes for any
+    # negative number, so the command printed things like -1028.8% instead of "!".
+    case ${counter:-x} in ''|*[!0-9]*) echo "!"; exit;; esac
     [ "${level:-0}" -ge 1 ] 2>/dev/null || { echo "!"; exit; }
 
     [ $counter -lt 10000 ] || counter=$(calc $counter / 1000)
     health=$(calc "$counter * 100 / $level * 100 / $mAh" | xargs printf %.1f)
+    case ${health%.*} in ''|*[!0-9]*) echo "!"; exit;; esac
     [ ${health%.*} -le 99 ] && echo ${health}% || echo "!"
   ;;
 
@@ -991,10 +1000,10 @@ case "${1-}" in
         # verify, because a silent failure here IS the bug
         _dw=0
         while [ $_dw -lt 15 ]; do
-          pgrep -f accd.sh >/dev/null 2>&1 && break
+          daemon_alive && break
           sleep 1; _dw=$((_dw+1))
         done
-        pgrep -f accd.sh >/dev/null 2>&1           || printf '
+        daemon_alive                               || printf '
 ! The ACC daemon did not come back -- charging is currently UNCAPPED.
   Run: acc -D restart
 ' >&2
@@ -1211,7 +1220,7 @@ case "${1-}" in
     test -n "$reference" || {
       grep -Eq '^version=.*-(beta|dev|rc)' $execDir/module.prop \
         && reference=dev \
-        || reference=master
+        || reference=main   # this fork has main and dev; "master" has never existed here
     }
 
     ! test -f /data/adb/vr25/bin/curl || {
@@ -1222,10 +1231,14 @@ case "${1-}" in
     dl() {
       if [ ".${1-}" != .wget ] && i=$(which curl) && [ ".$(head -n 1 ${i:-//} 2>/dev/null || :)" != ".#!/system/bin/sh" ]; then
         curl --help | grep '\-\-dns\-servers' >/dev/null && dns="--dns-servers 9.9.9.9,1.1.1.1" || dns=
-        curl $dns --progress-bar --insecure -Lo \
+        # Verified TLS by default. This downloads a script that is then RUN AS ROOT with no checksum
+        # and no signature, so --insecure handed a network attacker root on the device. The wget
+        # fallback below is unchanged; a device that genuinely cannot verify can pass -k to
+        # install-online.sh, where the opt-out now lives.
+        curl $dns --progress-bar -Lo \
           $TMPDIR/install-online.sh https://raw.githubusercontent.com/seyedehsanhadi/acc/dev/install-online.sh || dl wget
       else
-        PATH=${PATH#*/busybox:} /dev/.vr25/busybox/wget -O $TMPDIR/install-online.sh --no-check-certificate \
+        PATH=${PATH#*/busybox:} /dev/.vr25/busybox/wget -O $TMPDIR/install-online.sh \
           https://raw.githubusercontent.com/seyedehsanhadi/acc/dev/install-online.sh
       fi
     }

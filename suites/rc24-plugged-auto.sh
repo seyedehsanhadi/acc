@@ -19,6 +19,12 @@
 # It never reboots, never flashes, and never leaves a limit applied.
 
 set -u
+
+# Declared before ANY mode branch. These lived inside the suite-loop section, which IA_ONLY skips,
+# while the verdict block below reads them unconditionally -- so `IA_ONLY=1`, the very command the
+# 2b skip message tells you to run, reached the verdict and died on "PASS: unbound variable".
+PASS=0; FAIL=0; NOV=0; FAILED=""
+ATTENDED="rc24-plugged-deep.sh rc24-plugged-9vramp.sh"
 D=/data/adb/vr25/acc-data
 A=/dev/.vr25/acc
 P=/data/local/tmp/plug
@@ -30,15 +36,40 @@ hr(){ say ""; say "################ $* ################"; }
 
 # ---- 0. clean slate -----------------------------------------------------------------------------
 hr "0  CLEAN SLATE"
+# Sparing only $$ is not enough. This script's own ancestors carry its name too: launched the
+# documented way, `su -c 'sh .../rc24-plugged-auto.sh'`, the su process matches 'rc24-' and gets
+# SIGKILLed by its own child, taking the session and the log with it. Walk the parent chain and
+# spare all of it, so the sweep can only ever reach genuine strays.
+_mine=" $$ "
+_pp=$$
+while [ "${_pp:-0}" -gt 1 ] 2>/dev/null; do
+  _pp=$(awk '{print $4}' /proc/$_pp/stat 2>/dev/null) || break
+  [ -n "${_pp:-}" ] || break
+  _mine="$_mine$_pp "
+done
 for pat in preflight cpumeas runall 'rc24-' 'accd/t'; do
   for p in $(pgrep -f "$pat" 2>/dev/null); do
-    [ "$p" = "$$" ] && continue
+    case "$_mine" in *" $p "*) continue;; esac
     kill -9 "$p" 2>/dev/null || :
   done
 done
 sleep 2
 say "stray test processes: $(pgrep -f 'preflight|cpumeas|runall|rc24-' 2>/dev/null | grep -c . || :)"
-cp $D/config.txt $P/config.autobak 2>/dev/null || :
+# The header of this file promises "a phone left capped or cut after an aborted round -> restores,
+# then verifies". It did not. The snapshot failure was swallowed by `2>/dev/null || :`, so a
+# restore from a file that was never written failed just as quietly, and there was no trap at all:
+# Ctrl-C or a kill anywhere after section 2b left the test's own capacity policy live on the phone.
+if ! cp $D/config.txt $P/config.autobak 2>/dev/null || [ ! -s $P/config.autobak ]; then
+  say "ABORT: cannot snapshot $D/config.txt - refusing to run a round that rewrites it"
+  exit 4
+fi
+_restore_cfg(){
+  [ -s $P/config.autobak ] || return 0
+  cp $P/config.autobak $D/config.txt 2>/dev/null || :
+  $A/accd --init $D/config.txt >/dev/null 2>&1 || :
+}
+trap '_restore_cfg; exit 130' INT TERM HUP
+trap _restore_cfg EXIT
 say "config snapshot : $(grep -E '^capacity=' $P/config.autobak)"
 say "daemon          : $($A/acc -D 2>&1 | tail -1)"
 say "build fingerprint:"
@@ -112,7 +143,6 @@ fi
 # ---- 3. the plugged suites ----------------------------------------------------------------------
 if [ -z "${IA_ONLY:-}" ]; then
 hr "3  PLUGGED SUITES"
-PASS=0; FAIL=0; NOV=0; FAILED=""
 # Two of these cannot run unattended, and that is not a defect in them: rc24-plugged-deep.sh waits
 # up to 600s for an operator to plug a NAMED charger type, and rc24-plugged-9vramp.sh demands the
 # phone START unplugged and then waits ten minutes for a 9V brick. On a round that begins already
@@ -120,7 +150,6 @@ PASS=0; FAIL=0; NOV=0; FAILED=""
 # VERDICT, which reads exactly like a failure. Twenty minutes of a round were being spent proving
 # nothing. They are not dropped, they move to an attended pass and are named in the verdict, so the
 # choice is explicit instead of being an unexplained pair of blanks.
-ATTENDED="rc24-plugged-deep.sh rc24-plugged-9vramp.sh"
 for s in rc24-plugged.sh rc24-plugged-full.sh \
          rc24-limits-hardcore.sh rc24-repair-path.sh rc24-mcv-oscillation.sh \
          rc24-weak-supply.sh rc24-weak-supply2.sh fastcharge-audit.sh \

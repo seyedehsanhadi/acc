@@ -11,7 +11,7 @@ Community-maintained fork of [ACC](https://github.com/VR-25/acc) by VR-25, maint
 **Run it (rooted phone).** Termux:
 
     termux-setup-storage          # once, to reach /sdcard/Download
-    curl -LsO https://raw.githubusercontent.com/seyedehsanhadi/acc/main/amps.sh
+    curl -LsO https://raw.githubusercontent.com/seyedehsanhadi/acc/dev/amps.sh
     sh amps.sh         # auto-elevates to root (or: su -c 'sh amps.sh')
 
 ADB (runs from any path, /sdcard not required):

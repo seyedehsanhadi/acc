@@ -1708,6 +1708,41 @@ else
 fi
 
 
+
+# `pgrep -f accd.sh` IS NOT A DAEMON CHECK. release-lock.sh runs `pkill -f <execDir>/accd.sh` and
+# service.sh runs `start-stop-daemon -bx <execDir>/accd.sh -S`; both carry that path in their own
+# argv, so the pattern matches the machinery that tears the daemon DOWN and the launcher that has
+# not brought it up yet. acc-switch-scan.sh measured the consequence: a scan reported "daemon
+# restarted, charging is back under ACC control" and there was no daemon 45 seconds later.
+#
+# That file grew a correct test and kept it to itself, so `acc -t` and diag-collect.sh went on
+# using the broken one -- acc -t could suppress its own "the daemon did not come back" warning, and
+# diagnostics could call an unmanaged phone healthy. One definition, here, where both can reach it.
+#
+# The test is positive, not a blacklist: the daemon is a SHELL whose script argument is accd.sh,
+# which no helper merely naming the path ever is. Excluding known helpers by name would just wait
+# for the next helper.
+_is_accd() {   # $1 = pid
+  local _pid=${1:-} _c=
+  case "$_pid" in ''|*[!0-9]*) return 1;; esac
+  [ -r "/proc/$_pid/cmdline" ] || return 1
+  _c=$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null)
+  [ -n "$_c" ] || return 1
+  set -f; set -- $_c; set +f
+  case "${1:-}" in sh|*/sh|mksh|*/mksh|bash|*/bash|busybox|*/busybox) ;; *) return 1;; esac
+  [ "${1##*/}" = busybox ] && shift
+  case "${2:-}" in */accd.sh|accd.sh) return 0;; esac
+  return 1
+}
+
+daemon_alive() {
+  local _p=
+  for _p in $(pgrep -f "accd.sh" 2>/dev/null); do
+    _is_accd "$_p" && return 0
+  done
+  return 1
+}
+
 srccfg_try() {
   _sctf=${1:-$config}
   [ -f "$_sctf" ] || return 1

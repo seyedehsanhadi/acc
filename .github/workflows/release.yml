@@ -45,4 +45,5 @@ jobs:
             _builds/*/*.tgz
             install-tarball.sh
             install-online.sh
+            bin/acc_flashable_uninstaller.zip
           fail_on_unmatched_files: false

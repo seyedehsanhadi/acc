@@ -47,7 +47,15 @@ WANT_UNPLUG=0; case "$*" in *--unplug*|*--accurate*) WANT_UNPLUG=1;; esac
 
 _uid="$(id -u 2>/dev/null)"
 if [ "${_STONLY:-}" != 1 ] && [ -n "$_uid" ] && [ "$_uid" != 0 ] && [ -z "${ACC_REEXEC:-}" ]; then
-  for _su in su tsu sudo; do command -v "$_su" >/dev/null 2>&1 && { echo "[*] AMPS: elevating to root via $_su ..."; exec "$_su" -c "ACC_REEXEC=1 sh '$0' $*"; }; done
+  # Quote every argument before it reaches the privileged shell. `su -c "... $*"` flattens the
+  # arguments into one string that the ROOT shell then re-parses, so metacharacters execute and
+  # ordinary filenames containing spaces, quotes or globs are silently corrupted. Single-quote
+  # each argument and escape embedded single quotes, the standard shell-quoting idiom.
+  _ampsq=
+  for _a in "$@"; do
+    _ampsq="$_ampsq '$(printf '%s' "$_a" | sed "s/'/'\\''/g")'"
+  done
+  for _su in su tsu sudo; do command -v "$_su" >/dev/null 2>&1 && { echo "[*] AMPS: elevating to root via $_su ..."; exec "$_su" -c "ACC_REEXEC=1 sh '$0'$_ampsq"; }; done
   echo "!! AMPS needs root. Grant root in your root manager, then run:  su -c 'sh $0'"; exit 1
 fi
 

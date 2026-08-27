@@ -634,7 +634,7 @@ if ! $_INIT; then
     # operands. Unquoted + empty made "[ false = ]" a syntax error -> set -e abort (exxit re-enables
     # charging), and a garbage value would re-exec the daemon every loop.
     case ${currentWorkaround-} in true|false) :;; *) currentWorkaround=$currentWorkaround0;; esac
-    [ "$currentWorkaround0" = "$currentWorkaround" ] || exec $TMPDIR/accd --init
+    [ "$currentWorkaround0" = "$currentWorkaround" ] || _reexec --init
     # rc10/rc12: a user-initiated "automatic" reset re-discovers the best switch now, without a
     # manual restart -- write-config drops $dataDir/.rediscover when a non-daemon acc/acca -s blanks
     # the switch. rc12 robustness: clear the marker + the session switch-blacklist (fresh slate),
@@ -646,7 +646,7 @@ if ! $_INIT; then
       for _en in /sys/class/power_supply/*/charging_enabled /sys/class/power_supply/*/battery_charging_enabled /sys/class/power_supply/*/charge_enabled; do [ -w "$_en" ] && { _wlog "exit $_en <- 1" 2>/dev/null; echo 1 > "$_en" 2>/dev/null; } || :; done
       for _di in /sys/class/power_supply/*/input_suspend /sys/class/power_supply/*/charge_disable /sys/class/power_supply/*/batt_slate_mode /sys/class/power_supply/*/op_disable_charge; do [ -w "$_di" ] && { _wlog "exit $_di <- 0" 2>/dev/null; echo 0 > "$_di" 2>/dev/null; } || :; done
       unset _en _di 2>/dev/null || :
-      exec $TMPDIR/accd --init
+      _reexec --init
     }
     (set +eu; eval '${loopCmd-}') || :
 
@@ -922,8 +922,15 @@ if ! $_INIT; then
     [ "$_c" -ge 16000 ] 2>/dev/null || return 0
     ampFactor_=1000000
     echo ampFactor_=1000000 >> $TMPDIR/.batt-interface.sh 2>/dev/null || :
-    grep -q '^ampFactor=1000000$' $dataDir/config.txt 2>/dev/null \
-      || sed -i 's/^ampFactor=.*/ampFactor=1000000/' $dataDir/config.txt 2>/dev/null || :
+    # A substitution-only sed reports success while changing nothing when the key is absent, and a
+    # hand-minimised or older config legitimately omits ampFactor. The learned unit was then correct
+    # in the tmpfs cache for this boot and GONE after a reboot, so current limits and the exported
+    # state got scaled by the wrong factor. Substitute if the key is there, append if it is not.
+    if grep -q '^ampFactor=' $dataDir/config.txt 2>/dev/null; then
+      grep -q '^ampFactor=1000000$' $dataDir/config.txt 2>/dev/null || sed -i 's/^ampFactor=.*/ampFactor=1000000/' $dataDir/config.txt 2>/dev/null || :
+    else
+      echo ampFactor=1000000 >> $dataDir/config.txt 2>/dev/null || :
+    fi
   }
 
   ctrl_charging() {
@@ -2766,6 +2773,31 @@ if ! $_INIT; then
     else
       rm -f $dataDir/.config-good 2>/dev/null || :   # poisoned: never trust it again
     fi
+  }
+
+  # Hand off to a fresh daemon WITHOUT killing ourselves on the way out.
+  #
+  # $TMPDIR/accd is a symlink to service.sh, and service.sh sources release-lock.sh. `exec` keeps
+  # both the PID and the open file descriptors, so the exec'd service.sh still holds OUR flock on
+  # fd 4. release-lock.sh finds `flock -n 0` busy, reads the PID out of acc.lock -- which is ours,
+  # unchanged by exec -- and SIGTERMs it. The process being restarted kills itself, and the phone
+  # is left with no daemon and charging unmanaged.
+  #
+  # Whether it self-kills is a race, which is why this survived testing: acquire-lock writes the
+  # PID just AFTER taking the lock, so if acc.lock still names the previous (dead) daemon the kill
+  # is a no-op, release-lock burns two 10s flock timeouts, and the restart works anyway. Twenty
+  # seconds of nothing, or a dead daemon, depending on timing.
+  #
+  # Dropping the lock first makes release-lock's `flock -n 0` succeed, so it skips the kill branch
+  # entirely. Its pkill fallback matches accd.sh by full path and cannot match us either, because
+  # after the exec our command line is service.sh.
+  #
+  # Front-ends (acc.sh, acca.sh) do NOT hold the lock, so their `exec $TMPDIR/accd` is correct as
+  # it stands: there, release-lock killing the running daemon is the intended behaviour.
+  _reexec() {
+    flock -u 4 2>/dev/null || :
+    exec 4>&- 2>/dev/null || :
+    exec $TMPDIR/accd "$@"
   }
 
   _srccfg() {

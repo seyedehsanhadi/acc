@@ -25,6 +25,11 @@ samp(){ printf 'usb: %8s uA   vbus: %8s uV   batt: %9s uA   status: %s\n' \
 say "=== BEFORE (5 samples, 3s apart) ==="
 i=0; while [ $i -lt 5 ]; do samp; sleep 3; i=$((i+1)); done
 ORIG=$(cat $N 2>/dev/null)
+# Restore on interruption too, not only on the happy path. On a phone where the write DOES land
+# (bluejay accepts it; the Mi A3 refuses it under SELinux) a Ctrl-C between the write and the
+# restore leaves usb/current_max pinned at 5000000 with nothing left running to put it back.
+trap '[ -n "${ORIG:-}" ] && echo "$ORIG" > $N 2>/dev/null; exit 130' INT TERM HUP
+trap '[ -n "${ORIG:-}" ] && echo "$ORIG" > $N 2>/dev/null || :' EXIT
 say ""
 say "original usb/current_max = $ORIG"
 say "=== WRITING 5000000 ==="

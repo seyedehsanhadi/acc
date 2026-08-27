@@ -181,7 +181,24 @@ case "${_V_batt:-}" in ''|*[!0-9]*) _V_batt= ;; esac
   echo "[verdict] plain-language read -- every line cites the raw value it rests on; nothing is asserted without it"
   _vn=0; _dOK=0; _capOK=0
   # daemon: backed by pgrep (raw output in env/daemon-detail.txt + [identity] below)
-  if pgrep -f accd.sh >/dev/null; then _dOK=1; else echo "  (!) daemon DOWN (pgrep found no accd.sh) -> charging is UNMANAGED, limit not enforced"; _vn=$((_vn+1)); fi
+  # The daemon verdict must not use a bare `pgrep -f accd.sh`: release-lock's pkill and
+  # service.sh's start-stop-daemon both carry that path in their own argv, so a phone with no
+  # daemon can read as UP and the report then calls an unmanaged phone healthy. Same positive test
+  # as misc-functions.sh daemon_alive (a SHELL whose script argument is accd.sh); inlined because
+  # this collector deliberately sources nothing and must keep running on a broken install.
+  _diag_accd() {
+    local _p= _c=
+    for _p in $(pgrep -f "accd.sh" 2>/dev/null); do
+      [ -r "/proc/$_p/cmdline" ] || continue
+      _c=$(tr ' ' ' ' < "/proc/$_p/cmdline" 2>/dev/null)
+      set -f; set -- $_c; set +f
+      case "${1:-}" in sh|*/sh|mksh|*/mksh|bash|*/bash|busybox|*/busybox) ;; *) continue;; esac
+      [ "${1##*/}" = busybox ] && shift
+      case "${2:-}" in */accd.sh|accd.sh) return 0;; esac
+    done
+    return 1
+  }
+  if _diag_accd; then _dOK=1; else echo "  (!) daemon DOWN (no shell running accd.sh) -> charging is UNMANAGED, limit not enforced"; _vn=$((_vn+1)); fi
   # charge limit: backed by config.txt capacity= (raw tuple shown so a wrong field-order is visible)
   if [ -n "$_V_cap" ]; then
     if [ -n "$_V_pause" ]; then _capOK=1

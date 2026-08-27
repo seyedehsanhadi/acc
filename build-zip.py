@@ -32,7 +32,7 @@ EXCLUDE_NAMES = {
     'acc-hardtest.sh', 'bt-test.sh',
 }
 EXCLUDE_PREFIX = ('HANDOFF-', 'FIX-PLAN-')
-EXCLUDE_DIRS = {'.git', '.scratch', '__pycache__'}
+EXCLUDE_DIRS = {'.git', '.scratch', '__pycache__', '.superpowers', '.github', '.claude', '.vscode'}
 
 # Anything the root manager or recovery has to EXECUTE.
 EXEC_SUFFIX = ('.sh',)
@@ -52,6 +52,13 @@ def is_exec(rel, full):
 
 
 def skip(name):
+    # Every dot-directory, not a hand-maintained list of the ones we happened to notice. This walks
+    # the working tree rather than the tracked release set, so anything sitting in the checkout can
+    # ship: a real build put all 28 ignored plan/review/diff files from .superpowers into the
+    # flashable zip, plus .github, despite the comment above promising development notes never do.
+    # A leading dot is not a filter anyone has to remember to update.
+    if name.startswith('.') and name not in ('.',  '..'):
+        return True
     return (name in EXCLUDE_NAMES or name.startswith(EXCLUDE_PREFIX)
             or name.startswith('_') or name in EXCLUDE_DIRS)
 
@@ -131,7 +138,13 @@ def verify(path):
                and b'\r' in z.read(i.filename):
                 bad.append(f'{i.filename}: CRLF line endings (mksh rejects them; versionCode parses as non-numeric)')
         execs = sum(1 for i in infos if (i.external_attr >> 16) & 0o111 and not i.filename.endswith('/'))
-        ver = [l for l in z.read('module.prop').decode().splitlines() if l.startswith('version')]
+        # --verify is a public CLI that promises to verify an arbitrary zip, and it was reading
+        # module.prop unconditionally after already recording it as missing. Pointing it at ACC's own
+        # flashable uninstaller produced a KeyError traceback instead of a FAILED verdict.
+        if 'module.prop' in z.namelist():
+            ver = [l for l in z.read('module.prop').decode().splitlines() if l.startswith('version')]
+        else:
+            ver = ['(no module.prop)']
         print(f'VERIFY entries={len(infos)} exec={execs} {ver}')
     if bad:
         print('FAILED -- this zip would not install on KernelSU/APatch:')

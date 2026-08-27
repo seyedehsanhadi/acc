@@ -40,7 +40,7 @@ for _f in "$AC" "$AD"; do [ -f "$_f" ] || { no "missing $_f"; fin; }; done
 _ac=$(sed 's/^[[:space:]]*#.*//' "$AC")
 
 # ---- 1: the hook is there, and is NOT conditional on -a -----------------------------------------
-_hook=$(printf '%s' "$_ac" | grep -F '_ge_pause_cap && exec $TMPDIR/accd')
+_hook=$(printf '%s' "$_ac" | grep -F '_ge_pause_cap && _reexec')
 if [ -n "$_hook" ]; then
   ok "the -f branch appends a restore hook"
 else
@@ -97,18 +97,18 @@ CAP=50; MV=3800
 batt_cap(){ echo $CAP; }
 volt_now(){ echo $MV; }
 
-# The hook as acc.sh writes it, with exec recording instead of replacing this shell.
-# Peeled apart in steps rather than one sed: the hook carries '$', a literal backslash-n and '|',
-# and a single escaped expression over all three is exactly how the first version of this test
-# mis-extracted and then reported the working fix as broken. [$] is a bracket expression, so the
-# replacement needs no backslash at all.
+# The hook, run verbatim. No rewriting of the action any more: the hook calls _reexec, so the test
+# simply DEFINES _reexec as a recorder. That is strictly more faithful than the old sed, which had to
+# substitute the action string and would have clobbered the `command -v _reexec` guard along with it
+# (both occurrences sit on one line). It also means block 6 below tests the real guard rather than a
+# stand-in: unset _reexec and the hook must decline exactly as a front-end would make it decline.
 _body=$(printf '%s' "$_hook" | sed "s|.*print '||; s|' >> .*||")
 _body=${_body#*; }
-_body=$(printf '%s' "$_body" | sed 's|exec [$]TMPDIR/accd|_fired=1|')
 case "$_body" in
-  *_fired=1*) ;;
-  *) no "could not rewrite exec in the hook - every assertion below would be meaningless"; fin;;
+  *_reexec*) ;;
+  *) no "the extracted hook does not call _reexec - every assertion below would be meaningless"; fin;;
 esac
+_reexec(){ _fired=1; }
 try(){ capacity[3]=$1; CAP=$2; _fired=0; eval "$_body" ; echo $_fired; }
 
 [ "$(try 90 21)" = 0 ] && ok "target 90, level 21 -> does not fire (the charge is still running)" \
@@ -121,15 +121,27 @@ try(){ capacity[3]=$1; CAP=$2; _fired=0; eval "$_body" ; echo $_fired; }
                          || no "target 100, level 100 -> did NOT fire: this is the reported bug"
 
 # ---- 6: inert without the daemon-only function ---------------------------------------------------
-# What a front-end sees. Same hook text, _ge_pause_cap undefined: it must decline AND return 0.
+# What a front-end sees: _reexec undefined. The hook must decline AND return 0, or it would abort the
+# config source it runs inside, under set -eu.
+(
+  unset -f _reexec 2>/dev/null || :
+  _fired=0
+  eval "$_body"
+  _rc=$?
+  [ "$_fired" -eq 0 ] && [ "$_rc" -eq 0 ]
+) && ok "with _reexec undefined the hook does nothing and still returns 0" \
+  || no "the hook misbehaves in a front-end context - it fires there, or returns non-zero"
+
+# The other daemon-only name in the chain must still gate it too.
 (
   unset -f _ge_pause_cap 2>/dev/null || :
   _fired=0
   eval "$_body"
   _rc=$?
   [ "$_fired" -eq 0 ] && [ "$_rc" -eq 0 ]
-) && ok "with _ge_pause_cap undefined the hook does nothing and still returns 0" \
-  || no "the hook misbehaves in a front-end context - it fires there, or returns non-zero"
+) && ok "with _ge_pause_cap undefined the hook also declines and returns 0" \
+  || no "the hook fires or errors when _ge_pause_cap is missing (accd --init defines it late)"
+
 
 # ---- 7: the -f argument loop --------------------------------------------------------------------
 # A second, unrelated defect found while testing the hook: rc21 made every non-numeric argument to
@@ -148,6 +160,42 @@ printf '%s' "$_loop" | grep -qE '^[[:space:]]*-a\)'   && ok "-a is still consume
 printf '%s' "$_ac" | grep -qF '"$TMPDIR/acca" "$config" "$@"'   && ok "the pass-through call is still there for the options the loop now leaves behind"   || no "the acca pass-through call is gone - additional opts/args are silently dropped"
 
 grep -qF 'additional opts/args' $execDir/strings.sh 2>/dev/null   && ok "the help still documents the pass-through the loop now accepts"   || no "the help no longer documents additional opts/args - code and help disagree again"
+
+# ---- 7b: the daemon must never exec the service symlink directly ---------------------------------
+# $TMPDIR/accd is a symlink to service.sh, which sources release-lock.sh. exec keeps the PID and the
+# open fds, so a bare `exec $TMPDIR/accd` from inside the daemon hands release-lock a lock that is
+# still held, by a PID that is still ours, and it SIGTERMs the process it is meant to be restarting.
+# Whether that lands is a race against acquire-lock writing the PID, which is why it survived
+# testing: sometimes it just costs two 10s flock timeouts instead of the daemon. _reexec drops the
+# lock first. Front-ends are exempt, they hold no lock, so killing the daemon from there is correct.
+# _reexec's own body is the ONE legitimate hand-off, so subtract it rather than counting it as a
+# violation -- which is exactly what the first version of this assertion did.
+_totalexec=$(sed 's/^[[:space:]]*#.*//' "$AD" | grep -cF 'exec $TMPDIR/accd')
+_inreexec=$(xf _reexec "$AD" | sed 's/^[[:space:]]*#.*//' | grep -cF 'exec $TMPDIR/accd')
+_selfexec=$(( ${_totalexec:-0} - ${_inreexec:-0} ))
+if [ "${_selfexec:-0}" -eq 0 ]; then
+  ok "accd.sh never execs the service symlink directly - every hand-off goes through _reexec"
+else
+  no "accd.sh still has $_selfexec bare exec(s) of the service symlink - it can SIGTERM itself"
+fi
+
+grep -qE '^[[:space:]]*_reexec\(\)' "$AD" \
+  && ok "_reexec is defined in accd.sh" \
+  || no "_reexec is not defined in accd.sh - both hooks guard on a function that does not exist"
+
+_rleak=0
+for _f in "$AC" "$AA" "$execDir/misc-functions.sh"; do
+  [ -f "$_f" ] || continue
+  grep -qE '^[[:space:]]*_reexec\(\)' "$_f" && { _rleak=1; no "_reexec is also defined in $_f - the front-end guard is gone"; }
+done
+[ "$_rleak" -eq 0 ] && ok "no front-end defines _reexec, so both config hooks stay inert outside the daemon"
+
+# _reexec must actually release the lock, not merely exist.
+_rbody=$(xf _reexec "$AD")
+printf '%s' "$_rbody" | grep -qE 'flock -u 4|4>&-' \
+  && ok "_reexec releases the lock fd before handing off" \
+  || no "_reexec does not drop fd 4 - release-lock will still find the lock held and kill us"
+
 
 # ---- 8: a throwaway config must never become the known-good fallback ----------------------------
 # _srccfg caches whatever config it just parsed into $dataDir/.config-good, and $config is not

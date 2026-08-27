@@ -40,7 +40,14 @@ for _a in "$@"; do
     --apply) APPLY=1;;
     --cycle) METHOD=cycle;;
     --hold)  METHOD=hold;;
-    [0-9]*)  MAX_S=$_a;;
+    # "[0-9]*" is "starts with a digit", not "is a number", so 4x was accepted into MAX_S and only
+    # blew up later in arithmetic - after the scanner had already begun writing charging nodes.
+    [0-9]*)
+      case $_a in
+        *[!0-9]*) echo "! ignoring malformed duration: $_a" >&2;;
+        *) MAX_S=$_a;;
+      esac
+    ;;
   esac
 done
 
@@ -351,7 +358,13 @@ cleanup() {
 # the field. Without it cleanup never runs: candidates stay cut and no daemon comes back, so charging
 # is uncapped on a phone whose owner thinks a scan is still in progress. EXIT does not cover this; a
 # shell killed by an uncaught signal dies without running its EXIT trap.
-trap cleanup EXIT INT TERM HUP
+# Signals need their own trap. cleanup() RETURNS, it does not exit, so handling INT/TERM/HUP with a
+# bare `trap cleanup` restored the nodes, restarted the daemon, and then let the scan resume from
+# where it was interrupted -- writing charge switches again, now concurrently with the daemon it
+# had just brought back, and running cleanup a second time from the EXIT trap. Ctrl-C did not stop
+# the scanner. Exit explicitly on a signal; keep the plain EXIT trap for the normal path.
+trap 'cleanup; exit 130' INT TERM HUP
+trap cleanup EXIT
 
 # ---------- current source (reuse ACC's own detection if present) ----------
 currFile=; battStatus=; ampFactor_=

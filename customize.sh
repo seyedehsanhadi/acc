@@ -345,7 +345,14 @@ cp -f $srcDir/README.* $data_dir/
 #    "... 100 pcap" (ON=100 resumes, OFF=limit stops), so a locked config charges again.
 [ -f $data_dir/.stable-defaults3 ] || {
   [ ! -f $config ] || {
-    sed -i 's/^allowIdleAbovePcap=false$/allowIdleAbovePcap=true/' $config 2>/dev/null || :
+    # The allowIdleAbovePcap flip is GONE. It rewrote every exact "false" to "true", and the marker
+    # it is guarded by only proves this migration has not run yet -- it cannot tell an old default
+    # from a value the owner deliberately set, so the "never clobbers a deliberate later choice"
+    # claim above was not true for this line. It also now contradicts the shipped default, which is
+    # false, and rc24 gives false real meaning: it is what makes a forever-plugged phone discharge
+    # toward resume instead of idling at the limit. The charge_stop_level repair below stays, because
+    # that one fixes values that are genuinely broken (a locked "pcap pcap" never re-arms the
+    # charger) rather than overriding a preference.
     sed -i 's/charge_stop_level pcap pcap/charge_stop_level 100 pcap/g; s/charge_stop_level pcap 5/charge_stop_level 100 pcap/g' $config 2>/dev/null || :
   }
   touch $data_dir/.stable-defaults3 2>/dev/null || :
@@ -402,7 +409,10 @@ cp -f $srcDir/README.* $data_dir/
 
 # KaiOS patches
 [ ! -d /data/usbmsc_mnt/ ] || {
-  for i in $installDir/$id/*.sh; do
+  # installDir was reassigned to the FINAL directory above (readlink -f $installDir/$id), so
+  # appending $id again addressed .../acc/acc/*.sh. That matches nothing, and under set -eu the
+  # unexpanded glob reached sed, which failed and aborted the install. KaiOS-only path.
+  for i in $installDir/*.sh; do
     sed -Ei 's#/sdcard(/|/Download/)#/data/usbmsc_mnt/#g' $i
   done
 }
@@ -668,7 +678,20 @@ fi
 # actually looking.
 _acc_up=false
 for _i in 1 2 3 4 5 6 7 8 9 10; do
-  if [ -f /dev/.$domain/$id/acc.lock ] || pgrep -f "$id"d.sh >/dev/null 2>&1; then _acc_up=true; break; fi
+  # A lock FILE that exists proves nothing: it is created once and then lives in tmpfs for the
+  # rest of the boot, whether or not the daemon that made it is still alive. Observed on a Pixel
+  # 6a mid-session: acc.lock present, naming pid 5603, and zero accd.sh processes. So the old
+  # test printed "Daemon is running" over a phone with no daemon and uncapped charging.
+  #
+  # A HELD lock is proof. If flock can take it, nobody holds it, so there is no daemon -- the same
+  # test daemon_ctrl itself uses. The pgrep fallback stays only for a system with no flock, and is
+  # anchored to the full daemon path: acc-switch-scan.sh already documents that a loose
+  # `pgrep -f accd.sh` also matches the release and start helpers.
+  if command -v flock >/dev/null 2>&1; then
+    if ! (flock -n 0) <>/dev/.$domain/$id/$id.lock 2>/dev/null; then _acc_up=true; break; fi
+  else
+    if pgrep -f "/data/adb/$domain/$id/${id}d.sh" >/dev/null 2>&1; then _acc_up=true; break; fi
+  fi
   sleep 1
 done
 if $_acc_up; then

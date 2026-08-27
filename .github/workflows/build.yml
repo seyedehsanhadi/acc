@@ -24,6 +24,28 @@ jobs:
           rm -f bin/acc_flashable_uninstaller.zip
           sh build.sh
 
+      # check-syntax.sh is only `bash -n`, so until now every CI check could stay green while the
+      # scripts were semantically broken -- the IA_ONLY mode that aborted on an unset variable would
+      # have merged clean. The accd suites need Android (mksh, /data, /dev, sysfs, a real charger),
+      # but the eight AMPS suites are portable and exercise the engine's real decision logic.
+      - name: Run portable AMPS suites
+        run: |
+          sudo mkdir -p /data/local/tmp && sudo chmod 1777 /data/local/tmp
+          fail=0
+          for f in suites/amps/*.sh; do
+            echo "---- $f"
+            if AMPS="$PWD/acc-compat.sh" sh "$f"; then :; else fail=$((fail+1)); fi
+          done
+          echo "== $fail suite(s) failed"
+          [ "$fail" -eq 0 ]
+
+      # Catch the class the shell cannot: a Python file that does not parse, and a packer that
+      # cannot verify its own output.
+      - name: Verify the built zip
+        run: |
+          z=$(ls _builds/*/*.zip | head -1)
+          python3 build-zip.py --verify "$z"
+
       - name: Show outputs
         run: ls -R _builds bin 2>/dev/null || true
 
@@ -42,7 +64,7 @@ jobs:
       # half-uploaded "phantom" assets and old timestamped zips left by previous runs. The tag
       # is kept (no --cleanup-tag), so there is no tag-recreation race.
       - name: Clear previous rolling release
-        if: github.ref == 'refs/heads/6.4-rc2-wip'
+        if: github.ref == 'refs/heads/dev'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release delete rc3 --yes 2>/dev/null || true
@@ -52,14 +74,14 @@ jobs:
       # replacement internally. The hand-rolled gh create/upload path hit transient HTTP
       # 422 (phantom asset) / 404 (release not yet propagated) on the uploads endpoint.
       - name: Publish rolling pre-release
-        if: github.ref == 'refs/heads/6.4-rc2-wip'
+        if: github.ref == 'refs/heads/dev'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: rc3
           target_commitish: ${{ github.sha }}
           prerelease: true
-          name: "ACC v2025.5.18-6.4-rc3 (pre-release)"
-          body: "Auto-built flashable module + tarball + uninstaller. KernelSU/APatch acc-on-PATH, clean uninstall; charging daemon unchanged from rc2."
+          name: "ACC ${{ github.ref_name }} rolling pre-release"
+          body: "Auto-built flashable module, tarball and uninstaller from the latest dev commit. Rolling: this tag is reused on every push, so the assets always match the head of dev."
           files: |
             _builds/*/*.zip
             _builds/*/*.tgz
