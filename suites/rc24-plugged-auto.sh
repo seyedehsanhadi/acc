@@ -13,6 +13,9 @@
 #   * a verdict read off a window shorter than the daemon's cadence   -> waits for real evidence
 #   * a phone left capped or cut after an aborted round               -> restores, then verifies
 #
+# IA_ONLY=1 runs ONLY the live idle-avoidance section and the restore, for the case this round
+# hits most often: the phone was too flat to observe idle avoidance when the round first ran.
+#   su -c 'IA_ONLY=1 sh /data/local/tmp/plug/rc24-plugged-auto.sh'
 # It never reboots, never flashes, and never leaves a limit applied.
 
 set -u
@@ -58,6 +61,7 @@ if [ "${_lv:-100}" -ge 95 ]; then
 fi
 
 # ---- 2. the lift experiment, FIRST, while the pack still pulls hard ------------------------------
+if [ -z "${IA_ONLY:-}" ]; then
 hr "2  usb/current_max LIFT EXPERIMENT"
 say "Decides whether a 5000000 write renegotiates the port down, or whether the ~100mA collapse"
 say "was the cable. Does NOT touch the cap-clear paths either way."
@@ -68,10 +72,17 @@ sh $P/lift-exp.sh 2>&1 || say "(lift experiment returned $?)"
 # forever-plugged pair (pause 60 / resume 40, aiapc=false) and watch whether the level actually
 # leaves the limit instead of parking at it. That parking is the reported symptom -- a phone stuck
 # at 59% with exactly this config -- and it is what the removed `pause > 60` gate caused.
+fi
 hr "2b LIVE IDLE-AVOIDANCE (pause 60 / resume 40 / aiapc=false)"
 _ia_lv=$($A/acca --state 2>/dev/null | sed -n 's/.*"capacityPct":\([0-9]*\).*/\1/p')
 if [ "${_ia_lv:-0}" -lt 62 ]; then
+  # This is the section that exercises the removed `pause > 60` gate in cap_idle_threshold, so a
+  # silent SKIP here is the round quietly not testing its most important change. Record it as work
+  # still owed, with the command to finish it, and surface that in the verdict.
   say "SKIP: level ${_ia_lv}% is not above a pause of 60 yet; nothing to observe."
+  say "      This is the live check for the cap_idle_threshold change. Charge past 62% and run:"
+  say "        su -c 'IA_ONLY=1 sh $P/rc24-plugged-auto.sh'"
+  DEFERRED="  2b live idle-avoidance: needs >62%, was ${_ia_lv}% at round start"
 else
   $A/acca -s shutdown_capacity=5 cooldown_capacity=101 resume_capacity=40 pause_capacity=60 >/dev/null 2>&1
   $A/acca -s allow_idle_above_pcap=false >/dev/null 2>&1
@@ -99,9 +110,18 @@ else
 fi
 
 # ---- 3. the plugged suites ----------------------------------------------------------------------
+if [ -z "${IA_ONLY:-}" ]; then
 hr "3  PLUGGED SUITES"
 PASS=0; FAIL=0; NOV=0; FAILED=""
-for s in rc24-plugged.sh rc24-plugged-full.sh rc24-plugged-deep.sh rc24-plugged-9vramp.sh \
+# Two of these cannot run unattended, and that is not a defect in them: rc24-plugged-deep.sh waits
+# up to 600s for an operator to plug a NAMED charger type, and rc24-plugged-9vramp.sh demands the
+# phone START unplugged and then waits ten minutes for a 9V brick. On a round that begins already
+# plugged they block for the full timeout, print no summary line, and land in the tally as NO
+# VERDICT, which reads exactly like a failure. Twenty minutes of a round were being spent proving
+# nothing. They are not dropped, they move to an attended pass and are named in the verdict, so the
+# choice is explicit instead of being an unexplained pair of blanks.
+ATTENDED="rc24-plugged-deep.sh rc24-plugged-9vramp.sh"
+for s in rc24-plugged.sh rc24-plugged-full.sh \
          rc24-limits-hardcore.sh rc24-repair-path.sh rc24-mcv-oscillation.sh \
          rc24-weak-supply.sh rc24-weak-supply2.sh fastcharge-audit.sh \
          rc24-acc-vs-thermal.sh rc24-thermal.sh; do
@@ -125,6 +145,7 @@ for s in rc24-plugged.sh rc24-plugged-full.sh rc24-plugged-deep.sh rc24-plugged-
   cp $P/config.autobak $D/config.txt 2>/dev/null || :
 done
 
+fi
 # ---- 4. restore and PROVE it -------------------------------------------------------------------
 hr "4  RESTORE AND VERIFY"
 cp $P/config.autobak $D/config.txt 2>/dev/null || :
@@ -154,6 +175,13 @@ say "state      : $(printf '%s' "$_st2" | tr ',' '\n' | grep -E '"capacityPct"|"
 hr "5  VERDICT"
 say "suite assertions : $PASS passed, $FAIL failed, $NOV suites gave no verdict"
 [ -n "$FAILED" ] && say "needs attention  :$FAILED"
+say ""
+say "NOT RUN - these need an operator at the cable and will block without one:"
+for s in $ATTENDED; do say "  $s"; done
+say "  run each on its own, watching the prompt:"
+say "    su -c 'sh $P/rc24-plugged-deep.sh'     (asks which charger to plug, then waits)"
+say "    su -c 'sh $P/rc24-plugged-9vramp.sh'   (must START unplugged, then plug a 9V QC/PD brick)"
+if [ -n "${DEFERRED:-}" ]; then say ""; say "DEFERRED - not observable at this battery level:"; say "$DEFERRED"; fi
 if [ "$FAIL" -eq 0 ] && [ "$NOV" -eq 0 ]; then
   say "PLUGGED ROUND: CLEAN"
 else

@@ -87,7 +87,16 @@ then
   # Only regenerate README.html when a markdown converter exists AND it produces
   # non-empty output -- otherwise the redirect would truncate README.html to 0 bytes
   # (this box has no `markdown` binary). Write to a temp and move only on success.
-  command -v markdown >/dev/null 2>&1 && markdown README.md > README.html.tmp 2>/dev/null && [ -s README.html.tmp ] && mv -f README.html.tmp README.html; rm -f README.html.tmp 2>/dev/null || :
+  # Two converters, because the binary is rare and the python module is not. This script already
+  # requires python for the zip packer, so `python -m markdown` adds no dependency class.
+  if command -v markdown >/dev/null 2>&1; then
+    markdown README.md > README.html.tmp 2>/dev/null || :
+  elif python3 -c 'import markdown' >/dev/null 2>&1; then
+    python3 -m markdown README.md > README.html.tmp 2>/dev/null || :
+  elif python -c 'import markdown' >/dev/null 2>&1; then
+    python -m markdown README.md > README.html.tmp 2>/dev/null || :
+  fi
+  [ -s README.html.tmp ] && mv -f README.html.tmp README.html; rm -f README.html.tmp 2>/dev/null || :
 
   # ...and say so when it did not. README.html SHIPS (`cp -R ... README.*`) and acc.sh hands it to
   # the Android viewer as $dataDir/README.html, with the markdown only as a fallback, so a stale
@@ -99,7 +108,7 @@ then
   if [ README.html -ot README.md ]; then
     echo "BUILD WARNING: README.html is older than README.md and was NOT regenerated." >&2
     echo "  The shipped HTML readme will contradict the shipped defaults." >&2
-    command -v markdown >/dev/null 2>&1       || echo "  Cause: no 'markdown' converter on this box. Install one, or update README.html by hand." >&2
+    command -v markdown >/dev/null 2>&1       || echo "  Cause: no converter -- install the 'markdown' binary or 'pip install markdown'." >&2
   fi
 fi
 
@@ -113,7 +122,15 @@ for file in ./install/uninstall.sh ./install*.sh; do
   # FATAL busybox block: the one script that most needs the current wide + non-fatal net.
   # Idempotent; content is sourced only from setup-busybox.sh.
   { sed -n '1,/#BB#/p' $file; \
-  grep -Ev '^$|^#' install/setup-busybox.sh; \
+  # Keep the comments. `grep -Ev '^$|^#'` dropped every comment starting at column 0 while
+  # leaving indented ones alone, so which rationale survived a build came down to how deeply it
+  # happened to be nested. The rc23b note explaining why this block tests $busybox_dir and not
+  # $bin_dir sits at column 0, so every single build deleted it -- it was restored by hand once
+  # this session and the next build removed it again. That note is the measured record of a bug
+  # that left a phone with no daemon and charging uncapped, and it belongs in the generated copies
+  # where anyone editing them will read it. Only the file's own header is dropped now: skip
+  # leading blanks and comments until the first real statement, then keep everything non-blank.
+  awk 'NF==0 && !seen {next} /^#/ && !seen {next} {seen=1; if (NF) print}' install/setup-busybox.sh; \
   sed -n '/^#\/BB#/,$p' $file; } > ${file}.tmp
   mv -f ${file}.tmp $file
 done

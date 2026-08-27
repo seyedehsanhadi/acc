@@ -125,12 +125,26 @@ magisk_busybox="$(ls /data/adb/*/bin/busybox /data/adb/magisk/busybox 2>/dev/nul
     ${BB_OPTIONAL:-false} && echo "-> BB_OPTIONAL set: continuing with /system tools (some steps limited)" || exit 3
   }
 }
-# rc23b: test $busybox_dir, not $bin_dir. The applets live in $busybox_dir; $bin_dir is only where
-# a user MAY drop a static busybox and is empty on a normal install. Asking whether $bin_dir led
-# PATH meant any caller that had prepended it itself turned this into a no-op, and $busybox_dir
-# was never added -- so every busybox applet silently vanished. That is how acc-switch-scan.sh
-# lost start-stop-daemon, and with it the daemon it restarts on the way out. Colons anchor the
-# match so one directory name containing another cannot satisfy it.
+# rc23b: this tested the WRONG DIRECTORY, and it cost the switch scanner its daemon.
+#
+# $bin_dir is where a user MAY drop a static busybox; it is empty on both test phones. $busybox_dir
+# is where the applets actually are, installed above. The guard existed to avoid prepending twice,
+# but it asked "does $bin_dir already lead PATH?" -- so any caller that had prepended $bin_dir
+# itself made this a no-op and $busybox_dir was never added at all.
+#
+# acc-switch-scan.sh does exactly that (`PATH=/data/adb/$domain/bin:$PATH`), to pick up a
+# user-supplied busybox. The consequence was three lines away and invisible: the daemon is started
+# by service.sh with `exec start-stop-daemon -bx $execDir/accd.sh -S`, start-stop-daemon is a
+# BUSYBOX applet, and with $busybox_dir off PATH it is not found. service.sh exits 127 and the
+# phone is left with no daemon and charging uncapped.
+#
+# Measured on a Mi A3, three interleaved rounds, no other difference: plain PATH restarts the
+# daemon in 1 s, PATH with $bin_dir prepended never restarts it, and running service.sh by hand
+# under that PATH prints
+#   /dev/.vr25/acc/accd[48]: start-stop-daemon: inaccessible or not found
+#
+# Test $busybox_dir, which is the thing that has to be reachable, and anchor with colons so a
+# directory whose name merely CONTAINS another cannot satisfy it.
 case ":$PATH:" in
   *":$busybox_dir:"*) ;;
   *) export PATH="$bin_dir:$busybox_dir:$PATH";;
