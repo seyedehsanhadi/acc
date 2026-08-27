@@ -190,7 +190,7 @@ case "${_V_batt:-}" in ''|*[!0-9]*) _V_batt= ;; esac
     local _p= _c=
     for _p in $(pgrep -f "accd.sh" 2>/dev/null); do
       [ -r "/proc/$_p/cmdline" ] || continue
-      _c=$(tr ' ' ' ' < "/proc/$_p/cmdline" 2>/dev/null)
+      _c=$(tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null)
       set -f; set -- $_c; set +f
       case "${1:-}" in sh|*/sh|mksh|*/mksh|bash|*/bash|busybox|*/busybox) ;; *) continue;; esac
       [ "${1##*/}" = busybox ] && shift
