@@ -193,8 +193,18 @@ fi
 # that decided NOT to add a redundant snapshot.
 _fo=$T/fo.out; _fof=$T/fo.flag; : > "$_fo"; touch "$_fof"
 _fov=alpha
-( while [ -f "$_fof" ]; do echo "$_fov" >> "$_fo"; sleep 1; done ) &
-sleep 2; _fov=BRAVO; sleep 2; rm -f "$_fof"; sleep 2
+# The redirect is not cosmetic. This loop writes to a FILE, so it never needs stdout -- but a
+# backgrounded process inherits it, and when this suite runs inside a `out=$(sh t113 2>&1)` the
+# inherited stdout IS the command substitution's pipe. The parent then blocks in pipe_read until
+# this loop exits, because the pipe has a live writer, even though the suite itself finished.
+# Interrupt the suite before `rm -f "$_fof"` and the orphan runs forever: the runner sits in
+# pipe_read with no children and a log that never advances, which is indistinguishable from a hang
+# and is exactly what it was diagnosed as, twice. Detach stdout AND clear the flag from a trap so
+# the loop terminates however this suite ends.
+trap 'rm -f "$_fof" 2>/dev/null' EXIT INT TERM HUP
+( while [ -f "$_fof" ]; do echo "$_fov" >> "$_fo"; sleep 1; done ) >/dev/null 2>&1 &
+_t113bg=$!
+sleep 2; _fov=BRAVO; sleep 2; rm -f "$_fof"; sleep 2; wait "$_t113bg" 2>/dev/null || :
 if grep -q BRAVO "$_fo" 2>/dev/null; then
   no "a backgrounded loop SAW the parent's later change - force_off needs an explicit snapshot"
 else
