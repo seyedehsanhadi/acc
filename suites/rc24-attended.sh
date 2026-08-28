@@ -154,6 +154,17 @@ fi
 fi
 
 hr "5  VERDICT"
+# _restore ends with `accd --init`, which spawns a daemon while the previous one may still hold the
+# lock. Counting immediately therefore reported "daemons: 2" on BOTH phones - checked by hand each
+# time, and each time the loser had already exited and acc.lock named the survivor. Let the
+# arbitration finish before counting, so the number means what a reader takes it to mean.
+_st=0
+while [ $_st -lt 30 ]; do
+  _lk=$(cat $A/acc.lock 2>/dev/null)
+  case ${_lk:-} in ''|*[!0-9]*) ;; *) [ -d /proc/$_lk ] && break;; esac
+  sleep 3; _st=$((_st+3))
+done
+sleep 3
 say "config now : $(grep '^capacity=' $D/config.txt)"
 say "mcc/mcv    : $(grep -E '^maxCharging' $D/config.txt | tr '\n' ' ')"
 n=0
