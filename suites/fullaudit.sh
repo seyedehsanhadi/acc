@@ -63,7 +63,20 @@ hr "6  SNAPSHOT"
 run $P/snapshot.sh snapshot
 
 hr "7  MEGA2 SET"
-for f in $P/mega2/*.sh; do [ -f "$f" ] || continue; run "$f" "mega2/$(basename $f)"; done
+# The p*.sh files are FRAGMENTS sourced by run.sh, which supplies hdr/no/plugged from lib.sh.
+# Running them standalone just yields "hdr: not found" (rc=127) and grades nothing. run.sh
+# 'unplugged' is the cable-out selection: P0 P1 P2 P8 P9 P3.
+if [ -f "$P/mega2/run.sh" ]; then
+  o=/data/local/tmp/.fa.mega2.out
+  ( cd "$P/mega2" && execDir=/data/adb/vr25/acc timeout 3000 sh run.sh unplugged ) > "$o" 2>&1
+  rc=$?
+  [ "$rc" = 124 ] && say "  !! mega2 TIMED OUT"
+  grep -E '^  (FAIL|SKIP)|ABORT' "$o" | head -10
+  v=$(grep -iE "[0-9]+ (passed|failed)" "$o" | tail -1)
+  say "  => mega2 unplugged: ${v:-(no summary, rc=$rc)}"
+else
+  say "  => mega2: run.sh not staged"
+fi
 
 hr "8  AMPS SET"
 for f in $P/amps/*.sh; do [ -f "$f" ] || continue; run "$f" "amps/$(basename $f)"; done
