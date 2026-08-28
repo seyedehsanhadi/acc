@@ -131,7 +131,17 @@ for p in $(pgrep -f accd 2>/dev/null); do
   c=$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null); set -f; set -- $c; set +f
   case "${1:-}" in sh|*/sh|mksh|*/mksh|busybox|*/busybox) ;; *) continue;; esac
   [ "${1##*/}" = busybox ] && shift
-  case "${2:-}" in */accd.sh|accd.sh) _n=$((_n+1));; esac
+  # A daemon FORKS: mksh subshells inherit the parent's cmdline, so a plain scan counts the
+  # daemon and its child as two daemons. Measured on a Mi A3 - pid 29567 (ppid 1) holding the
+  # lock, pid 29653 with ppid 29567, identical argv - and chased twice as a phantom second
+  # daemon before the parent was checked. Skip any candidate whose parent is itself a daemon.
+  case "${2:-}" in */accd.sh|accd.sh) ;; *) continue;; esac
+      _pp=$(awk '{print $4}' /proc/$p/stat 2>/dev/null)
+      if [ -n "$_pp" ] && [ -r "/proc/$_pp/cmdline" ]; then
+        _pc=$(tr '\0' ' ' < /proc/$_pp/cmdline 2>/dev/null)
+        case "$_pc" in *accd.sh*) continue;; esac
+      fi
+  _n=$((_n+1))
 done
 # acc -d and acc -e STOP THE DAEMON BY DESIGN, so a bare count here grades documented CLI
 # behaviour as a fault - it failed on both phones for that reason alone. Bring it back the way a
