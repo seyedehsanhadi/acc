@@ -95,17 +95,22 @@ fi
 
 if want 2; then
 hr "2  9V ATTACHED  (deep grades a real high-voltage charge)"
-say ">>> Make sure the 9V brick is CONNECTED. Waiting up to ${WAIT}s."
-if await 1 "9V brick connected"; then
-  # A cable is not a 9V cable. This accepted any supply and graded plugged-deep against a 4.9V
-  # weak charger, which is not what that suite measures. Require the vbus to actually be high.
+# FOUR of these suites grade the 0->1 plug EDGE and abort outright on an already-attached cable:
+# 9vramp, plugged-deep, and both weak-supply ones. So EVERY such phase uses one pattern - wait for
+# UNPLUGGED, start the suite, and let the suite itself wait for the plug. Waiting for the brick to
+# be connected first, as this phase did, guarantees the abort it was trying to avoid.
+say ">>> UNPLUG, then attach the 9V QC/PD brick when the suite asks. Waiting up to ${WAIT}s."
+if await 0 "cable removed"; then
+  say "  unplugged at $(lvl)% - starting deep now; PLUG THE 9V BRICK when it asks"
+  run rc24-plugged-deep.sh
+  # Report what the supply actually turned out to be, so a pass on a weak charger is visible
+  # rather than silent. HVDCP_3 negotiates in 200mV steps, so judge on type as well as voltage.
   _mv=$(( $(vbus) / 1000 ))
-  if [ "${_mv:-0}" -lt 6000 ]; then
-    say "  REFUSED: vbus is ${_mv}mV, not a 9V supply. Attach the QC/PD brick and re-run PHASES=2."
-    _skip2=1
+  if [ "$_mv" -ge 6000 ] 2>/dev/null || ptype | grep -qiE 'hvdcp|_pd|qc[0-9]?'; then
+    say "  supply confirmed high-voltage: ${_mv}mV type=$(ptype)"
+  else
+    say "  NOTE: graded against a ${_mv}mV type=$(ptype) supply, NOT a 9V brick - re-run PHASES=2."
   fi
-  say "  plugged at $(lvl)%  vbus=$(vbus)  type=$(ptype)"
-  [ "${_skip2:-0}" = 1 ] || run rc24-plugged-deep.sh
 else
   say "  skipping deep"
 fi
