@@ -88,7 +88,10 @@ fi
 echo
 echo "===== 4  THE FRONT-ENDS WORK ====="
 [ -x "$A/acc" ] && ok "runtime link $A/acc present" || no "runtime link missing - post-fs-data did not run"
-_v=$("$A/acc" -v 2>/dev/null | head -1)
+# head -1 gets a BLANK line: acc -v prints an empty line before the version, so the naive read
+# reported "produced nothing" against a front-end that answers correctly. Take the first
+# non-empty line instead of the first line.
+_v=$("$A/acc" -v 2>/dev/null | grep -m1 .)
 [ -n "$_v" ] && ok "acc -v answers: $_v" || no "acc -v produced nothing"
 "$A/acc" -s 2>/dev/null | grep -q . && ok "acc -s prints the config" || no "acc -s printed nothing"
 "$A/acca" --state 2>/dev/null | grep -q '"battery"' \
