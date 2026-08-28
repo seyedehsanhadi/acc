@@ -73,6 +73,29 @@ _bak=/data/local/tmp/.t130.cfg
 cp "$CFG" "$_bak" 2>/dev/null || { sk "cannot back up the config"; fin; }
 _undo(){ cp "$_bak" "$CFG" 2>/dev/null; rm -f "$_bak" 2>/dev/null; "$T/accd" --init "$CFG" >/dev/null 2>&1 || :; }
 
+# PROVE THE DAEMON IS COMPLETING LOOP PASSES BEFORE GRADING ONE.
+#
+# The guard lives in the main loop. A daemon that is in SWITCH SELECTION has not reached that loop
+# at all - selection is 35 one-second iterations per candidate and runs first - so the marker sits
+# untouched and this suite reports "the guard never fired" against a build where it is present and
+# correct. Seen on a Mi A3 with chargingSwitch=(): the suite failed while the daemon was busy and
+# healthy, and the same suite passed twice on the same build minutes earlier.
+#
+# flight.log is the honest signal: a record appearing means a loop pass completed.
+_FL=/data/adb/vr25/acc-data/logs/flight.log
+_h0=$(wc -l < "$_FL" 2>/dev/null || echo 0)
+_hw=0
+while [ $_hw -lt 90 ]; do
+  _h1=$(wc -l < "$_FL" 2>/dev/null || echo 0)
+  [ "${_h1:-0}" -gt "${_h0:-0}" ] 2>/dev/null && break
+  sleep 10; _hw=$((_hw+10))
+done
+if [ "${_h1:-0}" -le "${_h0:-0}" ] 2>/dev/null; then
+  sk "the daemon completed no loop pass in ${_hw}s (switch selection, or not looping) - the guard cannot be graded"
+  fin
+fi
+ok "the daemon is completing loop passes, so the guard is reachable"
+
 # Drive the threshold to 1s through the config's own `:` hook, so ANY ordinary loop gap trips it.
 printf '\n:; plugGapMax=1\n' >> "$CFG"
 : > $T/.hvkicked 2>/dev/null
