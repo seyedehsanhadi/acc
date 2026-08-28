@@ -169,6 +169,38 @@ case "$@" in
     for _as; do
       cfg_check_kv "$_as" || exit $?
     done
+
+    # KEYS THAT DRIVE HARDWARE NODES MUST GO THROUGH THE SETTERS, and this branch has none.
+    #
+    # Everything below writes the CONFIG and nothing else: assign, write-config.sh, exit 0. That is
+    # correct for a value the daemon reads back on its next loop, and wrong for the three keys whose
+    # effect lives in sysfs. acc -s routes those through set-prop.sh, which calls set_ch_curr,
+    # set_ch_volt and set_temp_level; acca -s never did, so the two front-ends disagreed on what
+    # "set" means -- and AccA drives acca.
+    #
+    # Device-proven on a Mi A3. `acca -s mcv=` left the config reading maxChargingVoltage=() while
+    # battery/voltage_max and main/voltage_max stayed pinned at 4150000 against a 4400000 default.
+    # A 4.15V ceiling holds that pack near 70%, it survived a clear, an unplug and a reboot, and
+    # NOTHING in the config or the UI said so -- the release path was simply never reached. Under
+    # `sh -x` the trace showed the array being cleared and the branch returning with set_ch_volt
+    # never called at all.
+    #
+    # Delegating to acc.sh rather than sourcing the setters here keeps ONE implementation of the
+    # apply/release rules instead of a second copy to drift. It costs a heavier front-end only for
+    # these three keys; every other key keeps the fast path below.
+    for _as; do
+      case "${_as%%=*}" in
+        mcv|max_charging_voltage|maxChargingVoltage|\
+        mcc|max_charging_current|maxChargingCurrent|\
+        tl|temp_level)
+          ensure_tmpdir_links
+          # ${id:-acc}, not ${id}: acca.sh never sets id (ensure_tmpdir_links uses ${id:-acc} for the
+          # same reason), and under set -eu a bare ${id} aborts the whole front-end before write-config
+          # runs - which looked like the delegation doing nothing at all.
+          exec $TMPDIR/${id:-acc} $config -s "$@"
+        ;;
+      esac
+    done
     for _as; do
       case "$_as" in
         *=*) _ak=${_as%%=*}; _av=${_as#*=}

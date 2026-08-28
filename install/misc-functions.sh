@@ -28,8 +28,27 @@ apply_on_boot() {
   # hid each other, and fixing the first exposed the second.
   for entry in ${applyOnBoot[@]-} ${maxChargingVoltage[@]:-$([ .$arg != .default ] || cat $TMPDIR/ch-volt-ctrl-files 2>/dev/null || :)}; do
     set -- ${entry//::/ }
-    [ -f ${1-//} ] || continue
+    # RESOLVE THE PATH, do not depend on the working directory. ch-volt-ctrl-files and
+    # ch-curr-ctrl-files store entries RELATIVE to /sys/class/power_supply
+    # ("battery/voltage_max"), and this test only passes when cwd happens to BE that directory.
+    # The daemon cds there, so a daemon-driven apply or restore worked; a front-end one did not.
+    # acc.sh, acca.sh and this file never cd, so `acc -s mcv=` ran the whole loop, skipped every
+    # entry on this test, and reported success having restored nothing.
+    #
+    # Device-proven on a Mi A3 from a front-end shell (cwd "/"): the entry parsed correctly as
+    # file=battery/voltage_max default=4400000, and `[ -f $1 ]` was FALSE from / while TRUE from
+    # /sys/class/power_supply. The nodes stayed pinned at 4150000 across a clear, an unplug and
+    # a reboot, with the config and the UI both reporting no limit - a 4.15V ceiling holds that
+    # pack near 70% and nothing on screen says why.
+    #
+    # Resolving here rather than adding a cd keeps the loop correct from ANY caller, which is
+    # exactly what the daemon/front-end split showed is needed.
     file=${1-}
+    case "$file" in
+      /*) ;;
+      *) file=${PS:-/sys/class/power_supply}/$file ;;
+    esac
+    [ -f "$file" ] || continue
     value=${2-}
     if $exitCmd && ! $force; then
       default=${2-}
@@ -84,8 +103,27 @@ apply_on_plug() {
     ${maxChargingCurrent[@]:-$([ .$arg != .default ] || cat $TMPDIR/ch-curr-ctrl-files 2>/dev/null || :)}
   do
     set -- ${entry//::/ }
-    [ -f ${1-//} ] || continue
+    # RESOLVE THE PATH, do not depend on the working directory. ch-volt-ctrl-files and
+    # ch-curr-ctrl-files store entries RELATIVE to /sys/class/power_supply
+    # ("battery/voltage_max"), and this test only passes when cwd happens to BE that directory.
+    # The daemon cds there, so a daemon-driven apply or restore worked; a front-end one did not.
+    # acc.sh, acca.sh and this file never cd, so `acc -s mcv=` ran the whole loop, skipped every
+    # entry on this test, and reported success having restored nothing.
+    #
+    # Device-proven on a Mi A3 from a front-end shell (cwd "/"): the entry parsed correctly as
+    # file=battery/voltage_max default=4400000, and `[ -f $1 ]` was FALSE from / while TRUE from
+    # /sys/class/power_supply. The nodes stayed pinned at 4150000 across a clear, an unplug and
+    # a reboot, with the config and the UI both reporting no limit - a 4.15V ceiling holds that
+    # pack near 70% and nothing on screen says why.
+    #
+    # Resolving here rather than adding a cd keeps the loop correct from ANY caller, which is
+    # exactly what the daemon/front-end split showed is needed.
     file=${1-}
+    case "$file" in
+      /*) ;;
+      *) file=${PS:-/sys/class/power_supply}/$file ;;
+    esac
+    [ -f "$file" ] || continue
     value=${2-}
     default=${3:-${2-}}
 
@@ -223,8 +261,27 @@ apply_on_plug() {
   [ -z "${exitCode_-}" ] || return 0
   for entry in ${maxChargingCurrent[@]-}; do
     set -- ${entry//::/ }
-    [ -f ${1-//} ] || continue
+    # RESOLVE THE PATH, do not depend on the working directory. ch-volt-ctrl-files and
+    # ch-curr-ctrl-files store entries RELATIVE to /sys/class/power_supply
+    # ("battery/voltage_max"), and this test only passes when cwd happens to BE that directory.
+    # The daemon cds there, so a daemon-driven apply or restore worked; a front-end one did not.
+    # acc.sh, acca.sh and this file never cd, so `acc -s mcv=` ran the whole loop, skipped every
+    # entry on this test, and reported success having restored nothing.
+    #
+    # Device-proven on a Mi A3 from a front-end shell (cwd "/"): the entry parsed correctly as
+    # file=battery/voltage_max default=4400000, and `[ -f $1 ]` was FALSE from / while TRUE from
+    # /sys/class/power_supply. The nodes stayed pinned at 4150000 across a clear, an unplug and
+    # a reboot, with the config and the UI both reporting no limit - a 4.15V ceiling holds that
+    # pack near 70% and nothing on screen says why.
+    #
+    # Resolving here rather than adding a cd keeps the loop correct from ANY caller, which is
+    # exactly what the daemon/front-end split showed is needed.
     file=${1-}
+    case "$file" in
+      /*) ;;
+      *) file=${PS:-/sys/class/power_supply}/$file ;;
+    esac
+    [ -f "$file" ] || continue
     value=${2-}
     _rk=$TMPDIR/.mccrej-${file//\//_}
     if [ "$(cat "$file" 2>/dev/null)" = "$value" ]; then

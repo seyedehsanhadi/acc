@@ -7,8 +7,24 @@ set_ch_volt() {
   # clear must still drop a stored config value), but the gate must not depend on the resolved
   # control files either - the daemon calls `set_ch_volt -` every loop when no limit is set, and a
   # ctrl-files clause made that a full default rewrite each tick on voltage-node phones.
+  # CONSULT THE CONFIG ON DISK, not the arrays in memory. set-prop.sh clears maxChargingVoltage=()
+  # for `acc -s mcv=` BEFORE it calls this function, so by the time the fast path below tested
+  # those three names they were ALREADY empty -- it returned 0 every time, and the clear branch,
+  # which is the only thing that restores the nodes, never ran at all.
+  #
+  # Device-proven on a Mi A3: after `acc -s mcv=` the config read maxChargingVoltage=() while
+  # battery/voltage_max and main/voltage_max were still pinned at 4150000 against a 4400000
+  # default. A 4.15V ceiling holds that pack near 70%, and NOTHING in the config or the UI said
+  # so -- only reading the sysfs nodes showed it. It survives unplug and reboot.
+  #
+  # write-config has not run yet at this point, so the on-disk value is still the OLD one, and that
+  # is exactly the signal wanted: a limit is still on record, therefore there is something to undo.
+  # Same rule set-ch-curr.sh already applies ("a daemon release must consult the config ON DISK,
+  # not the copy it loaded at the top").
+  local _scvOnDisk=
+  _scvOnDisk=$(sed -n 's/^maxChargingVoltage=(\([0-9][0-9]*\).*/\1/p' "${config:-$dataDir/config.txt}" 2>/dev/null)
   [[ ! -f $f && .${1-} = .- ]] \
-    && [ -z "${maxChargingVoltage[0]-}${max_charging_voltage-}${mcv-}" ] && return 0 || :
+    && [ -z "${maxChargingVoltage[0]-}${max_charging_voltage-}${mcv-}${_scvOnDisk}" ] && return 0 || :
 
   if [ -n "${1-}" ]; then
 
