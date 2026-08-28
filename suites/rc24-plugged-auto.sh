@@ -20,11 +20,33 @@
 
 set -u
 
+# SINGLE INSTANCE. Two rounds at once interleave their suite runs and overwrite one log, which
+# reads exactly like a stall. toybox flock cannot see an fd opened with `exec 9>>file` - it
+# answers "Bad file descriptor" - so the fd must reach flock as a REDIRECT, the same form
+# acquire-lock.sh uses. Proven on laurus: holder rc=0, second attempt rc=1.
+PLOCK=/data/local/tmp/.plugged_round.lock
+exec 9<>"$PLOCK" 2>/dev/null || :
+if ! flock -n 0 <&9 2>/dev/null; then
+  echo "another plugged round holds $PLOCK; refusing to start a second"
+  exit 3
+fi
+
 # Declared before ANY mode branch. These lived inside the suite-loop section, which IA_ONLY skips,
 # while the verdict block below reads them unconditionally -- so `IA_ONLY=1`, the very command the
 # 2b skip message tells you to run, reached the verdict and died on "PASS: unbound variable".
 PASS=0; FAIL=0; NOV=0; FAILED=""
-ATTENDED="rc24-plugged-deep.sh rc24-plugged-9vramp.sh"
+# rc24-weak-supply and rc24-weak-supply2 belong here too: both open with "WAITING FOR THE CABLE"
+# and wait for a DELIBERATELY WEAK supply to be attached. Unattended they can only time out, and
+# the round then booked them as "no verdict -> needs attention" and called an otherwise clean run
+# NOT CLEAN. Four of the ten were never unattended suites.
+ATTENDED="rc24-plugged-deep.sh rc24-plugged-9vramp.sh rc24-weak-supply.sh rc24-weak-supply2.sh"
+PSUITEOUT=/data/local/tmp/.plug-suite-out.$$
+
+# NOT every suite asserts. fastcharge-audit ends with its own "VERDICT: ..." line and
+# rc24-acc-vs-thermal prints raw samples; neither emits "NAME: n passed, m failed" because neither
+# is a pass/fail suite. Demanding a verdict line from a measurement tool is the runner being wrong,
+# not the tool. Run them, keep their output, and do not count them against the round.
+REPORTONLY="fastcharge-audit.sh rc24-acc-vs-thermal.sh"
 D=/data/adb/vr25/acc-data
 A=/dev/.vr25/acc
 P=/data/local/tmp/plug
@@ -65,6 +87,22 @@ if ! cp $D/config.txt $P/config.autobak 2>/dev/null || [ ! -s $P/config.autobak 
 fi
 _restore_cfg(){
   [ -s $P/config.autobak ] || return 0
+
+  # RELEASE THE HARDWARE FIRST, then put the config back.
+  #
+  # Copying config.autobak over config.txt restores the FILE and nothing else. The limits these
+  # suites apply live in sysfs, and rc24-mcv-oscillation in particular leaves a charge-voltage cap
+  # on the nodes. An aborted round therefore handed the phone back with
+  #   config: maxChargingVoltage=()      nodes: battery/voltage_max = 4150000
+  # which is a 4.15V ceiling holding the pack near 70%, invisible in the config and in the app.
+  # That is exactly what happened here, and it took reading sysfs to find it.
+  #
+  # Release through acc -s, not by writing nodes directly, so the documented restore values in
+  # ch-volt-ctrl-files / ch-curr-ctrl-files are what gets written. Both are no-ops when no limit is
+  # set, so this is safe to run on every exit path.
+  $A/acc $D/config.txt -s mcv= >/dev/null 2>&1 || :
+  $A/acc $D/config.txt -s mcc= >/dev/null 2>&1 || :
+
   cp $P/config.autobak $D/config.txt 2>/dev/null || :
   $A/accd --init $D/config.txt >/dev/null 2>&1 || :
 }
@@ -152,12 +190,24 @@ hr "3  PLUGGED SUITES"
 # choice is explicit instead of being an unexplained pair of blanks.
 for s in rc24-plugged.sh rc24-plugged-full.sh \
          rc24-limits-hardcore.sh rc24-repair-path.sh rc24-mcv-oscillation.sh \
-         rc24-weak-supply.sh rc24-weak-supply2.sh fastcharge-audit.sh \
-         rc24-acc-vs-thermal.sh rc24-thermal.sh; do
+         fastcharge-audit.sh rc24-acc-vs-thermal.sh rc24-thermal.sh; do
   [ -f "$P/$s" ] || { say "-- $s : not staged, skipped"; continue; }
   say ""
   say "---- $s ----"
-  out=$(execDir=/data/adb/vr25/acc sh "$P/$s" 2>&1)
+  # Read the suite through a FILE, never a command substitution. `$( )` builds a pipe and blocks
+  # until EVERY writer closes it - and these suites RESTART THE DAEMON, which inherits that pipe
+  # as its stdout and then lives forever. The parent sits in pipe_read with no children and a log
+  # that never advances, which is indistinguishable from a hung suite; it cost two unplugged
+  # rounds before the cause was found in wchan rather than in the log. A file has no writer to
+  # wait on. Worth more here than anywhere else: a stall on a PLUGGED round wastes a charge.
+  # A per-suite ceiling. Every suite in this list finishes well inside it on both phones (the
+  # slowest measured is diag-collect at ~340s on the A3), so hitting it means something is
+  # genuinely stuck. Recording a TIMEOUT and moving on costs one suite; letting it run costs the
+  # whole round and the charge that went into it.
+  execDir=/data/adb/vr25/acc timeout "${SUITE_TIMEOUT:-900}" sh "$P/$s" >"$PSUITEOUT" 2>&1
+  _src=$?
+  [ "$_src" = 124 ] && say "  !! TIMED OUT after ${SUITE_TIMEOUT:-900}s - recorded, round continues"
+  out=$(cat "$PSUITEOUT" 2>/dev/null)
   printf '%s\n' "$out" | grep -E '^  (FAIL|SKIP)' || :
   v=$(printf '%s\n' "$out" | grep -E '^[a-zA-Z0-9_-]+: [0-9]+ passed' | tail -1)
   if [ -n "$v" ]; then
@@ -167,8 +217,18 @@ for s in rc24-plugged.sh rc24-plugged-full.sh \
     PASS=$(( PASS + ${p:-0} )); FAIL=$(( FAIL + ${f:-0} ))
     [ "${f:-0}" -gt 0 ] && FAILED="$FAILED $s"
   else
-    say "  => NO VERDICT LINE"
-    NOV=$(( NOV + 1 )); FAILED="$FAILED $s(noverdict)"
+    case " $REPORTONLY " in
+      *" $s "*)
+        # a measurement tool: surface what it concluded, do not demand a pass/fail line
+        say "  => (measurement, no assertions)"
+        printf '%s
+' "$out" | grep -E "VERDICT|=====" | head -4 | sed "s/^/     /" || :
+      ;;
+      *)
+        say "  => NO VERDICT LINE"
+        NOV=$(( NOV + 1 )); FAILED="$FAILED $s(noverdict)"
+      ;;
+    esac
   fi
   # After every suite: put the config back and make sure nothing is left holding the charge.
   cp $P/config.autobak $D/config.txt 2>/dev/null || :
@@ -210,6 +270,8 @@ for s in $ATTENDED; do say "  $s"; done
 say "  run each on its own, watching the prompt:"
 say "    su -c 'sh $P/rc24-plugged-deep.sh'     (asks which charger to plug, then waits)"
 say "    su -c 'sh $P/rc24-plugged-9vramp.sh'   (must START unplugged, then plug a 9V QC/PD brick)"
+say "    su -c 'sh $P/rc24-weak-supply.sh'      (waits for a deliberately weak supply)"
+say "    su -c 'sh $P/rc24-weak-supply2.sh'     (same, second scenario)"
 if [ -n "${DEFERRED:-}" ]; then say ""; say "DEFERRED - not observable at this battery level:"; say "$DEFERRED"; fi
 if [ "$FAIL" -eq 0 ] && [ "$NOV" -eq 0 ]; then
   say "PLUGGED ROUND: CLEAN"
