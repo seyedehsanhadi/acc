@@ -25,6 +25,17 @@ PS=/sys/class/power_supply
 OUT=$P/ATTENDED.log
 WAIT=${STEP_TIMEOUT:-600}
 SUITE_TIMEOUT=${SUITE_TIMEOUT:-1200}
+# The suites that wait for a cable use PLUGWAIT (900 by default) INSIDE the SUITE_TIMEOUT this
+# runner wraps them in, so a SUITE_TIMEOUT at or below PLUGWAIT kills the suite while it is still
+# legitimately waiting - and the operator sees a timeout with no idea which of the two fired. An
+# operator who steps away to discharge a phone first hits this immediately. Keep a real margin.
+case ${PLUGWAIT:-900} in
+  ''|*[!0-9]*) PLUGWAIT=900;;
+esac
+if [ "$SUITE_TIMEOUT" -le "$((PLUGWAIT + 120))" ] 2>/dev/null; then
+  SUITE_TIMEOUT=$((PLUGWAIT + 300))
+fi
+export PLUGWAIT
 
 # PHASES="2 3 4" re-runs only those phases. A phase that already passed should not be repeated to
 # reach one that has not - 9vramp costs a full charge ramp and passed 21/0 first time.
