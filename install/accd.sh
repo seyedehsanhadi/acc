@@ -1022,6 +1022,26 @@ if ! $_INIT; then
       # So: clear the latch when the cable comes out, set it whenever a high voltage is seen while
       # plugged. Once set it stays set for that plug, and a sag cannot open the door. A supply that
       # is genuinely 5V-only never sets it, so a stalled charger is still repairable.
+      # A MISSED UNPLUG. Every clear below is conditioned on a pass that OBSERVES `! present`, and
+      # that assumption does not hold: measured on a Mi A3, screen off, the daemon logged
+      # present=1 at t, slept, and logged present=1 again 93s later - with the cable physically
+      # out for most of that window. sysfs read present=0 the whole time and the suite waiting on
+      # it passed its "no cable" preflight; the daemon simply never got a pass while it was out.
+      # No pass, no clear, so .hvcontract and .hvpeak from the PREVIOUS plug were still standing on
+      # the NEW one. A stale contract latch suppresses the re-kick that a genuinely collapsed
+      # supply needs, which is the precise failure the latch was added to prevent.
+      #
+      # So treat a wall-clock gap far larger than any nap this daemon asks for as "plug continuity
+      # unknown" and drop the per-plug markers. This is safe to do on a false positive because the
+      # latch WRITER above re-derives .hvcontract from real_type every plugged pass: a live QC/PD
+      # contract re-latches on the very next loop, so nothing here can open a re-kick against one.
+      _pgNow=$(date +%s 2>/dev/null || echo 0)
+      case ${_pgLast:-} in ''|*[!0-9]*) _pgLast=$_pgNow;; esac
+      if [ "$_pgNow" -gt 0 ] 2>/dev/null && present 2>/dev/null          && [ $(( _pgNow - _pgLast )) -gt ${plugGapMax:-60} ] 2>/dev/null; then
+        rm -f $TMPDIR/.hvcontract $TMPDIR/.hvpeak $TMPDIR/.hvkicked $TMPDIR/.hvaim               $TMPDIR/.hvfloor $TMPDIR/.hvlost $TMPDIR/.hvrecover $TMPDIR/.hvzero 2>/dev/null || :
+      fi
+      _pgLast=$_pgNow
+
       if ! present 2>/dev/null; then
         rm -f $TMPDIR/.hvcontract 2>/dev/null || :
         # rc23e: the collapse-recovery budget is per PLUG, exactly like the latch it relieves. Cleared
