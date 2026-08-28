@@ -508,11 +508,30 @@ grep -qF '/system/bin/sh' $M/service.sh 2>/dev/null \
 
 # Live: acc -e and acc -d above stopped the daemon by design. Bring it back the way boot does, and
 # prove service.sh reports honestly.
+# Compare the PID, not merely "is a daemon present". Something relaunches a killed daemon quickly,
+# so three seconds later a daemon usually IS running - a different one. Testing presence therefore
+# read a successful kill-and-relaunch as "could not stop the daemon" and SKIPPED the section that
+# exists to grade exactly that. Seen on a fresh install of rc24, where the relaunch is fastest.
+# A pid that changed proves both halves: the old one died and something brought a new one back.
 _before=$(daemon_pid)
 [ -n "$_before" ] && { kill "$_before" 2>/dev/null; sleep 3; }
 _gone=$(daemon_pid)
-if [ -n "$_gone" ]; then
-  sk "could not stop the daemon, so the relaunch cannot be graded"
+if [ -n "$_gone" ] && [ "$_gone" = "$_before" ]; then
+  sk "the daemon survived the kill (pid $_before unchanged), so the relaunch cannot be graded"
+elif [ -n "$_gone" ]; then
+  ok "the daemon was killed and something relaunched it within 3s (pid $_before -> $_gone)"
+  # service.sh must still be honest when a daemon is already up: it should not fork a second one.
+  sh $M/service.sh >/dev/null 2>&1
+  sleep 3
+  _n2=0
+  for _p in $(pgrep -f accd 2>/dev/null); do
+    _c=$(tr ' ' ' ' < /proc/$_p/cmdline 2>/dev/null)
+    set -f; set -- $_c; set +f
+    case "${1:-}" in sh|*/sh|mksh|*/mksh|busybox|*/busybox) ;; *) continue;; esac
+    [ "${1##*/}" = busybox ] && shift
+    case "${2:-}" in */accd.sh|accd.sh) _n2=$((_n2+1));; esac
+  done
+  [ "$_n2" = 1 ] && ok "service.sh left exactly one daemon when one was already running"                  || no "service.sh produced $_n2 daemons - it forked a duplicate over a live one"
 else
   ok "daemon stopped for the relaunch test"
   sh $M/service.sh >/dev/null 2>&1
