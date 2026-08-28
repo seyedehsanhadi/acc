@@ -28,7 +28,17 @@ ok(){ P=$((P+1)); echo "  PASS  $*"; }
 no(){ F=$((F+1)); echo "  FAIL  $*"; }
 fin(){ echo "$ID: $P passed, $F failed"; [ "$F" -eq 0 ] && exit 0 || exit 1; }
 
-AMPS=${AMPS:-/data/local/tmp/amps.sh}
+# acc-compat.sh is NOT installed at that path - the module keeps it under acc-data/backup and the
+# repo ships it in suites/. A single hardcoded default made three of these abort with
+# "acc-compat.sh not found" on every installed phone, which reads as a product failure and is not.
+# t-layer-crash already had a two-step fallback; give every suite the same search.
+_amps_find(){
+  for _ac in "${AMPS:-}" /data/adb/vr25/acc/acc-compat.sh              /data/adb/vr25/acc-data/backup/acc-compat.sh              /data/local/tmp/suites/acc-compat.sh /data/local/tmp/amps.sh; do
+    [ -n "$_ac" ] && [ -f "$_ac" ] && { echo "$_ac"; return 0; }
+  done
+  return 1
+}
+AMPS=$(_amps_find)
 [ -f "$AMPS" ] || { no "amps not found (set AMPS=)"; fin; }
 
 PSY=/sys/class/power_supply
