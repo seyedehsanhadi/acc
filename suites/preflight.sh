@@ -113,11 +113,20 @@ else
   log "  ok    settling mutex clear"
 fi
 
+# A cut below PAUSE is not a stranded charge path: pause and resume are a hysteresis BAND, and
+# staying cut anywhere between them is the whole point of the band. Comparing against pause
+# therefore fails on a perfectly healthy phone for the entire span it is meant to sit paused -
+# caught on a Mi A3 reading input_suspend=1 at 73% with resume 70 / pause 75, which is correct
+# behaviour and was reported as a broken charge path.
+#
+# RESUME is the threshold that means "this phone should be charging by now".
 _is=$(cat $G/input_suspend 2>/dev/null)
 _lv=$(cat $G/capacity 2>/dev/null)
 _pa=$(sed -n 's/^capacity=(//p' $DD/config.txt | tr -d ')' | cut -d' ' -f4)
-if [ "${_is:-0}" = 1 ] && [ "${_lv:-0}" -lt "${_pa:-100}" ] 2>/dev/null; then
-  log "  FAIL  input_suspend=1 at ${_lv}% below a pause of ${_pa}% - charge path left cut"
+_re=$(sed -n 's/^capacity=(//p' $DD/config.txt | tr -d ')' | cut -d' ' -f3)
+case ${_re:-x} in ''|*[!0-9]*) _re=${_pa:-100};; esac
+if [ "${_is:-0}" = 1 ] && [ "${_lv:-0}" -lt "${_re}" ] 2>/dev/null; then
+  log "  FAIL  input_suspend=1 at ${_lv}% below a resume of ${_re}% (pause ${_pa}%) - charge path left cut"
   _bad=$((_bad + 1))
 else
   log "  ok    charge path not left cut below the pause level"
