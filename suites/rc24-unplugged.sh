@@ -525,7 +525,7 @@ elif [ -n "$_gone" ]; then
   sleep 3
   _n2=0
   for _p in $(pgrep -f accd 2>/dev/null); do
-    _c=$(tr ' ' ' ' < /proc/$_p/cmdline 2>/dev/null)
+    _c=$(tr '\0' ' ' < /proc/$_p/cmdline 2>/dev/null)
     set -f; set -- $_c; set +f
     case "${1:-}" in sh|*/sh|mksh|*/mksh|busybox|*/busybox) ;; *) continue;; esac
     [ "${1##*/}" = busybox ] && shift
