@@ -52,6 +52,16 @@ DD=/data/adb/vr25/acc-data
 SVC=/data/adb/modules/acc/service.sh
 [ -f "$SVC" ] || { sk "no service.sh (module not installed)"; fin; }
 
+# THIS SUITE IS DESTRUCTIVE: it stops the daemon and deletes the log directory. Put both back on
+# every exit path, or an ordinary unit round leaves the phone with no charge control - which is
+# exactly what happened the first time it ran inside one.
+_t132_restore(){
+  [ -d "$DD/logs" ] || mkdir -p "$DD/logs" 2>/dev/null || :
+  sh "$SVC" >/dev/null 2>&1 || :
+}
+trap '_t132_restore; exit 130' INT TERM HUP
+trap _t132_restore EXIT
+
 for p in $(pgrep -f accd 2>/dev/null); do
   c=$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null); set -f; set -- $c; set +f
   case "${1:-}" in sh|*/sh|mksh|*/mksh) ;; *) continue;; esac
