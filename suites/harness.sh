@@ -158,7 +158,24 @@ cp -a $IF $BK/if 2>/dev/null || :
 cp -a $DD/config.txt $BK/cfg 2>/dev/null || :
 
 restore_all(){
+  # RESTORE THE WHOLE CONFIG, not a hand-picked list of keys.
+  #
+  # This function put back resume, pause, the three temperatures, mcc and mcv - and nothing else.
+  # cooldown_capacity was not among them, so a run left it changed: found on a Pixel 6a after a
+  # full audit, config.txt reading capacity=(5 60 70 75 false) against a default of
+  # (5 101 70 75 false), with .config-good poisoned to match so even the recovery snapshot carried
+  # the wrong value. cooldown_capacity=101 means "no cooldown"; 60 makes the daemon start cycling
+  # at 60%, which is a real behaviour change the owner never asked for.
+  #
+  # The whole file is already backed up to $BK/cfg two lines above and was never used. Put it back
+  # first, then re-apply the individual keys so anything the suite set through acc -s is also
+  # cleared through the same path.
+  if [ -s "$BK/cfg" ]; then
+    cp -a "$BK/cfg" $DD/config.txt 2>/dev/null || :
+    cp -a "$BK/cfg" $DD/.config-good 2>/dev/null || :
+  fi
   acc -s resume_capacity=$(echo $S_C | cut -d' ' -f3) pause_capacity=$(echo $S_C | cut -d' ' -f4) >/dev/null 2>&1
+  acc -s cooldown_capacity=$(echo $S_C | cut -d' ' -f2) >/dev/null 2>&1
   acc -s cooldown_temp=$(echo $S_T | cut -d' ' -f1) max_temp=$(echo $S_T | cut -d' ' -f2) \
          resume_temp=$(echo $S_T | cut -d' ' -f3) >/dev/null 2>&1
   acc -s max_charging_current="$S_MCC" >/dev/null 2>&1
