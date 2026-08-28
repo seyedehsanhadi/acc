@@ -1,7 +1,7 @@
 #!/system/bin/sh
-# rc24-weak-supply.sh - the half of the contract policy that a good charger can never show you.
+# rc24-weak-supply2.sh - the half of the contract policy that a good charger can never show you.
 #
-#   su -c 'sh /data/local/tmp/suites/rc24-weak-supply.sh'      # START UNPLUGGED
+#   su -c 'sh /data/local/tmp/suites/rc24-weak-supply2.sh'      # START UNPLUGGED
 #
 # WHY THIS EXISTS
 #   Every live plug tested so far was healthy and high-voltage, so every one of them ended with the
@@ -33,7 +33,7 @@
 #   the daemon's own budget untouched, and separately WATCHES what the daemon actually did.
 
 set +e
-ID=rc24-weak-supply
+ID=rc24-weak-supply2
 P=0; F=0; S=0
 ok(){ P=$((P+1)); echo "  PASS  $*"; }
 no(){ F=$((F+1)); echo "  FAIL  $*"; }
