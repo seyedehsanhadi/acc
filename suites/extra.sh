@@ -24,8 +24,11 @@ for s in rc24-coverage.sh preflight.sh harness.sh snapshot.sh; do
       v="preflight: $(cat /dev/.vr25/acc/.preflight-done)"
       case "$(cat /dev/.vr25/acc/.preflight-done)" in *FAIL*) v="$v  <<< FAILED";; esac
     else
-      _p=$(grep -cE '^  (PASS|ok  )' "$_o" 2>/dev/null || echo 0)
-      _f=$(grep -cE '^  FAIL' "$_o" 2>/dev/null || echo 0)
+      # NOT `grep -c ... || echo 0`: grep -c PRINTS its count and ALSO exits non-zero when the
+      # count is zero, so that shape emits TWO values and any arithmetic on it breaks. t57 exists
+      # to catch exactly this and caught it here. Take the count, then coerce a non-number.
+      _p=$(grep -cE '^  (PASS|ok  )' "$_o" 2>/dev/null); case ${_p:-x} in ''|*[!0-9]*) _p=0;; esac
+      _f=$(grep -cE '^  FAIL' "$_o" 2>/dev/null); case ${_f:-x} in ''|*[!0-9]*) _f=0;; esac
       [ "${_p:-0}" -gt 0 ] 2>/dev/null && v="counted: ${_p} passed, ${_f} failed (no summary line)"
     fi
   fi
