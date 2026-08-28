@@ -87,10 +87,17 @@ fi
 # alive is not looping. flight.log is the only honest heartbeat.
 _F=$DD/logs/flight.log
 if [ -f "$_F" ]; then
+  # THE WINDOW MUST CLEAR THE IDLE NAP, or this races a boundary and calls a healthy daemon dead.
+  # Unplugged with nothing actionable the loop sleeps idleDelay, 120s by default, so a 120s window
+  # is exactly one nap and can legitimately see no new record. It failed that way on a Mi A3 that
+  # was looping perfectly. Wait past two naps, and report which state was measured.
+  _idle=$(sed -n 's/^idleDelay=//p' "$DD/config.txt" 2>/dev/null | head -1)
+  case ${_idle:-x} in ''|*[!0-9]*) _idle=120;; esac
+  _lim=$(( (_idle * 2) / 10 + 6 ))
   h0=$(wc -l < "$_F" 2>/dev/null); i=0
-  while [ $i -lt 12 ]; do sleep 10; i=$((i+1)); h1=$(wc -l < "$_F" 2>/dev/null); [ "$h1" != "$h0" ] && break; done
+  while [ $i -lt $_lim ]; do sleep 10; i=$((i+1)); h1=$(wc -l < "$_F" 2>/dev/null); [ "$h1" != "$h0" ] && break; done
   [ "${h1:-$h0}" != "$h0" ] && ok "flight recorder advancing (after $((i*10))s) - the daemon is LOOPING" \
-                            || no "flight.log frozen for 120s - the daemon is alive but not looping"
+                            || no "flight.log frozen for $((i*10))s (idleDelay ${_idle}s, present=$(cat /sys/class/power_supply/usb/present 2>/dev/null)) - alive but not looping"
 else
   no "no flight.log - the daemon never completed a pass"
 fi
