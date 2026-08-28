@@ -844,6 +844,21 @@ if ! $_INIT; then
   # These three fields make the next such report answerable from the log alone: the moment vbus
   # drops from 9V to 5V is visible, and every ACC write is timestamped in the ledger beside it.
   flight_rec(){
+    # THE LOG DIRECTORY HAS TO BE ENSURED SOMEWHERE THE BOOT PATH REACHES.
+    #
+    # mkdir -p $dataDir/logs runs only under _INIT, which is set by the -i flag - and that block
+    # ends with `exec $0 $args`, re-execing WITHOUT -i, so the daemon proper never runs it.
+    # service.sh, the boot path, passes no -i either. A boot with $dataDir/logs missing therefore
+    # never recreates it, and every write below is `>> ... 2>/dev/null || :`, so the flight
+    # recorder dies silently and permanently: no heartbeat, no charge-decision history, no
+    # shutdown trace, and nothing anywhere says so. This is the one log the project treats as the
+    # honest signal of a live daemon, and every liveness check in the suites reads it.
+    #
+    # Reproduced on a Mi A3: remove the directory and start via service.sh and it stays absent;
+    # start via `accd --init` and it appears.
+    #
+    # The directory itself is ensured once in ctrl_charging, before the loop - see the note there
+    # for why doing it here was not enough.
     # The cheap check, every loop: is the published cache there at all? `[ -s ]` is a shell builtin,
     # so this costs no fork and can run at loop rate -- unlike the grep-based full check, which
     # cannot (rc19 removed the per-loop stat calls because they cost 26% of a core at idle).
@@ -3068,6 +3083,25 @@ if ! $_INIT; then
 
   # load generic functions
   . $execDir/misc-functions.sh
+
+  # ENSURE THE LOG DIRECTORY HERE - the first point where $dataDir exists and nothing has had a
+  # chance to branch away yet.
+  #
+  # mkdir -p $dataDir/logs runs only under _INIT, and that block ends with `exec $0 $args`,
+  # re-execing WITHOUT -i, so the daemon proper never runs it; service.sh, the boot path, passes
+  # no -i either. A boot with the directory missing therefore never recreates it, every flight
+  # write is `>> ... 2>/dev/null || :`, and the recorder dies SILENTLY and PERMANENTLY - no
+  # heartbeat, no charge-decision history, no shutdown trace. It is the one log this project
+  # treats as the honest signal that a daemon is looping, and every liveness check reads it.
+  #
+  # Two earlier placements were not early enough, and the reason is worth keeping: with no
+  # chargingSwitch configured the daemon goes into switch selection, which is 35 one-second
+  # iterations per candidate and runs BEFORE ctrl_charging. Measured on a Mi A3 in that state,
+  # `ctrl_charging` never appeared in the daemon trace at all, so neither a guard inside
+  # flight_rec nor one at the top of ctrl_charging ever executed, and the directory stayed absent
+  # for the whole selection. dataDir is defined by misc-functions.sh, so this is the earliest
+  # point that can work.
+  [ -d "$dataDir/logs" ] || mkdir -p "$dataDir/logs" 2>/dev/null || :
 
   # rc21: a CONFIGURED switch bypasses the candidate list entirely, so blocking the node you
   # are currently using had no effect: the daemon kept flipping it. Drop it back to automatic
