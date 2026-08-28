@@ -1403,6 +1403,23 @@ flip_sw() {
       esac
     elif [ "$3" = pcap ]; then
       case ${capacity[3]-} in ''|*[!0-9]*) off=60;; *) off=${capacity[3]};; esac
+      # A percentage cap only stops charging once the level REACHES it, so pause_capacity as the
+      # OFF value cannot stop a phone that is BELOW the limit - which is every forced disable
+      # (acc -d, AccA's "disable charging") taken before the limit is reached. The write succeeds,
+      # sw_holds waits its four firmware ticks, charging legitimately continues, and
+      # disable_charging concludes the switch is broken: unset_switch runs, chargingSwitch is
+      # emptied and the daemon exits 7, leaving the phone with NO charge control until something
+      # restarts it. Reproduced on a Pixel 6a at 74% with pause 75: the cap went to 75, the phone
+      # kept charging, and the only switch the device has was thrown away.
+      #
+      # Cap at the CURRENT level when that is lower, so an OFF always means "stop now". At or
+      # above the limit this is pause_capacity exactly as before, so the ordinary pause path that
+      # every other test exercises is byte-for-byte unchanged.
+      _fsLvl=$(batt_cap 2>/dev/null)
+      case ${_fsLvl:-x} in
+        ''|*[!0-9]*) ;;
+        *) [ "$_fsLvl" -lt "$off" ] 2>/dev/null && off=$_fsLvl || :;;
+      esac
     else
       off="$(parse_value "$3")"
     fi
