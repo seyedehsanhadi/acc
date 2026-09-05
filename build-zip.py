@@ -30,9 +30,15 @@ EXCLUDE_NAMES = {
     'build.sh', 'build.bat', 'build-zip.py', 'push.sh', 'push.bat',
     'check-syntax.sh', 'check-syntax.bat', 'obs.sh', 'probe-scheduler.sh',
     'acc-hardtest.sh', 'bt-test.sh',
+    'AMPS-CHANGELOG.md', 'CHANGES-rc20-to-rc21.md',
 }
 EXCLUDE_PREFIX = ('HANDOFF-', 'FIX-PLAN-')
-EXCLUDE_DIRS = {'.git', '.scratch', '__pycache__', '.superpowers', '.github', '.claude', '.vscode'}
+# Internal audit notes. They name local paths and test scaffolding, and rc23 shipped none.
+EXCLUDE_SUFFIX = ('-AUDIT.md',)
+# suites/ is the development test harness: 176 files, half the zip, and no runtime code reads it.
+# install.sh's copy block is guarded on the directory existing, so leaving it out is a no-op there.
+EXCLUDE_DIRS = {'.git', '.scratch', '__pycache__', '.superpowers', '.github', '.claude', '.vscode',
+                'suites'}
 
 # Anything the root manager or recovery has to EXECUTE.
 EXEC_SUFFIX = ('.sh',)
@@ -60,6 +66,7 @@ def skip(name):
     if name.startswith('.') and name not in ('.',  '..'):
         return True
     return (name in EXCLUDE_NAMES or name.startswith(EXCLUDE_PREFIX)
+            or name.endswith(EXCLUDE_SUFFIX)
             or name.startswith('_') or name in EXCLUDE_DIRS)
 
 
