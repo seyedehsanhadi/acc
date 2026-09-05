@@ -4,8 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+# Read-only: this workflow builds and verifies, it no longer publishes anything.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -59,59 +60,9 @@ jobs:
             _builds/**/*.tgz
             bin/acc_flashable_uninstaller.zip
 
-      # Publish a single rolling pre-release (reuses the "rc3" tag, not a new tag each push)
-      # so the flashable zip is downloadable from the Releases page.
-      # Refresh the rolling pre-release on the fixed rc3 tag (the tag is reused, not recreated).
-      # Step 1: delete the existing release for a clean slate -- this clears any stale or
-      # half-uploaded "phantom" assets and old timestamped zips left by previous runs. The tag
-      # is kept (no --cleanup-tag), so there is no tag-recreation race.
-      - name: Clear previous rolling release
-        if: github.ref == 'refs/heads/dev'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release delete rc3 --yes 2>/dev/null || true
-
-      # Step 2: recreate the release and upload the current build outputs with the standard
-      # release action, which handles the create-then-upload propagation race and asset
-      # replacement internally. The hand-rolled gh create/upload path hit transient HTTP
-      # 422 (phantom asset) / 404 (release not yet propagated) on the uploads endpoint.
-      # The rolling assets carry the SAME filenames as a tagged release, because right after a
-      # release dev's head IS that release and build.sh names the outputs from module.prop. On the
-      # Releases page that reads as a second copy of the release, and once dev moves on it is worse:
-      # the rolling zip is AHEAD of the tag while still called by the tag's name, so someone can
-      # install a dev build believing it is the release. Rename to -dev-<sha> before upload; the
-      # updater reads module.json, never these files, so nothing depends on the names.
-      - name: Stage rolling assets under a dev name
-        if: github.ref == 'refs/heads/dev'
-        run: |
-          set -eu
-          sha=$(echo "${{ github.sha }}" | cut -c1-7)
-          mkdir -p _rolling
-          for f in _builds/*/*.zip _builds/*/*.tgz bin/acc_flashable_uninstaller.zip; do
-            [ -f "$f" ] || continue
-            b=$(basename "$f")
-            case "$b" in
-              *.tar.gz) stem=${b%.tar.gz}; ext=.tar.gz;;
-              *)        stem=${b%.*};      ext=".${b##*.}";;
-            esac
-            cp "$f" "_rolling/${stem}-dev-${sha}${ext}"
-          done
-          ls -l _rolling
-
-      - name: Publish rolling pre-release
-        if: github.ref == 'refs/heads/dev'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: rc3
-          target_commitish: ${{ github.sha }}
-          prerelease: true
-          name: "ACC ${{ github.ref_name }} rolling pre-release"
-          body: |
-            Auto-built from the latest dev commit (`${{ github.sha }}`). This tag is reused on every push, so these assets always match the head of dev.
-
-            **This is not a release.** It is whatever dev happens to be right now, which may be ahead of the newest version tag and is not tested to release standard. For the supported build, use the newest `v...` release on the Releases page.
-
-            Files are suffixed `-dev-<sha>` so they cannot be mistaken for a tagged release.
-          files: |
-            _rolling/*
-          fail_on_unmatched_files: false
+      # No rolling PUBLIC release. The build and the zip verification below still run on every
+      # push -- that is the value -- but the outputs stay as workflow artifacts on the Actions run
+      # instead of a Releases entry. A public rolling pre-release sat next to the tagged release
+      # carrying near-identical filenames, and once dev moved past the tag it was AHEAD of the
+      # supported build while still looking like it: someone downloads a dev build believing it is
+      # the release. Only tagged releases are published now, by release.yml.
