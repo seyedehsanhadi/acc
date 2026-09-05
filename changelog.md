@@ -15,6 +15,7 @@ problems rather than a queue of complaints, and most of them need a particular c
 install path to show up at all.
 
 Fixed
+- Find my switch ships AMPS v7.3.1. A native %-limit pick is now functionally cycled, pause and resume, against a charging baseline instead of being confirmed on the engage reading alone, and a run that cannot measure says so instead of failing the switch.
 - A 9 V charger no longer collapses to about 4.4 V shortly after you plug it in. ACC read a live, negotiated supply as unnegotiated and re-ran USB detection on it. Voltage and current are now normalised before any comparison, because the same kernel path reports microvolts on one phone and millivolts on another, and the contract bar moved from 6.0 V to 6.5 V, which is above the operating band of a healthy 5 V supply.
 - A charger that has once reached high voltage is treated as negotiated for the rest of that plug, however far it later sags. A high-voltage label (HVDCP, PD, QC) counts on its own. Only unplugging the cable clears it.
 - All charger re-detection goes through a single gate that has to satisfy six conditions at once, and each plug gets one repair attempt, never two. Previously every caller invented its own way around the check, and those escapes were the fault.
