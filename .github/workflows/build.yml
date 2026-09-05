@@ -43,7 +43,9 @@ jobs:
       # cannot verify its own output.
       - name: Verify the built zip
         run: |
-          z=$(ls _builds/*/*.zip | head -1)
+          # The staged directory also holds acc_flashable_uninstaller.zip, which sorts first and
+          # has no module.prop -- verifying THAT failed every build while never checking the module.
+          z=$(ls _builds/*/*.zip | grep -v uninstaller | head -1)
           python3 build-zip.py --verify "$z"
 
       - name: Show outputs
