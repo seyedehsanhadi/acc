@@ -125,6 +125,35 @@ echo $$ > "$_SCANLOCK/pid" 2>/dev/null || :
 PCAP=$(grep -hoE '^pause_capacity=[0-9]+' "$dataDir/config.txt" "$execDir/config.txt" 2>/dev/null | grep -oE '[0-9]+' | head -n1)
 [ -n "${PCAP:-}" ] || PCAP=$(cat battery/capacity 2>/dev/null || echo 60)
 
+# ---------- crash blacklist ----------
+# A node on the blacklist is one that has ALREADY taken a phone down -- journal_check adds one per
+# crash-boot, and .acc-compat-blacklist carries the known-bad list. acc -t, write() and
+# cycle_switches all refuse to touch them. This scanner did not, so the one path whose entire job is
+# to write every candidate switch in turn was also the one path that could walk straight back onto a
+# node that panics, and a scan run from AccA could re-brick a device that had already been protected.
+#
+# Deliberately a local copy of misc-functions.sh's sw_blacklisted rather than a source of that file:
+# this is a standalone helper that says in its own header it does not modify ACC, and pulling in
+# 104KB of daemon internals for a ten-line file read would be the larger risk. Reads the same two
+# files, matches the same three forms (raw, absolute, and bare relative-to-power_supply).
+_sw_blacklisted() {
+  [ -n "${1:-}" ] || return 1
+  _swbn=${1##*/sys/class/power_supply/}
+  _swfp=/sys/class/power_supply/$_swbn
+  _swcr=$(printf '\r')
+  for _swf in "$dataDir/.acc-compat-blacklist" "$dataDir/.probe-blacklist"; do
+    [ -s "$_swf" ] || continue
+    while read -r _swl _swrest || [ -n "${_swl:-}" ]; do
+      _swl=${_swl%"$_swcr"}
+      _swl=${_swl%%"$(printf '\t')"*}
+      case "$_swl" in ''|'#'*) continue;; esac
+      [ "$_swl" = "$1" ] || [ "$_swl" = "$_swfp" ] || [ "$_swl" = "$_swbn" ] || continue
+      return 0
+    done < "$_swf"
+  done
+  return 1
+}
+
 # ---------- low-level switch writers ----------
 _write() {  # _write <on|off> <switch line>
   local dir=$1 line=$2 f onv offv v o
@@ -133,6 +162,11 @@ _write() {  # _write <on|off> <switch line>
     f=$1; onv=$2; offv=$3; shift 3
     [ "$f" = "--" ] && continue
     [ -f "$f" ] || continue
+    # Never probe a node that has already crashed this phone.
+    if _sw_blacklisted "$f"; then
+      echo "  skipping blacklisted node: $f" >&2
+      continue
+    fi
     if [ "$dir" = off ]; then v=$offv; else v=$onv; fi
     case "$v" in
       3600mV) o=$(cat "$f" 2>/dev/null || echo 0); [ "$o" -lt 10000 ] 2>/dev/null && v=3600 || v=3600000;;

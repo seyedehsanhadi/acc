@@ -11,3 +11,4 @@ bt-test.sh
 obs.sh
 probe-scheduler.sh
 _shipping
+.scratch/

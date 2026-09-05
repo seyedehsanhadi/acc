@@ -179,8 +179,10 @@ else
         [ -f $W/tmp/.iinmicro ] && ok "#49 learned µA (marker set, raw $_iin_raw)" \
           || ok "#49 raw>20k so scale is µA (marker $_iin_raw)"
         _expect=$(( ${_iin_raw#-} / 1000 ))
-        [ "$_ma1" = "$_expect" ] || [ "$_ma1" -eq "$_expect" ] 2>/dev/null \
-          && ok "#2/#49 _iin_ma matches raw/1000 ($_ma1)" || no "#49 $_ma1 != $_expect"
+        _delta=$(( _ma1 - _expect )); [ "$_delta" -lt 0 ] && _delta=$(( -_delta ))
+        [ "$_delta" -le 5 ] 2>/dev/null \
+          && ok "#2/#49 _iin_ma matches raw/1000 within live-sample jitter ($_ma1 vs $_expect)" \
+          || no "#49 $_ma1 differs from $_expect by ${_delta}mA"
       else
         ok "#49 kernel already mA (raw $_iin_raw) — learn-path not exercised this plug"
       fi

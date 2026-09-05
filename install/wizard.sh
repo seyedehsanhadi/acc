@@ -1,5 +1,15 @@
 wizard() {
 
+  # `exec wizard` DOES NOT CALL THIS FUNCTION. exec replaces the shell with an external COMMAND, and
+  # there is no `wizard` binary on PATH -- so every menu item that "returned to the menu" actually
+  # looked one up, failed, and took the whole `acc` process down with it. Thirteen of the sixteen
+  # items did this. Returning instead hands control back to the caller, which loops (acc.sh).
+  #
+  # $TMPDIR is tmpfs and is wiped on every boot; option 4 launches $TMPDIR/accd through the symlink
+  # that lives there. acc and acca both rebuild those links before using them and this did not, so
+  # the wizard was the one front-end that stayed broken until something else happened to repair it.
+  command -v ensure_tmpdir_links >/dev/null 2>&1 && ensure_tmpdir_links || :
+
   clear
   echo
   print_header
@@ -41,23 +51,23 @@ z) $(print_exit)
       . $execDir/print-help.sh
       print_help_ g
       edit $TMPDIR/.help
-      exec wizard
+      return 0
     ;;
 
     3)
       edit $readMe g VIEW html
       edit ${readMe%html}md
-      exec wizard
+      return 0
     ;;
 
     4)
       $TMPDIR/accd
-      exec wizard
+      return 0
     ;;
 
     5)
       daemon_ctrl stop > /dev/null || :
-      exec wizard
+      return 0
     ;;
 
     6)
@@ -65,7 +75,7 @@ z) $(print_exit)
       echo
       print_press_key
       read -n 1
-      exec wizard
+      return 0
     ;;
 
     7)
@@ -82,7 +92,7 @@ z) $(print_exit)
       unset level
       print_press_key
       read -n 1
-      exec wizard
+      return 0
     ;;
 
     8)
@@ -90,26 +100,26 @@ z) $(print_exit)
       print_uninstall
       echo "> yes/no: "
       read ans
-      [ .$ans = .yes ] || exec wizard
+      [ .$ans = .yes ] || return 0
       exec $execDir/uninstall.sh
     ;;
 
     9)
       edit $config g
       edit $config
-      exec wizard
+      return 0
     ;;
 
     a)
       resetbs
-      exec wizard
+      return 0
     ;;
 
     b)
       $TMPDIR/acc --test || :
       print_press_key
       read -n 1
-      exec wizard
+      return 0
     ;;
 
     c)
@@ -137,7 +147,7 @@ z) $(print_exit)
       echo
       print_press_key
       read -n 1
-      exec wizard
+      return 0
     ;;
 
     f)
@@ -155,7 +165,7 @@ z) $(print_exit)
     *)
       print_wip
       sleep 1
-      exec wizard
+      return 0
     ;;
   esac
 }

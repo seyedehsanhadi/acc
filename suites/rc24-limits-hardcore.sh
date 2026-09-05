@@ -77,7 +77,11 @@ sec "0  PREFLIGHT"
 [ "$(id -u)" = 0 ] || { no "not root"; fin; }
 plugged || { echo "  ABORT: start this PLUGGED."; exit 1; }
 ok "cable attached"
-[ "$(st)" = Charging ] && ok "charging" || { echo "  ABORT: status is $(st)."; exit 1; }
+_w=0
+while [ "$(st)" != Charging ] && plugged && [ "$_w" -lt 90 ]; do
+  sleep 5; _w=$((_w+5))
+done
+[ "$(st)" = Charging ] && ok "charging after ${_w}s" || { no "status is $(st) after ${_w}s"; fin; }
 _pid=$(pgrep -f accd.sh | head -1)
 [ -n "$_pid" ] && ok "daemon running (pid $_pid)" || { no "no daemon"; fin; }
 _nat=no; [ -f /sys/devices/platform/google,charger/charge_stop_level ] && _nat=yes

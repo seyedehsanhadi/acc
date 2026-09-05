@@ -17,6 +17,15 @@ cd /sys/class/power_supply 2>/dev/null || exit 0
 
 currCtrl=$TMPDIR/ch-curr-ctrl-files
 
+# Tensor/Google: prefer the charger's real FCC election over power_supply mirrors that acknowledge
+# a write and then snap back. The marker keeps the ordinary mA->uA expansion machinery intact;
+# apply_on_plug resolves this synthetic entry through the independent DEBUGFS gvotable ballot.
+if command -v msc_fcc_init >/dev/null 2>&1 && msc_fcc_init; then
+  echo 'gvotable/MSC_FCC::v000::-1' > "$currCtrl"
+  touch "$TMPDIR/.mcc-read"
+  exit 0
+fi
+
 # ...and never while a CURRENT cap is applied, for the same reason the voltage side now guards:
 # every entry ends in the node's DEFAULT, taken as whatever it reads right now. Re-record that while
 # a cap is in force and the cap becomes the default, so releasing it writes the cap straight back.

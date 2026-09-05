@@ -134,7 +134,7 @@ _l=$(lvl)
 if [ "${_l:-0}" -gt 62 ] && present; then
   say "  level ${_l}% and plugged - running section 2b via the round's own IA_ONLY mode"
   IA_ONLY=1 timeout "$SUITE_TIMEOUT" sh $P/rc24-plugged-auto.sh > $P/.att.ia 2>&1
-  grep -E 'IDLE-AVOIDANCE|t\+|level=|SKIP|DEFERRED' $P/.att.ia | head -20 || :
+  grep -E 'IDLE-AVOIDANCE|t\+|level=|RESULT|restored:|SKIP|DEFERRED' $P/.att.ia | head -20 || :
 else
   say "  SKIPPED: level ${_l}%, plugged=$(cat $PS/usb/present 2>/dev/null)."
   say "  Leave it on the 9V brick until it passes 65%, then re-run this script - it will pick up here."
@@ -165,27 +165,24 @@ fi
 fi
 
 hr "5  VERDICT"
-# _restore ends with `accd --init`, which spawns a daemon while the previous one may still hold the
-# lock. Counting immediately therefore reported "daemons: 2" on BOTH phones - checked by hand each
-# time, and each time the loser had already exited and acc.lock named the survivor. Let the
-# arbitration finish before counting, so the number means what a reader takes it to mean.
-_st=0
-while [ $_st -lt 30 ]; do
-  _lk=$(cat $A/acc.lock 2>/dev/null)
-  case ${_lk:-} in ''|*[!0-9]*) ;; *) [ -d /proc/$_lk ] && break;; esac
-  sleep 3; _st=$((_st+3))
+# _restore may briefly leave the old daemon exiting beside its replacement. Wait for the exact
+# process count to settle, rather than treating the existence of acc.lock as proof that it has.
+daemon_count(){
+  n=0
+  for p in $(pgrep -f accd.sh 2>/dev/null); do
+    c=$({ tr '\0' ' ' < /proc/$p/cmdline; } 2>/dev/null)
+    set -f; set -- $c; set +f
+    case "${1:-}" in sh|*/sh|mksh|*/mksh|busybox|*/busybox) ;; *) continue;; esac
+    [ "${1##*/}" = busybox ] && shift
+    case "${2:-}" in */accd.sh|accd.sh) n=$((n+1));; esac
+  done
+}
+_st=0; daemon_count
+while [ "$n" != 1 ] && [ $_st -lt 30 ]; do
+  sleep 3; _st=$((_st+3)); daemon_count
 done
-sleep 3
 say "config now : $(grep '^capacity=' $D/config.txt)"
 say "mcc/mcv    : $(grep -E '^maxCharging' $D/config.txt | tr '\n' ' ')"
-n=0
-for p in $(pgrep -f accd.sh 2>/dev/null); do
-  c=$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null)
-  set -f; set -- $c; set +f
-  case "${1:-}" in sh|*/sh|mksh|*/mksh|busybox|*/busybox) ;; *) continue;; esac
-  [ "${1##*/}" = busybox ] && shift
-  case "${2:-}" in */accd.sh|accd.sh) n=$((n+1));; esac
-done
 say "daemons    : $n   level: $(lvl)%   present=$(cat $PS/usb/present 2>/dev/null)"
 say "finished   : $(date '+%Y-%m-%d %H:%M:%S')"
 say "ATTENDED RUN COMPLETE"

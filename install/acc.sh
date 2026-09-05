@@ -14,7 +14,8 @@
 # present, so rebuild the links from there. Idempotent: a no-op on every normal boot.
 ensure_tmpdir_links() {
   local _i="${id:-acc}"
-  [ -e "$TMPDIR/${_i}d" ] && [ -d "$TMPDIR" ] && return 0
+  [ -e "$TMPDIR/${_i}d" ] && [ -e "$TMPDIR/$_i" ] \
+    && [ -e "$TMPDIR/${_i}a" ] && return 0
   mkdir -p "$TMPDIR" 2>/dev/null || :
   ln -fs "$execDir/service.sh" "$TMPDIR/${_i}d" 2>/dev/null || :
   ln -fs "$execDir/${_i}.sh" "$TMPDIR/$_i" 2>/dev/null || :
@@ -450,7 +451,11 @@ case "${1-}" in
 
   "")
     . $execDir/wizard.sh
-    wizard
+    # The menu items that used to say `exec wizard` now `return 0`, because exec cannot call a shell
+    # function -- it looked up a `wizard` binary, failed, and killed `acc`. The redisplay loop lives
+    # here instead. Items that deliberately leave the wizard still exec a real command or exit, so
+    # they never reach this loop; a non-zero return breaks out.
+    while wizard; do :; done
   ;;
 
   [0-9]*)
@@ -698,18 +703,19 @@ case "${1-}" in
     #
     # Unplugging early still keeps the override unless -a was given, which is -a's documented job.
     # That case now self-heals on the next charge: the target is reached, this fires, real config.
-    print '\n:; command -v _reexec >/dev/null 2>&1 && _ge_pause_cap && _reexec || :' >> $config
+    printf '\n%s\n' ':; command -v _reexec >/dev/null 2>&1 && _ge_pause_cap && _reexec || :' >> $config
 
     # Same _reexec routing as the hook above, and for the same reason: this fires INSIDE the daemon,
     # so a bare `exec $TMPDIR/accd` makes the daemon kill itself through release-lock. Guarding on
     # _reexec (defined only in accd.sh) also replaces the older reliance on acca.sh stubbing online()
     # to a no-op, so the hook is inert in a front-end whether or not that stub is present.
-    ! $auto || print '\n:; command -v _reexec >/dev/null 2>&1 && ! online && _reexec || :' >> $config
+    ! $auto || printf '\n%s\n' ':; command -v _reexec >/dev/null 2>&1 && ! online && _reexec || :' >> $config
     # rc21 SECURITY: was `eval $TMPDIR/acca $config "$@"`. The pass-through options of
     # `acc -f 90 -s mcc=500` are already separate words by the time they reach here, so eval
     # bought nothing and handed the caller's argument to the shell: `acc -f '$(cmd)'` ran cmd
     # AS ROOT. Same class as the rc21 eq() fix, in a path that fix did not cover. Calling the
     # helper directly passes the identical words without a round trip through the parser.
+    ensure_tmpdir_links
     [ -z "${1-}" ] || "$TMPDIR/acca" "$config" "$@"
 
     print_charging_enabled_until ${cap}%
@@ -719,7 +725,6 @@ case "${1-}" in
       echo
     }
     unset auto cap i
-    ensure_tmpdir_links
     exec $TMPDIR/accd $config
   ;;
 
@@ -1355,4 +1360,10 @@ case "${1-}" in
 
 esac
 
-exit 0
+# Exit with the status the branch produced, not a blanket success.
+#
+# daemon_ctrl returns 8 (already running) and 9 (not running); every other branch sets its own
+# status too. A trailing `exit 0` erased all of it, so a script doing `acc -D start || handle` saw
+# success no matter what happened. AccA is unaffected -- it drives acca, which exits on its own --
+# but anything shell-driven was being lied to. $? here is the status of the case branch just taken.
+exit $?

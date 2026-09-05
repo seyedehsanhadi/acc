@@ -44,6 +44,7 @@ CFG=$DD/config.txt
 AD=$M/accd.sh
 AA=$M/acca.sh
 W=/data/local/tmp/rc24th
+LIVE_RELEASE_WAIT=${LIVE_RELEASE_WAIT:-120}
 
 rd(){ _v=; { read -r _v < "$1"; } 2>/dev/null || :; echo "$_v"; }
 tempf(){ sed -n 's/^temperature=(//p' $CFG | tr -d ')' | awk -v n=$1 '{print $n}'; }
@@ -253,14 +254,17 @@ else
   done
   [ "$_held" = yes ] && ok "the induced ${H_MT}C ceiling physically stopped charging in ${_w}s" \
                      || no "the induced ${H_MT}C ceiling did not stop charging in ${_w}s (status=$(st_now))"
-  setk ct="$ORIG_CT" mt="$ORIG_MT" rt="$ORIG_RT"
+  # Release with the derived profile first. Restoring the user's profile here can legitimately
+  # keep a thermal pause latched when its resume_temp is below the live pack temperature.
+  setk ct="$R_CT" mt="$R_MT" rt="$R_RT"
   _w=0; _back=no
-  while [ $_w -lt 60 ]; do
+  while [ $_w -lt "$LIVE_RELEASE_WAIT" ]; do
     sleep 5; _w=$((_w+5))
     { [ "$(st_now)" = Charging ] || [ "$(online_any)" = yes ]; } && { _back=yes; break; }
   done
-  [ "$_back" = yes ] && ok "charging recovered in ${_w}s once the ceiling was restored" \
-                     || no "charging did not recover in ${_w}s after restoring max_temp=$ORIG_MT"
+  [ "$_back" = yes ] && ok "charging recovered in ${_w}s with release max=$R_MT resume=$R_RT" \
+                     || no "charging did not recover in ${_w}s with release max=$R_MT resume=$R_RT"
+  setk ct="$ORIG_CT" mt="$ORIG_MT" rt="$ORIG_RT"
 fi
 
 # =================================================================================================

@@ -55,6 +55,9 @@ _rp=$(grep -n 'RESTORING (replaying snapshot' "$AMPS" | head -1 | cut -d: -f1)
 grep -qi 'charge speed re-armed' "$AMPS" \
   && ok "  and a repair is announced rather than done silently" \
   || no "  a repaired input current is not announced"
+sed -n '/^icl_repair(){/,/^}/p' "$AMPS" | grep -q '\*/usb' \
+  && ok "  and Pixel usb/current_max is eligible for late repair" \
+  || no "icl_repair skips usb/current_max after the Pixel group collapses it"
 
 # ---- L987: the replay must be exempt from the crash blacklist ---------------------------------------
 grep -q '^  _RESTORING=1' "$AMPS" \
@@ -84,6 +87,48 @@ sed -n '/SAFE MODE/,/NEVER WRITTEN/p' "$AMPS" | grep -qi 'NEVER WRITTEN: unknown
   && no "the banner still lists unknown/vendor/learned under NEVER WRITTEN - that is the lie the fix removed" \
   || ok "  and it does not list them under NEVER WRITTEN"
 
+# Pixel 6a exposes its fuel gauge as power_supply/maxfg. Generic discovery wrote
+# maxfg/rc_switch_enable live even though the banner promises fuel-gauge nodes are never written.
+_sdeny=$(sed -n "s/^SUPERDENY_RE='\(.*\)'/\1/p" "$AMPS" | head -1)
+printf '%s' '/sys/class/power_supply/maxfg/rc_switch_enable' | grep -Eiq "$_sdeny" \
+  && ok "Google maxfg fuel-gauge controls are protected from generic probes" \
+  || no "maxfg/rc_switch_enable bypasses the fuel-gauge deny-list"
+
+# Highest-accuracy name-agnostic scans on Pixel and Mi attempted maintenance, battery-aging and
+# USB-negotiation controls. One (`adapter_cc_mode`) was even falsely promoted as a bypass; Pixel's
+# aact_state changed the Aged Adjusted Charge Table and did not restore in the report window.
+_shdeny=$(sed -n "s/^SHAPEDENY_RE='\(.*\)'/\1/p" "$AMPS" | head -1)
+_miss=
+for _unsafe in \
+  /sys/class/power_supply/battery/force_fcr_update_ops \
+  /sys/class/power_supply/battery/aact_state \
+  /sys/class/power_supply/battery/pairing_state \
+  /sys/class/power_supply/battery/first_usage_date \
+  /sys/devices/platform/google,charger/supplier:i2c:12-0025/supplier/frs \
+  /sys/class/power_supply/usb/dp_dm \
+  /sys/class/power_supply/main/comp_clamp_level \
+  /sys/class/power_supply/main/toggle_stat \
+  /sys/class/power_supply/usb/smb_en_reason \
+  /sys/class/power_supply/usb/apsd_timeout \
+  /sys/class/power_supply/usb/connector_type \
+  /sys/class/power_supply/usb/adapter_cc_mode \
+  /sys/class/power_supply/usb/hvdcp_opti_allowed \
+  /sys/class/power_supply/usb/pe_start \
+  /sys/devices/platform/google,charger/charging_status \
+  /sys/devices/platform/google,charger/charging_type; do
+  printf '%s' "$_unsafe" | grep -Eiq "$_shdeny" || _miss="$_miss ${_unsafe##*/}"
+done
+[ -z "$_miss" ] && ok "live-found maintenance/aging/USB-negotiation nodes are read-only to generic discovery" \
+                 || no "generic discovery can still write protected live nodes:$_miss"
+
+# The speed diagnosis must sample after icl_repair, not before it. Both phones ended their deep pass
+# at 500mA, printed weak-cable advice, and only then restored the negotiated current.
+_spr=$(grep -n '_spr_restore=.*_RESTORING' "$AMPS" | head -1 | cut -d: -f1)
+_box=$(grep -n '^_csr()' "$AMPS" | head -1 | cut -d: -f1)
+[ -n "$_spr" ] && [ -n "$_box" ] && [ "$_spr" -lt "$_box" ] 2>/dev/null \
+  && ok "collapsed input votes are repaired before charger-speed sampling" \
+  || no "charger speed is still diagnosed before AMPS repairs its own post-probe current collapse"
+
 # ---- L1495: no raw writers. Everything goes through wr(). ------------------------------------------------
 # The recurring class in this codebase. A raw `echo x > node` skips the blacklist, the journal and
 # the write ledger, so a node that took the phone down can be written again on the next run.
@@ -108,5 +153,12 @@ case "$_4d" in
   *)
     no "LAYER 4d's skip condition is neither form: $_4d" ;;
 esac
+
+# recover_online can run before the known-switch layer snapshots charge_disable. If it writes that
+# node first, the later snapshot records AMPS's value instead of the user's original and restore
+# faithfully leaves the phone changed. Snapshot this otherwise-uncovered recovery write in place.
+sed -n '/^recover_online(){/,/^}/p' "$AMPS" | grep -q 'snap_add "\$_rcd"; wr "\$_rcd" 0' \
+  && ok "recover_online snapshots charge_disable before changing it" \
+  || no "recover_online writes charge_disable before it is snapshotted - restore can preserve AMPS's value instead of the original"
 
 fin

@@ -93,12 +93,13 @@ run_nocap(){
   echo 2000000 > $W/ps/usb/current_max
   echo 3000000 > $W/ps/battery/constant_charge_current
   echo "maxChargingCurrent=()" > $W/t/fixture.conf
+  sed "s|cd /sys/class/power_supply|cd $W/ps|" "$_arm/read-ch-curr-ctrl-files-p2.sh" > $W/read-current.sh
   {
     echo "TMPDIR=$W/t"; echo "execDir=$_arm"; echo "currentWorkaround=false"
     echo "maxChargingCurrent=()"
     echo "config=$W/t/fixture.conf"
     echo "cd $W/ps"
-    echo ". $_arm/read-ch-curr-ctrl-files-p2.sh"
+    echo ". $W/read-current.sh"
     echo "_c=\$(grep -c / $W/t/$CCF 2>/dev/null); case \"\${_c:-}\" in ''|*[!0-9]*) _c=0;; esac; echo \$_c"
   } > $W/r2.sh
   /system/bin/sh $W/r2.sh 2>/dev/null | tail -1
@@ -116,6 +117,7 @@ run_boot(){
   echo "battery/voltage_max::v000::4400000" > $W/b/ch-volt-ctrl-files
   {
     echo "TMPDIR=$W/b"
+    echo "PS=$W/bps"
     echo "applyOnBoot=(); maxChargingVoltage=()"
     echo "write(){ echo WROTE >> $_out; return 0; }"
     echo "_wlog(){ :; }"
@@ -154,7 +156,31 @@ else
 fi
 
 echo
-echo "-- 6  can this suite still fail?"
+echo "-- 6  cold boot rebuilds voltage defaults from the persisted capped entries"
+run_cold_volt(){
+  _arm=$1
+  rm -rf $W/cold 2>/dev/null; mkdir -p $W/cold/t
+  echo 'maxChargingVoltage=(4150 battery/voltage_max::4150000::4400000 main/voltage_max::4150000::4400000)' > $W/cold/config.txt
+  sed -n '/^  _vcapline=.*sed/,/^  fi$/p' "$_arm/accd.sh" > $W/cold/block.sh
+  {
+    echo "TMPDIR=$W/cold/t"
+    echo "config=$W/cold/config.txt"
+    cat $W/cold/block.sh
+    echo "cat $W/cold/t/ch-volt-ctrl-files 2>/dev/null"
+  } > $W/cold/run.sh
+  /system/bin/sh $W/cold/run.sh 2>/dev/null
+}
+_cold=$(run_cold_volt "$ARM24")
+printf '%s\n' "$_cold" | grep -q 'battery/voltage_max::v000::4400000' \
+  && printf '%s\n' "$_cold" | grep -q 'main/voltage_max::v000::4400000' \
+  && ok "cold tmpfs rebuild keeps both 4400000 originals from config" \
+  || no "cold tmpfs rebuild lost the persisted originals: $_cold"
+printf '%s\n' "$_cold" | grep -q '::4150000$' \
+  && no "cold tmpfs rebuild recorded the 4150000 cap as a default" \
+  || ok "the active cap is never promoted to a default during cold rebuild"
+
+echo
+echo "-- 7  can this suite still fail?"
 mkdir -p $W/mut
 # TWO independent defences now: the guard that refuses to re-record while a cap is set, and the
 # merge that refuses to lower a default. Disabling either alone leaves the other holding, which is

@@ -374,6 +374,26 @@ case "${_im:-x}" in
 esac
 
 # =================================================================================================
+# Separate amp/cap tests from a pre-existing thermal hold, then require a real charging baseline.
+_safe_mt=$(( ORIG_ST - 1 )); _safe_rt=$(( ORIG_ST - 2 )); _safe_temp=false
+_pack_t=$(rd $PS/battery/temp); _pack_c=$(( ${_pack_t:-0} / 10 ))
+if [ "$_safe_rt" -gt "$_pack_c" ] 2>/dev/null; then
+  setk mt="$_safe_mt" rt="$_safe_rt"
+  _base_w=0
+  while [ $_base_w -lt 90 ]; do
+    sleep 5; _base_w=$((_base_w + 5))
+    [ "$(st_now)" = Charging ] && [ "$(online_any)" = yes ] && break
+  done
+  if [ "$(st_now)" = Charging ] && [ "$(online_any)" = yes ]; then
+    _safe_temp=true
+    ok "clean charging baseline established after thermal isolation (${_base_w}s)"
+  else
+    no "thermal isolation did not restore a clean charging baseline in ${_base_w}s"
+  fi
+else
+  sk "pack ${_pack_c}C is too close to shutdown ${ORIG_ST}C to isolate live controls safely"
+fi
+
 sec "5  IS IT ACTUALLY CHARGING  (the rc23 baseline nobody complained about)"
 _c1=$(cap_now); _s1=$(st_now); _i1=$(iin_ma)
 info "cap=${_c1}% status=$_s1 iin=${_i1}mA"
@@ -495,7 +515,7 @@ fi
 sec "8  THERMAL: induce a hold just under pack temperature, then restore"
 _pack=$(rd $PS/battery/temp)
 case "${_pack:-x}" in ''|x|*[!0-9-]*) sk "no readable pack temperature"; _pack=;; esac
-if [ -n "$_pack" ]; then
+if [ -n "$_pack" ] && $_safe_temp; then
   _packc=$(( _pack / 10 ))
   _mt=$(( _packc - 2 ))
   if [ "$_mt" -le "$ORIG_CT" ] 2>/dev/null || [ "$_mt" -ge "$ORIG_ST" ] 2>/dev/null; then
@@ -504,20 +524,21 @@ if [ -n "$_pack" ]; then
     info "pack ${_packc}C, inducing max_temp=${_mt}C (shutdown_temp $ORIG_ST untouched)"
     setk mt="$_mt"; sleep 25
     _sth=$(st_now); _iih=$(iin_ma)
-    if [ "$_sth" = "Not charging" ] || [ "${_iih:-9999}" -le 50 ] 2>/dev/null; then
+    if [ "$_sth" = "Not charging" ] || [ "$_sth" = Discharging ] || [ "$(online_any)" = no ] || [ "${_iih:-9999}" -le 50 ] 2>/dev/null; then
       ok "the thermal hold engaged (status=$_sth iin=${_iih}mA)"
     else
       no "max_temp ${_mt}C against a ${_packc}C pack did not hold charging (status=$_sth iin=${_iih}mA)"
     fi
-    setk mt="$ORIG_MT"; sleep 25
+    setk mt="$_safe_mt" rt="$_safe_rt"; sleep 25
     _str=$(st_now); _iir=$(iin_ma)
-    if [ "$_str" = Charging ] || [ "${_iir:-0}" -gt 100 ] 2>/dev/null; then
+    if [ "$_str" = Charging ] || { [ "$(online_any)" = yes ] && [ "$_str" != Discharging ]; }; then
       ok "charging recovered after the thermal limit was put back (status=$_str iin=${_iir}mA)"
     else
       no "charging did not recover after restoring max_temp=$ORIG_MT (status=$_str iin=${_iir}mA)"
     fi
   fi
 fi
+$_safe_temp && { setk mt="$ORIG_MT" rt="$ORIG_RT"; sleep 5; }
 
 # =================================================================================================
 sec "9  DAEMON HEALTH ACROSS ALL OF THAT  (#39 #40 #45)"

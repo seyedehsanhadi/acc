@@ -11,8 +11,19 @@ set_ch_curr() {
   # when no limit is set, and a ctrl-files clause turned that into a full default rewrite + USB
   # re-kick (apsd_rerun/rerun_aicl) every 3-9s on every phone with current control nodes -
   # constant AICL renegotiation while charging (A3-reproduced: 3 restores in 3 ticks).
+  # ...and the config on DISK, not only the copy in memory.
+  #
+  # set-prop clears the in-memory value BEFORE calling the release, so by the time we get here
+  # maxChargingCurrent is already empty and, after a reboot, .mcc-custom does not exist either --
+  # the daemon re-applies a stored cap through apply_on_plug and never touches that marker. Both
+  # halves of the guard were therefore true on exactly the case that needed the release to run,
+  # so the config cleared and the NODES STAYED CAPPED. set-ch-volt already reads the file for this
+  # reason; this is the same check, on the same kind of state.
+  _mccDisk=$(sed -n 's/^maxChargingCurrent=(//p' ${config:-/data/adb/vr25/acc-data/config.txt} 2>/dev/null | head -1)
+  _mccDisk=${_mccDisk%)}
   [[ ! -f $f && .${1-} = .- ]] \
-    && [ -z "${maxChargingCurrent[0]-}${max_charging_current-}${mcc-}" ] && return 0 || :
+    && [ -z "${maxChargingCurrent[0]-}${max_charging_current-}${mcc-}" ] \
+    && [ -z "${_mccDisk:-}" ] && return 0 || :
 
   [[ .${1-} != .*% ]] || {
     set_temp_level ${1%\%}
@@ -82,8 +93,9 @@ set_ch_curr() {
           fi
           rm $f 2>/dev/null || :
           grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null \
-            && (applyOnPlug=(); maxChargingVoltage=(); maxChargingCurrent=(); apply_on_plug default) || :
-          rekick_usb clear-not-charging || :
+            && (applyOnPlug=(); maxChargingVoltage=(); maxChargingCurrent=(); _BLRELEASE=1 apply_on_plug default) || :
+          grep -qv '^gvotable/MSC_FCC::' $TMPDIR/ch-curr-ctrl-files 2>/dev/null \
+            && rekick_usb clear-not-charging || :
           $isAccd || print_curr_restored
           return 0
         ;;
@@ -152,13 +164,14 @@ set_ch_curr() {
       # rc22: marker first, same re-apply race as the clear above.
       rm $f 2>/dev/null || :
       grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null && {
-        apply_on_plug_ default
+        _BLRELEASE=1 apply_on_plug_ default
         # The stored "defaults" are snapshots from probe time, and negotiation-owned input nodes
         # (usb/current_max) may have been probed on a weak source - restoring 500000 from a PC-USB
         # probe leaves a wall charger crawling at 500 mA. Re-kick USB source detection / input
         # arbitration so those re-settle to the live charger's real capability (same pattern as the
         # uninstaller's un-cap path; harmless no-op when already correct).
-        rekick_usb clear-resolved || :
+        grep -qv '^gvotable/MSC_FCC::' $TMPDIR/ch-curr-ctrl-files 2>/dev/null \
+          && rekick_usb clear-resolved || :
       } || :
       maxChargingCurrent=()
       max_charging_current=

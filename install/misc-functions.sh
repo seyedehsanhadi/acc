@@ -26,7 +26,7 @@ apply_on_boot() {
   # This surfaced only after the config clear was fixed. Previously the stale node entries survived a
   # clear, which meant the cap could not be released but this loop always had data -- the two faults
   # hid each other, and fixing the first exposed the second.
-  for entry in ${applyOnBoot[@]-} ${maxChargingVoltage[@]:-$([ .$arg != .default ] || cat $TMPDIR/ch-volt-ctrl-files 2>/dev/null || :)}; do
+  for entry in ${applyOnBoot[@]-} ${maxChargingVoltage[@]:-$([ .$arg != .default ] || { cat $TMPDIR/ch-volt-ctrl-files 2>/dev/null; sed -n 's/^maxChargingVoltage=(//p' "${config:-$dataDir/config.txt}" 2>/dev/null | tr ' ' '\n' | tr -d ')' | grep '::.*::'; } || :)}; do
     set -- ${entry//::/ }
     # RESOLVE THE PATH, do not depend on the working directory. ch-volt-ctrl-files and
     # ch-curr-ctrl-files store entries RELATIVE to /sys/class/power_supply
@@ -81,12 +81,61 @@ apply_on_boot() {
     fi
 
     set +e
-    write \$$arg $file 0 &
+    case "$file" in
+      */pmic-votable/FV/force_*) write \$$arg $file 0 || : ;;
+      *) write \$$arg $file 0 & ;;
+    esac
     set -e
   done
 
   wait
   $exitCmd && [ $arg = value ] && exit 0 || :
+}
+
+
+msc_fcc_init() {
+  # Google chargers expose their real battery-current ceiling as the MSC_FCC gvotable. The
+  # power_supply current files on Tensor are only mirrors/negotiation inputs and immediately snap
+  # back; writing those is why a Pixel could report an applied 500 mA cap while drawing 1.4 A.
+  #
+  # Keep debugfs private (root-only) and mounted at one stable tmpfs path. A daemon killed between
+  # calls cannot leak a growing set of mounts, and the gvotable itself keeps Android's thermal vote
+  # separate from ACC's DEBUGFS ballot.
+  _mscFccDir=${ACC_MSC_FCC_DIR:-${TMPDIR:-/dev/.vr25/acc}/.debugfs/gvotables/MSC_FCC}
+  [ -w "$_mscFccDir/cast_int_vote" ] && [ -w "$_mscFccDir/enable_vote" ] \
+    && [ -w "$_mscFccDir/disable_vote" ] && return 0
+  [ -z "${ACC_MSC_FCC_DIR:-}" ] || return 1
+  grep -qs '^fcc$' /sys/class/thermal/cooling_device*/type 2>/dev/null || return 1
+  _mscFccMount=${TMPDIR:-/dev/.vr25/acc}/.debugfs
+  mkdir -p "$_mscFccMount" 2>/dev/null || return 1
+  chmod 0700 "$_mscFccMount" 2>/dev/null || :
+  grep -qs " $_mscFccMount debugfs " /proc/mounts \
+    || mount -t debugfs debugfs "$_mscFccMount" 2>/dev/null || return 1
+  [ -w "$_mscFccDir/cast_int_vote" ] && [ -w "$_mscFccDir/enable_vote" ] \
+    && [ -w "$_mscFccDir/disable_vote" ]
+}
+
+
+msc_fcc_vote() {
+  local _mfo=${MSC_FCC_OWNER:-${dataDir:-/data/adb/vr25/acc-data}/.msc-fcc-debugfs-vote}
+  local _mfrc=0
+  msc_fcc_init || return 1
+  case "${1-}" in
+    -)
+      # gvotable does not trim input: echo would ask for the non-existent voter "DEBUGFS\n".
+      printf DEBUGFS > "$_mscFccDir/disable_vote" 2>/dev/null || _mfrc=$?
+      [ $_mfrc -ne 0 ] || rm -f "$_mfo" 2>/dev/null || :
+      [ $_mfrc -ne 0 ] || { command -v _wlog >/dev/null 2>&1 && _wlog "gvote MSC_FCC DEBUGFS disabled" || :; }
+      ;;
+    ''|*[!0-9]*) return 1;;
+    *)
+      echo "$1" > "$_mscFccDir/cast_int_vote" 2>/dev/null || _mfrc=$?
+      [ $_mfrc -ne 0 ] || printf DEBUGFS > "$_mscFccDir/enable_vote" 2>/dev/null || _mfrc=$?
+      [ $_mfrc -ne 0 ] || { mkdir -p "${_mfo%/*}" 2>/dev/null || :; echo "$1" > "$_mfo" 2>/dev/null || :; }
+      [ $_mfrc -ne 0 ] || { command -v _wlog >/dev/null 2>&1 && _wlog "gvote MSC_FCC DEBUGFS <- $1" || :; }
+      ;;
+  esac
+  return $_mfrc
 }
 
 
@@ -97,7 +146,7 @@ apply_on_plug() {
   local value=
   local default=
   local arg=${1:-value}
-  local _rk= _rv= _rc= _lv= _tv=
+  local _rk= _rv= _rc= _lv= _tv= _fvForce=false
 
   for entry in ${applyOnPlug[@]-} ${maxChargingVoltage[@]-} \
     ${maxChargingCurrent[@]:-$([ .$arg != .default ] || cat $TMPDIR/ch-curr-ctrl-files 2>/dev/null || :)}
@@ -119,11 +168,27 @@ apply_on_plug() {
     # Resolving here rather than adding a cd keeps the loop correct from ANY caller, which is
     # exactly what the daemon/front-end split showed is needed.
     file=${1-}
+    if [ "$file" = gvotable/MSC_FCC ]; then
+      value=${2-}
+      # The same stale-daemon guard used for ordinary current nodes. Once the user's clear removes
+      # the marker, an old loop must not recreate the vote after it was disabled.
+      if [ "$arg" = value ] && [ -n "${maxChargingCurrent[0]-}" ] \
+        && [ ! -f "$TMPDIR/.mcc-custom" ] && [ -z "${exitCode_-}" ]; then
+        continue
+      fi
+      if [ "$arg" = default ]; then
+        msc_fcc_vote -
+      else
+        msc_fcc_vote "$value"
+      fi
+      continue
+    fi
     case "$file" in
       /*) ;;
       *) file=${PS:-/sys/class/power_supply}/$file ;;
     esac
     [ -f "$file" ] || continue
+    case "$file" in */pmic-votable/FV/force_*) _fvForce=true;; *) _fvForce=false;; esac
     value=${2-}
     default=${3:-${2-}}
 
@@ -164,7 +229,11 @@ apply_on_plug() {
 
     if [ "$arg" = value ] && [ -z "${exitCode_-}" ]; then
       _rk=$TMPDIR/.mccrej-${file//\//_}
-      read -r _rv _rc < "$_rk" 2>/dev/null || { _rv=; _rc=0; }
+      if [ -f "$_rk" ]; then
+        read -r _rv _rc < "$_rk" || { _rv=; _rc=0; }
+      else
+        _rv=; _rc=0
+      fi
       case ${_rc:-0} in ''|*[!0-9]*) _rc=0;; esac
       [ "$_rv" = "$value" ] && [ $_rc -ge 5 ] && [ $((_rc % 8)) -ne 0 ] && continue
     fi
@@ -177,7 +246,7 @@ apply_on_plug() {
     # nothing bounded a restore at all.
     # An unreadable or non-numeric live value still writes, and so does a non-numeric default:
     # leaving a node capped is the failure this path exists to prevent, so it fails toward writing.
-    if [ "$arg" = default ]; then
+    if [ "$arg" = default ] && ! $_fvForce; then
       case "$file" in
         */current_max|*/input_current|*/input_current_max|*/input_current_limit|*/input_current_settled|*/restrict_cur)
           # restrict_cur belongs here too, and it was missed because the pattern above is written
@@ -244,7 +313,11 @@ apply_on_plug() {
     fi
 
     set +e
-    write \$$arg $file 0 &
+    if $_fvForce; then
+      write \$$arg $file 0 || :
+    else
+      write \$$arg $file 0 &
+    fi
     set -e
   done
 
@@ -284,10 +357,28 @@ apply_on_plug() {
     [ -f "$file" ] || continue
     value=${2-}
     _rk=$TMPDIR/.mccrej-${file//\//_}
-    if [ "$(cat "$file" 2>/dev/null)" = "$value" ]; then
+    _cv=$(cat "$file" 2>/dev/null)
+    _held=false
+    if [ "$_cv" = "$value" ]; then
+      _held=true
+    else
+      case "${_cv:-x}:$value" in
+        *[!0-9:]*|x:*|*:0) : ;;
+        *)
+          _cd=$((_cv - value)); [ $_cd -lt 0 ] && _cd=$((-_cd))
+          _ct=$((value / 20)); [ $_ct -lt 1 ] && _ct=1
+          [ $_cd -le $_ct ] && _held=true
+          ;;
+      esac
+    fi
+    if $_held; then
       rm -f "$_rk" 2>/dev/null || :
     else
-      read -r _rv _rc < "$_rk" 2>/dev/null || { _rv=; _rc=0; }
+      if [ -f "$_rk" ]; then
+        read -r _rv _rc < "$_rk" || { _rv=; _rc=0; }
+      else
+        _rv=; _rc=0
+      fi
       case ${_rc:-0} in ''|*[!0-9]*) _rc=0;; esac
       [ "$_rv" = "$value" ] || _rc=0
       _rc=$((_rc + 1))
@@ -295,6 +386,7 @@ apply_on_plug() {
       [ $_rc -eq 5 ] && ${isAccd:-false} && command -v warn_once_per >/dev/null 2>&1 \
         && warn_once_per mccreject-${file##*/} 21600 "ACC: this phone's firmware will not let ${file##*/} hold ${value}; the charger's own negotiated limit wins, so charging current stays at the hardware maximum." || :
     fi
+    unset _cv _held _cd _ct
   done
 }
 
@@ -352,6 +444,21 @@ at_or_above_pause() {
   [ "$_v" -ge "${capacity[3]}" ] 2>/dev/null
 }
 
+kernel_owned_level_switch() {
+  case "${chargingSwitch[0]##*/}:${chargingSwitch[2]##*/}" in
+    charge_control_limit:charge_control_limit_max)
+      local _tlp=${chargingSwitch[2]} _tlm=
+      [ -f "$_tlp" ] || _tlp=${PS:-/sys/class/power_supply}/$_tlp
+      [ -f "$_tlp" ] || return 1
+      _tlm=$(cat "$_tlp" 2>/dev/null)
+      case ${_tlm:-x} in ''|*[!0-9]*) return 1;; esac
+      [ "$_tlm" -ge 1 ] 2>/dev/null && [ "$_tlm" -le 10 ] 2>/dev/null
+      return
+    ;;
+  esac
+  return 1
+}
+
 cycle_switches() {
 
   local on=
@@ -363,6 +470,19 @@ cycle_switches() {
   # leaves this behind, and a bare marker cannot be told apart from a scan still in progress.
   # Consumers testing -f are unaffected; one that wants the truth checks /proc for the pid.
   echo $$ > $TMPDIR/.testingsw 2>/dev/null || touch $TMPDIR/.testingsw
+
+  # A SWEEP IS NOT A MISSED UNPLUG. accd's plug-continuity check calls any wall-clock gap larger
+  # than $plugGapMax (60s) a possible cable event and drops the per-plug HV markers. This function
+  # is the one thing in the daemon that routinely blows past that on purpose: cycle_switches_off
+  # budgets 120s and the honest ceiling is budget + one candidate, ~164s (see the note on _SWMAX
+  # below), so an ordinary discovery pass looked exactly like a replug. Clearing .hvkicked and
+  # .hvrecover mid-plug re-opens the re-kick budget against a live QC/PD contract, and an APSD on
+  # a live plug is what takes 9V to 4.4V - the outage rc24 exists to end.
+  #
+  # Stamped on ENTRY, not on exit: cycle_switches has several returns and the entry is the one
+  # point every caller and every exit path passes through. accd reads it, compares it against its
+  # own last pass, and removes it.
+  date +%s > $TMPDIR/.sw-at 2>/dev/null || :
 
   # rc21 (field report: OnePlus SM8250 / KernelSU, probe-crash into EDL): a global stop.
   # journal_check blacklists ONE node per crash-boot, so a device whose charge driver wedges
@@ -398,6 +518,13 @@ cycle_switches() {
       ${isAccd:-false} && command -v _wlog >/dev/null 2>&1 \
         && _wlog "sweep budget spent; stopped early, next sweep resumes from here" || :
       break
+    fi
+
+    # Kernel thermal levels can read back briefly while firmware races the write.
+    if kernel_owned_level_switch; then
+      ${isAccd:-false} && command -v _wlog >/dev/null 2>&1 \
+        && _wlog "skipped kernel-owned thermal level ${chargingSwitch[*]}" || :
+      continue
     fi
 
     # Brick-safe guard (GitHub #305/#308): a switch that panicked the kernel mid-write
@@ -590,6 +717,26 @@ cycle_switches() {
 _rearm_sweep() {
   local _swEnd=$(( SECONDS + ${_rearmBudget:-120} ))
   cycle_switches on
+}
+
+switch_release_observed() {
+  case "${chargingSwitch[*]-}" in
+    *input_suspend*|*charge_disable*|*batt_slate_mode*|*op_disable_charge*|*disable_charging*) ;;
+    *) return 1;;
+  esac
+  present && online || return 1
+  local _srn= _srv=
+  set -- ${chargingSwitch[@]-}
+  [ -f "${1:-//}" ] || return 1
+  while [ -f "${1:-//}" ]; do
+    [ $# -ge 3 ] || return 1
+    _srn=$(cat "$1" 2>/dev/null)
+    _srv=$(parse_value "$2")
+    [ "$_srn" = "$_srv" ] || return 1
+    [ $# -lt 3 ] || shift 3
+    [ $# -ge 3 ] || break
+  done
+  return 0
 }
 
 
@@ -1257,6 +1404,7 @@ enable_charging() {
       # walks every candidate unbounded, which is what keeps a stranded phone able to charge again.
       # Unbounded here, an empty chargingSwitch held a plugged A3 off charge for over five minutes.
       flip_sw on || { present && _rearm_sweep; } || :
+      flip=
       if present; then
         # D8 (rc5: extended to current-cap classes): after un-cutting, re-run APSD/AICL so the
         # charger re-negotiates. Input-cut switches (input_suspend/bypass/vbus) mask */online to 0
@@ -1273,11 +1421,7 @@ enable_charging() {
           # on every resume regardless. rekick_usb() carries the off flag, the rate limit and the
           # ledger entry; nothing here needs to reach past it.
           *current_max*|*input_current*|*constant_charge_current*)
-            # rc24: clear `flip` first. flip_sw on leaves flip=on, and not_charging treats any
-            # non-empty flip as a SWITCH TEST - so this became a 35-iteration ON-test that answered
-            # "charging started", and the re-kick then fired AFTER a successful resume. The question
-            # here is only "is current flowing".
-            flip=
+            # Normal current verdict; switch-test mode was cleared above.
             present && not_charging && rekick_usb resume 2>/dev/null || : ;;
           *suspend*|*bypass*|*vbus*)
             present && ! online && rekick_usb resume 2>/dev/null || : ;;
@@ -1304,7 +1448,9 @@ enable_charging() {
     # Leaving it true costs nothing when the resume did work - the next pass sees real charging current
     # and clears it there - and buys a retry when it did not.
     if not_charging; then
-      :
+      # Some input cuts leave stale current/status telemetry after their node is released. Direct
+      # readback plus online is stronger evidence that ACC no longer owns a cut than that telemetry.
+      switch_release_observed && chDisabledByAcc=false || :
     else
       chDisabledByAcc=false
     fi
@@ -1377,6 +1523,7 @@ flip_sw() {
   local on=
   local off=
   local _wrote=0
+  local _fsStart= _fsCur= _fsNew= _fsSaved=
 
   set -- ${chargingSwitch[@]-}
   [ -f ${1:-//} ] || return 2
@@ -1420,6 +1567,47 @@ flip_sw() {
         ''|*[!0-9]*) ;;
         *) [ "$_fsLvl" -lt "$off" ] 2>/dev/null && off=$_fsLvl || :;;
       esac
+      # ...and never 100, which is the firmware's 'never stop'.
+      #
+      # Two ways to land there: a pack at 100%, and a MILLIVOLT pause_capacity (3001-5000), which
+      # is not a percentage at all -- capacity[3]=4200 is clamped to the current level by the line
+      # above, and at 100% that is 100. Writing 100 to charge_stop_level as an OFF value asks the
+      # firmware to stop at full, i.e. never, so a forced disable silently did nothing. 99 always
+      # stops and is still the caller's intent: OFF means stop now.
+      [ "${off:-0}" -ge 100 ] 2>/dev/null && off=99 || :
+      # THE STOP NODE IS HALF OF A PAIR. Measured on a Pixel 6a: charge_stop_level must be
+      # STRICTLY GREATER than charge_start_level. start=52 then stop=52 is refused (stop stayed
+      # at 80); start=51 then stop=52 is accepted. The switch spec names only the stop node, so
+      # every forced disable below the limit wrote a value the firmware silently discarded --
+      # charging continued, sw_holds waited out its four ticks, disable_charging concluded the
+      # switch was broken, and unset_switch emptied chargingSwitch and exited 7, leaving the
+      # phone with no charge control at all. Every modern Pixel ships this pair as its only
+      # switch, so one press of the disable button was enough to reach it.
+      #
+      # Lower the start node FIRST (the order the firmware accepts), remember the original, and
+      # put it back on the next ON. Only when off is at or below start: the ordinary pause at
+      # the limit already satisfies the constraint and is left byte-for-byte untouched.
+      if [ $flip = off ]; then
+        _fsStart=${1%/*}/charge_start_level
+        if [ -f "$_fsStart" ]; then
+          _fsCur=$(cat "$_fsStart" 2>/dev/null)
+          case ${_fsCur:-x} in
+            ''|*[!0-9]*) ;;
+            *)
+              if [ "$off" -le "$_fsCur" ] 2>/dev/null; then
+                [ -f $TMPDIR/.pcap-start ] || printf '%s' "$_fsCur" > $TMPDIR/.pcap-start 2>/dev/null || :
+                _fsNew=$(( off - 1 )); [ $_fsNew -ge 0 ] || _fsNew=0
+                chmod 0644 "$_fsStart" 2>/dev/null || :
+                echo $_fsNew > "$_fsStart" 2>/dev/null || :
+                command -v _wlog >/dev/null 2>&1 \
+                  && _wlog "pcap pair: charge_start_level <- $_fsNew (was $_fsCur) so stop=$off is accepted" || :
+              fi
+            ;;
+          esac
+        fi
+      fi
+      case x in
+      esac
     else
       off="$(parse_value "$3")"
     fi
@@ -1430,6 +1618,24 @@ flip_sw() {
     # actual success is judged by not_charging afterwards, not by one node's write. Report total
     # failure (return 1) only if NO node could be written at all.
     write \$$flip $1 && _wrote=1 || :
+    # Restore the paired start node AFTER the stop node is back up, which is the order the
+    # firmware accepts (stop to 100 first, then start to 70).
+    if [ $flip = on ] && [ -f $TMPDIR/.pcap-start ]; then
+      _fsSaved=$(cat $TMPDIR/.pcap-start 2>/dev/null)
+      _fsStart=${1%/*}/charge_start_level
+      case ${_fsSaved:-x} in
+        ''|*[!0-9]*) ;;
+        *)
+          if [ -f "$_fsStart" ]; then
+            chmod 0644 "$_fsStart" 2>/dev/null || :
+            echo $_fsSaved > "$_fsStart" 2>/dev/null || :
+            command -v _wlog >/dev/null 2>&1 \
+              && _wlog "pcap pair: charge_start_level restored <- $_fsSaved" || :
+          fi
+        ;;
+      esac
+      rm -f $TMPDIR/.pcap-start 2>/dev/null || :
+    fi
 
     [ $# -lt 3 ] || shift 3
     [ $# -ge 3 ] || break
@@ -1777,7 +1983,18 @@ else
     done
     return 0
   }
-  cfg_srcsafe() { . "$1" 2>/dev/null || :; }
+  # `. "$1" || :` DOES NOT CATCH A FAILURE INSIDE THE DOTTED FILE. In mksh a command that fails
+  # under errexit inside a sourced script aborts the caller before the `||` is ever reached - the
+  # same trap acquire-lock.sh documents for a redirection error on a special builtin. A config
+  # that half-parses would then kill the front-end outright instead of being skipped. acca.sh's
+  # copy of this fallback already clears errexit around the source; this one had not been kept in
+  # step, so the two front-ends behaved differently on the one install where it matters.
+  cfg_srcsafe() {
+    case $- in
+      *e*) set +e; . "$1" 2>/dev/null; set -e;;
+      *) . "$1" 2>/dev/null || :;;
+    esac
+  }
   cfg_check_kv() { return 0; }
 fi
 

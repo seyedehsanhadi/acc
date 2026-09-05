@@ -44,7 +44,7 @@ ok "both arms present"
 # Drive apply_on_plug with a recorder in place of write().
 #   run <arm> <arg> <mcc-custom yes|no> <reject-count>   -> prints the nodes it tried to write
 run(){
-  _arm=$1; _arg=$2; _mk=$3; _rej=$4
+  _arm=$1; _arg=$2; _mk=$3; _rej=$4; _round=${5:-no}
   rm -rf $W/t $W/ps 2>/dev/null; mkdir -p $W/t $W/ps/usb $W/ps/battery
   echo 2000000 > $W/ps/usb/current_max
   echo 3000000 > $W/ps/battery/constant_charge_current
@@ -52,21 +52,30 @@ run(){
   printf '%s\n' 'usb/current_max::v000::2000000' \
                 'battery/constant_charge_current::v000::3000000' > $W/t/ch-curr-ctrl-files
   if [ "${_rej:-0}" -gt 0 ] 2>/dev/null; then
-    echo "500000 $_rej" > "$W/t/.mccrej-usb_current_max"
-    echo "500000 $_rej" > "$W/t/.mccrej-battery_constant_charge_current"
+    # apply_on_plug resolves every entry through $PS before deriving its reject-key. Mirror the
+    # shipped key exactly; the old short key stopped exercising backoff after path resolution landed.
+    _up=${W//\//_}_ps_usb_current_max
+    _bp=${W//\//_}_ps_battery_constant_charge_current
+    echo "500000 $_rej" > "$W/t/.mccrej-${_up}"
+    echo "500000 $_rej" > "$W/t/.mccrej-${_bp}"
   fi
   {
     echo "TMPDIR=$W/t"
+    echo "PS=$W/ps"
     echo 'applyOnPlug=(); maxChargingVoltage=()'
     echo 'maxChargingCurrent=(500 usb/current_max::500000::2000000 battery/constant_charge_current::500000::3000000)'
-    echo "write(){ echo \"WROTE \$1 <- \$2\" >> $W/wrote; return 0; }"
+    if [ "$_round" = yes ]; then
+      echo "write(){ echo \"WROTE \$1 <- \$2\" >> $W/wrote; echo 490000 > \"\$2\"; return 0; }"
+    else
+      echo "write(){ echo \"WROTE \$1 <- \$2\" >> $W/wrote; return 0; }"
+    fi
     echo '_wlog(){ :; }'
     sed -n '/^apply_on_plug() {/,/^}/p' "$_arm/misc-functions.sh"
     echo "cd $W/ps || exit 1"
     echo "apply_on_plug $_arg >/dev/null 2>&1"
   } > $W/run.sh
   : > $W/wrote
-  /system/bin/sh $W/run.sh 2>/dev/null
+  /system/bin/sh $W/run.sh 2>$W/stderr
   sort $W/wrote 2>/dev/null | sed 's/^/       /'
   grep -c WROTE $W/wrote 2>/dev/null || :
 }
@@ -79,6 +88,8 @@ _a=$(cnt "$ARM23" value yes 0); _b=$(cnt "$ARM24" value yes 0)
 echo "     rc23 wrote $_a   current wrote $_b"
 [ "${_b:-0}" -ge 2 ] && ok "the apply path attempts every configured node" \
                      || no "only ${_b:-0} node(s) attempted with a cap configured and the marker up"
+[ ! -s "$W/stderr" ] && ok "missing reject markers are silent" \
+                       || no "missing reject markers leaked shell errors: $(head -1 "$W/stderr")"
 
 echo
 echo "-- 2  marker ABSENT must SKIP - this is the documented guard, not a bug"
@@ -105,5 +116,33 @@ echo "-- 5  rc23 and rc24 must agree - a difference here would be an rc24 regres
 _a=$(cnt "$ARM23" value yes 0); _b=$(cnt "$ARM24" value yes 0)
 [ "${_a:-0}" = "${_b:-0}" ] && ok "both arms attempt the same $_b node(s) - the apply path is unchanged in rc24" \
                            || no "rc23 wrote $_a but current wrote $_b - rc24 changed the apply path"
+
+echo
+echo "-- 6  a normal hardware ladder rounding is a held limit"
+run "$ARM24" value yes 0 yes >/dev/null
+ls $W/t/.mccrej-* >/dev/null 2>&1 \
+  && no "a 500mA request rounded to 490mA was classified as rejected" \
+  || ok "a nearby hardware step is accepted"
+
+echo
+echo "-- 7  held tolerance must follow the node's units"
+rm -rf $W/t $W/ps 2>/dev/null; mkdir -p $W/t $W/ps/usb
+: > $W/t/.mcc-custom
+echo 2000 > $W/ps/usb/current_max
+{
+  echo "TMPDIR=$W/t"
+  echo "PS=$W/ps"
+  echo 'applyOnPlug=(); maxChargingVoltage=(); maxChargingCurrent=(500 usb/current_max::500::2000)'
+  echo 'write(){ echo 0 > "$2"; }'
+  echo '_wlog(){ :; }'
+  sed -n '/^apply_on_plug() {/,/^}/p' "$ARM24/misc-functions.sh"
+  echo 'apply_on_plug value >/dev/null 2>&1'
+} > $W/run-ma.sh
+/system/bin/sh $W/run-ma.sh
+_mk=${W//\//_}_ps_usb_current_max
+case "$(cat "$W/t/.mccrej-${_mk}" 2>/dev/null)" in
+  '500 1') ok "a 500mA node that falls to 0 is rejected" ;;
+  *) no "a 500mA node at 0 was accepted as held (unit-blind tolerance)" ;;
+esac
 
 fin

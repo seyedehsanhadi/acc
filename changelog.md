@@ -15,6 +15,14 @@ problems rather than a queue of complaints, and most of them need a particular c
 install path to show up at all.
 
 Fixed
+- `acc` is on PATH for every root provider, not just the two that already worked. On a setup without Magisk's or KernelSU's writable overlay there was nowhere for the links to go, so every front-end call fell over.
+- A missing `cfg-guard.sh` no longer bricks the front-end. `acca` runs under `set -eu`, where sourcing an absent file kills the process, so an upgrade that did not fully refresh the module directory left `acca -s` exiting 127 and no setting could be written at all.
+- `acca -s` wrote the config and never touched the hardware, so a limit could read as absent while the nodes stayed capped. Found on a phone, not by reading.
+- `allowIdleAbovePcap=false` was dead across the whole range it is documented for: idle-avoidance required a pause above 60%, so a phone set to pause 60 / resume 40 parked at 59% instead of cycling down.
+- A forced disable stops charging below the limit instead of destroying the switch. For a percentage cap the OFF value cannot stop a phone sitting below it, which is every `acc -d` and every AccA disable-charging tap taken before the limit is reached.
+- The flight log survives a boot. Its directory was only created under `-i`, and the boot path never passes `-i`, so the one recorder that proves a daemon is looping died silently and permanently.
+- Per-plug markers no longer survive a plug cycle the daemon slept through, leaving the previous plug's contract standing on the new one.
+- The cool-down comparator has the domain guard its siblings already had, so an out-of-range value can no longer read as due against a corrupt gauge.
 - Find my switch ships AMPS v7.3.1. A native %-limit pick is now functionally cycled, pause and resume, against a charging baseline instead of being confirmed on the engage reading alone, and a run that cannot measure says so instead of failing the switch.
 - A 9 V charger no longer collapses to about 4.4 V shortly after you plug it in. ACC read a live, negotiated supply as unnegotiated and re-ran USB detection on it. Voltage and current are now normalised before any comparison, because the same kernel path reports microvolts on one phone and millivolts on another, and the contract bar moved from 6.0 V to 6.5 V, which is above the operating band of a healthy 5 V supply.
 - A charger that has once reached high voltage is treated as negotiated for the rest of that plug, however far it later sags. A high-voltage label (HVDCP, PD, QC) counts on its own. Only unplugging the cable clears it.

@@ -102,8 +102,7 @@ volt_now(){ echo $MV; }
 # substitute the action string and would have clobbered the `command -v _reexec` guard along with it
 # (both occurrences sit on one line). It also means block 6 below tests the real guard rather than a
 # stand-in: unset _reexec and the hook must decline exactly as a front-end would make it decline.
-_body=$(printf '%s' "$_hook" | sed "s|.*print '||; s|' >> .*||")
-_body=${_body#*; }
+_body=$(printf '%s' "$_hook" | sed -n "s|.*'\(:; command.*\)' >>.*|\1|p")
 case "$_body" in
   *_reexec*) ;;
   *) no "the extracted hook does not call _reexec - every assertion below would be meaningless"; fin;;
@@ -118,7 +117,11 @@ try(){ capacity[3]=$1; CAP=$2; _fired=0; eval "$_body" ; echo $_fired; }
 [ "$(try 90 97)" = 1 ] && ok "target 90, level 97 -> fires above the target too" \
                        || no "target 90, level 97 -> did NOT fire above the target"
 [ "$(try 100 100)" = 1 ] && ok "target 100, level 100 -> fires (the AccA button's own case)" \
-                         || no "target 100, level 100 -> did NOT fire: this is the reported bug"
+                          || no "target 100, level 100 -> did NOT fire: this is the reported bug"
+
+printf '%s\n' "$_ac" | grep -qE '^[[:space:]]*print[[:space:]]' \
+  && no "acc -f still uses mksh-only print - the Termux bash hook is not written" \
+  || ok "acc -f uses portable output; Termux bash does not depend on mksh print"
 
 # ---- 6: inert without the daemon-only function ---------------------------------------------------
 # What a front-end sees: _reexec undefined. The hook must decline AND return 0, or it would abort the
@@ -204,17 +207,29 @@ printf '%s' "$_rbody" | grep -qE 'flock -u 4|4>&-' \
 # to 100 left .config-good holding capacity=(5 101 98 100 false) AND the -f restore hook, so a
 # config that later failed to parse would fall back to "charge to 100, no cooldown, no caps", and
 # the fallback itself carried an exec.
-_scblock=$(sed 's/^[[:space:]]*#.*//' "$AD" | grep -B8 -F 'cat $config > $dataDir/.config-good')
+_scblock=$(sed 's/^[[:space:]]*#.*//' "$AD" | grep -B12 -F 'cat $config > $dataDir/.config-good')
 
-printf '%s' "$_scblock" | grep -qF '"$TMPDIR"/*'   && ok "the known-good cache refuses a config living in tmpfs"   || no "no tmpfs guard on .config-good - a -f session poisons the fallback with its own profile"
+# The guard may be written either way round. The original excluded tmpfs by name; rc24 replaced
+# that with a whitelist of the canonical config, which is strictly stronger -- it also refuses a
+# defaults-bearing config at any OTHER persistent path, which is how .config-good came to hold
+# the shipped defaults on a Pixel 6a whose user had set 80. Accept either, and grade the property
+# rather than the spelling.
+if printf '%s' "$_scblock" | grep -qF '"$TMPDIR"/*' '' || printf '%s' "$_scblock" | grep -qF '"$dataDir"/config.txt'; then
+  ok "the known-good cache refuses a config that is not the user's own"
+else
+  no "no guard on .config-good - a -f session poisons the fallback with its own profile"
+fi
 
 # The guard has to sit BEFORE the copy, not merely somewhere in the file.
 _gline=$(sed 's/^[[:space:]]*#.*//' "$AD" | grep -nF '"$TMPDIR"/*' | head -1 | cut -d: -f1)
+if [ -z "$_gline" ]; then
+  _gline=$(sed 's/^[[:space:]]*#.*//' "$AD" | grep -nF '"$dataDir"/config.txt' | head -1 | cut -d: -f1)
+fi
 _cline=$(sed 's/^[[:space:]]*#.*//' "$AD" | grep -nF 'cat $config > $dataDir/.config-good' | head -1 | cut -d: -f1)
 if [ -n "$_gline" ] && [ -n "$_cline" ] && [ "$_gline" -lt "$_cline" ]; then
   ok "the guard is above the copy, so the copy cannot run first"
 else
-  no "the tmpfs guard is not above the .config-good copy (guard=${_gline:-none} copy=${_cline:-none})"
+  no "the guard is not above the .config-good copy (guard=${_gline:-none} copy=${_cline:-none})"
 fi
 
 # The path -f actually uses must be under $TMPDIR, or the guard matches nothing.

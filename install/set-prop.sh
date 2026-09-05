@@ -12,6 +12,8 @@ print_ss_() {
 set_prop() {
 
   local restartDaemon=false
+  local initDaemon=false
+  local setRc=0
   local line=
   local two=
 
@@ -89,11 +91,22 @@ set_prop() {
         || { : > $TMPDIR/.mcc-settling 2>/dev/null; set_ch_curr ${mcc:-${max_charging_current:--}}; } \
         || { [ $? -ne 11 ] || unset mcc max_charging_current; }
 
-      [ ".${mcv-${max_charging_voltage-x}}" = .x ] \
-        || set_ch_volt "${mcv:-${max_charging_voltage:--}}" || :
+      [ ".${mcv-${max_charging_voltage-x}}" = .x ] || {
+        : > $TMPDIR/.mcv-settling 2>/dev/null
+        set_ch_volt "${mcv:-${max_charging_voltage:--}}" || setRc=$?
+        # A missing voltage cache is not self-healing on a warm restart: accd skips its init block
+        # while .batt-interface.sh is valid. Force exactly one init when the setter queued bare
+        # intent, or invalidated a failed candidate list, so discovery and the apply actually run.
+        grep -q / $TMPDIR/ch-volt-ctrl-files 2>/dev/null \
+          || [ -f $TMPDIR/.mcv-read ] || initDaemon=true
+        # A resolved set/clear is serialized by .mcv-settling and needs no daemon restart. Stopping
+        # here made the exit trap restore the old voltage while the CLI was applying the new one.
+        # Only a genuinely missing/invalid cache needs a clean discovery init.
+        ! $initDaemon || { ! daemon_ctrl stop >/dev/null || restartDaemon=true; }
+      }
 
       [ -z "${tl-}${temp_level-}" ] || set_temp_level ${tl:-$temp_level}
-      echo "✅"
+      [ "$setRc" -ne 0 ] || echo "✅"
     ;;
 
     # reset config
@@ -278,13 +291,14 @@ set_prop() {
   if [ -n "$_rcfg" ]; then
     touch $TMPDIR/.mcc-custom 2>/dev/null || :
   fi
-  rm -f $TMPDIR/.mcc-settling 2>/dev/null || :
+  rm -f $TMPDIR/.mcc-settling $TMPDIR/.mcv-settling 2>/dev/null || :
 
   if $restartDaemon; then
-    if [ ".${cw-${current_workaround-x}}" != .x ]; then
+    if $initDaemon || [ ".${cw-${current_workaround-x}}" != .x ]; then
       $TMPDIR/accd --init $config
     else
       $TMPDIR/accd $config
     fi
   fi
+  return "$setRc"
 }

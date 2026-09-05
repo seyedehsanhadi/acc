@@ -31,6 +31,7 @@ fin(){ echo "$ID: $P passed, $F failed"; [ "$F" -eq 0 ] && exit 0 || exit 1; }
 
 execDir=${execDir:-/data/adb/vr25/acc}
 SV=$execDir/set-ch-volt.sh
+SP=$execDir/set-prop.sh
 BI=$execDir/batt-interface.sh
 MF=$execDir/misc-functions.sh
 W=${TMPDIR:-/data/local/tmp}/.t52
@@ -44,7 +45,7 @@ xf() {
     { print; if ($0==closer) exit }' "$2"
 }
 chk(){ [ "$3" = "$2" ] && ok "$1" || no "$1  (expected '$2', got '$3')"; }
-local(){ :; }
+local(){ for _l in "$@"; do case "$_l" in *=*) eval "$_l";; esac; done; }
 
 # ---- set_ch_volt : the accepted range ------------------------------------------------------------
 # 3700-4300 mV. Above 4.3V is outside what a Li-ion cell should ever see, so a refusal there is
@@ -60,9 +61,21 @@ printf '%s' "$_s" | grep -q 'ch-volt-ctrl-files' \
 
 # bug 19: on a phone with no voltage node the value must be DROPPED, not persisted - but only once
 # the probe has actually run, which is what ch-curr-ctrl-files / ch-switches being non-empty proves.
-printf '%s' "$_s" | grep -qE 'ch-curr-ctrl-files.*\]|ch-switches' \
+# The discriminator moved to a DEDICATED marker. It used to read ch-curr-ctrl-files / ch-switches --
+# the CURRENT side's state -- as a proxy for whether the VOLTAGE probe had run. That is cross-wired:
+# a phone whose current probe had finished but whose voltage probe had not would lose its stored
+# voltage cap. $TMPDIR/.mcv-read is the direct signal, written when voltage discovery completes and
+# removed when it finds no control file, mirroring .mcc-read. Either form satisfies bug 19.
+printf '%s' "$_s" | grep -qE 'ch-curr-ctrl-files.*]|ch-switches|[.]mcv-read' \
   && ok "discriminates 'no such node' from 'probe has not run yet' (bug 19)" \
   || no "no discriminator - it would drop a limit set before the first charge"
+# ...and the two arms must actually differ: keep before discovery, drop after.
+printf '%s' "$_s" | grep -q 'maxChargingVoltage=($1)' \
+  && ok "before discovery the stored value is KEPT" \
+  || no "the pre-discovery arm does not preserve the value"
+printf '%s' "$_s" | grep -q 'maxChargingVoltage=()' \
+  && ok "after discovery with no control file it is DROPPED" \
+  || no "the post-discovery arm does not drop the value"
 printf '%s' "$_s" | grep -q 'maxChargingVoltage=()' \
   && ok "clears the stored array when the phone cannot support a limit" \
   || no "an unsupported limit stays in the config as a phantom"
@@ -74,6 +87,87 @@ printf '%s' "$_s" | grep -q 'apply_on_boot_ default force' \
 printf '%s' "$_s" | grep -q 'rm $f' \
   && ok "clearing drops the .volt-custom marker" \
   || no "the marker survives a clear"
+
+_vs=$(
+  TMPDIR=$W/vs; PS=$W/vs/ps; dataDir=$W/vs/data; config=$dataDir/config.txt
+  mkdir -p $TMPDIR $PS/battery $dataDir
+  echo 4150000 > $PS/battery/voltage_max
+  echo 'battery/voltage_max::v000::4200000' > $TMPDIR/ch-volt-ctrl-files
+  : > $TMPDIR/.volt-custom
+  echo 'maxChargingVoltage=(4150 battery/voltage_max::4150000::4200000)' > $config
+  isAccd=true; _accdRelease=true; maxChargingVoltage=()
+  apply_on_boot(){ [ "${1-}" = default ] && echo 4200000 > $PS/battery/voltage_max; }
+  eval "$_s"
+  set_ch_volt -; echo "active=$(cat $PS/battery/voltage_max)"
+  echo 'maxChargingVoltage=()' > $config
+  set_ch_volt -; echo "clear=$(cat $PS/battery/voltage_max)"
+)
+case "$_vs" in *'active=4150000'*) ok "a stale daemon cannot clear a published voltage cap";;
+  *) no "daemon release ignored the on-disk cap: $_vs";; esac
+case "$_vs" in *'clear=4200000'*) ok "a real daemon clear still restores the default";;
+  *) no "daemon release guard blocked a real clear: $_vs";; esac
+
+# A readable candidate is not necessarily writable. Tensor exposes constant_charge_voltage as
+# mode 0666 while SELinux/firmware rejects every write; accepting it creates a phantom cap.
+_vr=$(
+  TMPDIR=$W/vr; PS=$W/vr/ps; dataDir=$W/vr/data; config=$dataDir/config.txt
+  mkdir -p $TMPDIR $PS/battery $dataDir
+  echo 4200000 > $PS/battery/constant_charge_voltage
+  echo 'battery/constant_charge_voltage::v000::4200000' > $TMPDIR/ch-volt-ctrl-files
+  echo 'maxChargingVoltage=()' > $config
+  isAccd=false
+  apply_on_boot(){ :; }
+  print_no_ctrl_file(){ :; }
+  print_volt_set(){ :; }
+  print_volt_restored(){ :; }
+  eval "$_s"
+  set_ch_volt 4150 >/dev/null 2>&1; _rc=$?
+  [ -e $TMPDIR/ch-volt-ctrl-files ] && _cf=yes || _cf=no
+  echo "rc=$_rc array=${maxChargingVoltage[*]-} ctrl=$_cf node=$(cat $PS/battery/constant_charge_voltage)"
+)
+case "$_vr" in *'rc=1 '*) ok "a voltage target that no node holds is rejected";;
+  *) no "a non-working voltage node was accepted: $_vr";; esac
+case "$_vr" in *'array= ctrl='*) ok "the rejected voltage is removed from the stored array";;
+  *) no "the rejected voltage remains configured: $_vr";; esac
+case "$_vr" in *'ctrl=no '*) ok "the non-working voltage candidate is discarded for this boot";;
+  *) no "the non-working voltage candidate remains selectable: $_vr";; esac
+case "$_vr" in *'node=4200000'*) ok "rejection leaves the original voltage unchanged";;
+  *) no "rejection changed the original voltage: $_vr";; esac
+
+_vp=$(
+  TMPDIR=$W/vp; PS=$W/vp/ps; dataDir=$W/vp/data; config=$dataDir/config.txt
+  mkdir -p $TMPDIR $PS/battery $dataDir
+  echo 4200000 > $PS/battery/good
+  echo 4200000 > $PS/battery/bad
+  printf '%s\n' 'battery/good::v000::4200000' 'battery/bad::v000::4200000' > $TMPDIR/ch-volt-ctrl-files
+  echo 'maxChargingVoltage=()' > $config
+  isAccd=false
+  apply_on_boot(){ [ "${1-}" = default ] || echo 4150000 > $PS/battery/good; }
+  print_no_ctrl_file(){ :; }
+  print_volt_set(){ :; }
+  print_volt_restored(){ :; }
+  eval "$_s"
+  set_ch_volt 4150 >/dev/null 2>&1; _rc=$?
+  _cf=$(tr '\n' ',' < $TMPDIR/ch-volt-ctrl-files)
+  echo "rc=$_rc array=${maxChargingVoltage[*]-} ctrl=$_cf good=$(cat $PS/battery/good) bad=$(cat $PS/battery/bad)"
+)
+case "$_vp" in *'rc=0 '*) ok "a target held by at least one voltage node is accepted";;
+  *) no "a working voltage node was rejected: $_vp";; esac
+case "$_vp" in *'array=4150 battery/good::4150000::4200000 ctrl='*) ok "only the node that held the target stays configured";;
+  *) no "rejected voltage siblings remain in the config: $_vp";; esac
+case "$_vp" in *'ctrl=battery/good::v000::4200000,'*) ok "only the working voltage candidate remains selectable";;
+  *) no "the voltage candidate list was not pruned: $_vp";; esac
+case "$_vp" in *'good=4150000 bad=4200000'*) ok "partial verification distinguishes working and rejected nodes";;
+  *) no "partial voltage verification is dishonest: $_vp";; esac
+
+_sp=$(xf set_prop "$SP")
+printf '%s' "$_sp" | grep -q 'set_ch_volt.*|| setRc=\$?' \
+  && printf '%s' "$_sp" | grep -q 'return "\$setRc"' \
+  && ok "a rejected voltage propagates a non-zero command verdict" \
+  || no "set_prop still hides a rejected voltage behind exit 0"
+printf '%s' "$_sp" | grep -q '\[ "\$setRc" -ne 0 \] || echo "✅"' \
+  && ok "a rejected voltage cannot print the success tick" \
+  || no "set_prop still prints success for a rejected voltage"
 
 # ---- set_temp_level ------------------------------------------------------------------------------
 _s=$(xf set_temp_level "$BI")

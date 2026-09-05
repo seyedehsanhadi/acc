@@ -106,7 +106,22 @@ else
   sk "provider-bin loop not present"
 fi
 
-# ---- 7. the /sbin loop must not abandon links on one failure ----------------------------------
+# ---- 7. one missing grouped node must not hide later valid nodes -------------------------------
+_cutfn=$(sed -n '/^_cut() {/,/^}/p' "$PF")
+_cw=${TMPDIR:-/data/local/tmp}/t126-cut.$$
+rm -rf "$_cw" 2>/dev/null; mkdir -p "$_cw"
+echo 1 > "$_cw/valid"
+getprop(){ :; }
+eval "$_cutfn"
+_w=$(_cut "$_cw/missing 1 0 $_cw/valid 1 0" 75)
+[ "$(cat "$_cw/valid" 2>/dev/null)" = 0 ] \
+  && ok "_cut skips a missing first node and still writes the later valid node" \
+  || no "_cut stopped at the missing first node and skipped the valid remainder"
+case " $_w " in *" $_cw/valid "*) ok "_cut reports the later node it wrote";;
+  *) no "_cut wrote no auditable record for the later node";; esac
+rm -rf "$_cw" 2>/dev/null
+
+# ---- 8. the /sbin loop must not abandon links on one failure ----------------------------------
 # Comments first: the block explains itself with the words '|| break', and matching that prose
 # reported the fixed code as broken.
 sed -n '/if \[ -d \/sbin \]/,/^  fi/p' "$AD" | grep -vE '^[[:space:]]*#' | grep -q '|| break' \

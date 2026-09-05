@@ -1,4 +1,19 @@
 (set +u
+# A FALLBACK IS NOT THE NEW TRUTH ON DISK.
+#
+# When $config fails to parse, _srcgood loads .config-good so the daemon keeps enforcing SOMETHING
+# rather than dying. That is correct. What was not correct is what happened next: the very next
+# config persist wrote those fallback values back out over the real file, so a TRANSIENT read
+# failure became PERMANENT loss of the user's settings.
+#
+# Device-proven on a Pixel 6a: .config-good held the shipped defaults, the live config held
+# capacity=(5 101 70 80 false), and after one boot the user's 80% limit was gone and the file read
+# 75 -- the module default -- with nothing logged and no way to tell it had ever been 80.
+#
+# While running on the fallback the daemon has nothing worth writing: its in-memory values did not
+# come from the user. Skip the persist entirely until a real config parses again, which clears the
+# flag. Enforcement is unaffected -- only the write is suppressed.
+[ "${_cfgFallback:-0}" != 1 ] || exit 0
 s0="${charging_switch-${s}}"
 
 

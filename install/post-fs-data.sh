@@ -71,6 +71,16 @@ _mvolt() {
   return 1
 }
 
+_system_policy_active() {
+  for _sp in "$PS"/*/charging_policy; do
+    [ -r "$_sp" ] || continue
+    _sv=; { read -r _sv < "$_sp"; } 2>/dev/null || :
+    case ${_sv:-x} in ''|x|*[!0-9]*) continue;; esac
+    [ "$_sv" -gt 1 ] 2>/dev/null && return 0
+  done
+  return 1
+}
+
 _level() {
   for _c in "$PS"/battery/capacity "$PS"/bms/capacity; do
     [ -f "$_c" ] || continue
@@ -108,7 +118,8 @@ _cut() {
   esac
   # shellcheck disable=SC2086
   set -- $_sw
-  while [ $# -ge 3 ] && [ -f "$1" ]; do
+  while [ $# -ge 3 ]; do
+    [ -f "$1" ] || { shift 3; continue; }
     _off=$3
     [ "$_off" = pcap ] && _off=$_pz
     case ${_off:-x} in ''|*[!0-9]*) shift 3; continue;; esac
@@ -188,6 +199,10 @@ _pending_check() {
 # The capping decision + action. cwd-independent (cd's into $PS itself). Always returns 0 -- boot
 # must never see a nonzero from here.
 _run() {
+  if _system_policy_active; then
+    echo "$(_ts) Android charge policy is active; skip early-cut (OS owns charge control)" >> "$log" 2>/dev/null
+    return 0
+  fi
   sw=$(grep -m1 '^chargingSwitch=' "$config" 2>/dev/null | sed -e 's/^chargingSwitch=(//' -e 's/).*$//')
   case "$sw" in ''|'--'*) echo "$(_ts) no switch configured; skip" >> "$log" 2>/dev/null; return 0;; esac
   # Brick-safe (GitHub #305): never early-write a switch accd already blacklisted for kernel-

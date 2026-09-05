@@ -126,4 +126,10 @@ grep -q 'SAMP_LAST=0; SAMP_N="$_em"' "$AMPS" \
   && ok "a late weak-charger sample resets SAMP_N alongside SAMP_LAST" \
   || no "SAMP_N is not reset with SAMP_LAST - the sample count and the sample disagree"
 
+# classify_held may call a sub-threshold current THROTTLE. The router correctly refuses that as a
+# working switch; the tail must not then spend up to 90s testing its "resume" or mark it STUCK.
+grep -q '\[ "$held" = 1 \] && \[ "${k0:-}" != THROTTLE \].*resume_check' "$AMPS" \
+  && ok "a refused THROTTLE does not enter resume_check" \
+  || no "test_switch still resume-checks a THROTTLE that route_stab refused"
+
 fin

@@ -90,7 +90,7 @@ printf '%s' "$_stc" | grep -qi 'ends by itself' \
 # Not installed on the phone, so look wherever a copy was staged. Source-level by nature: exercising
 # it would download and run an installer as root.
 _io=
-for _c in /data/local/tmp/install-online.sh "$execDir/../install-online.sh" /data/local/tmp/suites/install-online.sh; do
+for _c in "$execDir/../install-online.sh" /data/local/tmp/install-online.sh /data/local/tmp/suites/install-online.sh; do
   [ -f "$_c" ] && { _io=$_c; break; }
 done
 if [ -n "$_io" ]; then
@@ -98,9 +98,19 @@ if [ -n "$_io" ]; then
   printf '%s' "$_ioc" | grep -q ':[[:space:]]*${commit:=main}' \
     && ok "the updater defaults to main (master has never existed in this fork)" \
     || no "the updater does not default to main"
-  printf '%s' "$_ioc" | grep -q 'insecure:-false' \
+  printf '%s' "$_ioc" | grep -q '*) insecure=false' \
+    && printf '%s' "$_ioc" | grep -q '_k_curl=--insecure' \
     && ok "TLS verification is opt-OUT, not always-off" \
-    || no "the updater still disables TLS verification unconditionally"
+    || no "the updater does not default to verified TLS"
+  _ip=$(printf '%s\n' "$_ioc" | grep -n '^case " \$\* ".*insecure=true' | head -1 | cut -d: -f1)
+  _if=$(printf '%s\n' "$_ioc" | grep -nF 'if $insecure; then' | head -1 | cut -d: -f1)
+  _sd=$(printf '%s\n' "$_ioc" | grep -n '^set_dl$' | head -1 | cut -d: -f1)
+  if [ -n "$_ip" ] && [ -n "$_if" ] && [ -n "$_sd" ] \
+    && [ "$_ip" -lt "$_if" ] && [ "$_if" -lt "$_sd" ]; then
+    ok "-k is parsed before TLS flags and downloader functions are captured"
+  else
+    no "-k parse order is wrong (parse=${_ip:-none} flags=${_if:-none} set_dl=${_sd:-none})"
+  fi
   printf '%s' "$_ioc" | grep -q 'UPDATE FAILED' \
     && ok "a failed download or installer is reported instead of exiting 0" \
     || no "the updater can still report success after a failed install"

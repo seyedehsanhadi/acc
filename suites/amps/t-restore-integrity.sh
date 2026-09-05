@@ -142,6 +142,85 @@ _os(){ ( rd1(){ echo "${REF:-0}"; }
   && ok "a low ON value on a phone whose reference is ALSO low is kept (a genuinely small charger)" \
   || no "a small-but-consistent charger was refused"
 
+# The finalist stress pass used to extract only the first triplet. Pair/firmware/Pixel groups were
+# therefore either skipped by the label check or "confirmed" by hammering one node that cannot hold
+# alone. Execute the real function against two fake nodes and require every triplet on every hit.
+rd(){ cat "$1" 2>/dev/null; }
+_fgv=$(sed -n '/^fstress_verdict(){/,/^}/p' "$AMPS")
+_fgt=$(sed -n '/^fstress_thermal(){/,/^}/p' "$AMPS")
+_fgd=$(sed -n '/^list_drop(){/,/^finalist_stress(){/p' "$AMPS" | sed '$d')
+_fgs=$(sed -n '/^finalist_stress(){/,/^note_for(){/p' "$AMPS" | sed '$d')
+_fgw=${TMPDIR:-/data/local/tmp}/tfg.$$
+rm -rf "$_fgw" 2>/dev/null; mkdir -p "$_fgw/battery" "$_fgw/bk" 2>/dev/null
+printf '50\n' > "$_fgw/battery/capacity"; printf '9\n' > "$_fgw/a"; printf '9\n' > "$_fgw/b"
+_fgr=$( ( eval "$_fgv"; eval "$_fgs"
+          BK=$_fgw/bk; BATT=$_fgw/battery; CAP=50; ACC_DEFER=0; STRESS_FINALIST=1; STRESS_HITS=3; STRESS_CYCLES=0
+          REASSERT=; STUCKS=; RESUMES=; LEVELOK=; le_enf=; LVL_BY_ACC=0
+          read1(){ sed -n '1p' "$1" 2>/dev/null; }; san(){ printf '%s' "$1"; }
+          snap_add(){ :; }; recover_online(){ :; }; stop_check(){ :; }; over(){ return 1; }
+          fstress_thermal(){ return 1; }; chg_now(){ echo 0; }; log(){ :; }; sleep(){ :; }
+          wr(){ printf '%s\n' "$2" > "$1"; printf '%s=%s\n' "${1##*/}" "$2" >> "$_fgw/writes"; }
+          finalist_stress pair-combo "$_fgw/a 9 0 $_fgw/b 9 0" cut >/dev/null 2>&1
+          printf '%s/%s/%s/%s' "$(grep -c '^a=0$' "$_fgw/writes" 2>/dev/null)" "$(grep -c '^b=0$' "$_fgw/writes" 2>/dev/null)" "$(read1 "$_fgw/a")" "$(read1 "$_fgw/b")" ) 2>/dev/null)
+rm -rf "$_fgw" 2>/dev/null
+[ "$_fgr" = 3/3/9/9 ] \
+  && ok "finalist stress hammers and restores every node in a grouped switch" \
+  || no "grouped finalist stress result=$_fgr (want 3/3/9/9; one-node stress can falsely confirm a group)"
+
+# A Mi A3 charge_control_limit reports every write faithfully, but its sibling `_max=6` identifies
+# it as the kernel thermal mitigation level. It must be discarded before any OFF write, not after a
+# recovery helper has had a chance to overwrite the shell's shared node variable.
+rm -rf "$_fgw" 2>/dev/null; mkdir -p "$_fgw/battery" "$_fgw/bk" 2>/dev/null
+printf '50\n' > "$_fgw/battery/capacity"; printf '0\n' > "$_fgw/charge_control_limit"; printf '6\n' > "$_fgw/charge_control_limit_max"
+_fgtm=$( ( eval "$_fgv"; eval "$_fgt"; eval "$_fgd"; eval "$_fgs"
+           BK=$_fgw/bk; BATT=$_fgw/battery; CAP=50; ACC_DEFER=0; STRESS_FINALIST=1
+           BYPASS='|charge_control_limit=6'; BYPASS_HELD='|charge_control_limit=6'; CUT=; DRAIN=; THROTTLE=; LONGOK=
+           CFG_BYPASS="$_fgw/charge_control_limit 0 6"; CFG_CUT=; CFG_DRAIN=
+           ADDLINES="    $_fgw/charge_control_limit 0 6 (BYPASS)"; REASSERT=; STUCKS=; RESUMES=; LEVELOK='|charge_control_limit=6'; le_enf=charge_control_limit=6; LVL_BY_ACC=0
+           read1(){ sed -n '1p' "$1" 2>/dev/null; }; snap_add(){ :; }; log(){ :; }; over(){ return 1; }
+           finalist_stress charge_control_limit=6 "$_fgw/charge_control_limit 0 6" native-level >/dev/null 2>&1; _rc=$?
+           [ "$_rc" = 1 ] && [ "$(read1 "$_fgw/charge_control_limit")" = 0 ] && [ -z "$BYPASS$BYPASS_HELD$ADDLINES$LEVELOK$le_enf" ] \
+             && case "|$STUCKS|" in *'|charge_control_limit=6|'*) echo OK;; esac ) 2>/dev/null)
+[ "$_fgtm" = OK ] \
+  && ok "kernel thermal-level finalists (_max=1..10) are discarded before writing" \
+  || no "Mi A3 thermal-level finalist was not fully discarded (result=$_fgtm)"
+
+# Readback alone is not proof. Reproduce the live Mi failure: OFF sticks for every hammer, while
+# the current signal says charging continued. The finalist must be rejected even at flat capacity.
+printf '9\n' > "$_fgw/fake_switch"
+_fgleak=$( ( eval "$_fgv"; eval "$_fgt"; eval "$_fgd"; eval "$_fgs"
+             BK=$_fgw/bk; BATT=$_fgw/battery; CAP=50; ACC_DEFER=0; STRESS_FINALIST=1; STRESS_HITS=3; STRESS_CYCLES=2
+             BYPASS='|fake_switch=0'; BYPASS_HELD='|fake_switch=0'; CUT=; DRAIN=; THROTTLE=; LONGOK=
+             CFG_BYPASS="$_fgw/fake_switch 9 0"; CFG_CUT=; CFG_DRAIN=; ADDLINES="    $_fgw/fake_switch 9 0 (BYPASS)"
+             REASSERT=; STUCKS=; RESUMES=; LEVELOK=; le_enf=; LVL_BY_ACC=0
+             read1(){ sed -n '1p' "$1" 2>/dev/null; }; san(){ printf '%s' "$1"; }; snap_add(){ :; }
+             recover_online(){ :; }; stop_check(){ :; }; over(){ return 1; }; chg_now(){ echo 1; }; log(){ :; }; sleep(){ :; }
+             wr(){ printf '%s\n' "$2" > "$1"; }
+             finalist_stress fake_switch=0 "$_fgw/fake_switch 9 0" bypass >/dev/null 2>&1; _rc=$?
+             [ "$_rc" = 1 ] && [ -z "$BYPASS$BYPASS_HELD$ADDLINES" ] && echo OK ) 2>/dev/null)
+[ "$_fgleak" = OK ] \
+  && ok "a readback-stable switch that keeps charging is discarded as a functional leak" \
+  || no "readback-stable functional leak survived finalist stress (result=$_fgleak)"
+
+# A switch may pause correctly but fail to resume on one cycle. Force that exact second restore to
+# refuse, then require the whole candidate and its ready-to-add line to be discarded.
+printf '9\n' > "$_fgw/fake_switch"
+_fgresume=$( ( eval "$_fgv"; eval "$_fgt"; eval "$_fgd"; eval "$_fgs"
+               BK=$_fgw/bk; BATT=$_fgw/battery; CAP=50; ACC_DEFER=0; STRESS_FINALIST=1; STRESS_HITS=1; STRESS_CYCLES=2; STRESS_CYCLE_HOLD=1
+               BYPASS='|fake_switch=0'; BYPASS_HELD='|fake_switch=0'; CUT=; DRAIN=; THROTTLE=; LONGOK=
+               CFG_BYPASS="$_fgw/fake_switch 9 0"; CFG_CUT=; CFG_DRAIN=; ADDLINES="    $_fgw/fake_switch 9 0 (BYPASS)"
+               REASSERT=; STUCKS=; RESUMES=; LEVELOK=; le_enf=; LVL_BY_ACC=0; _restores=0
+               read1(){ sed -n '1p' "$1" 2>/dev/null; }; san(){ printf '%s' "$1"; }; snap_add(){ :; }
+               recover_online(){ :; }; stop_check(){ :; }; over(){ return 1; }; log(){ :; }; sleep(){ :; }
+               chg_now(){ [ "$(read1 "$_fgw/fake_switch")" = 9 ] && echo 1 || echo 0; }
+               wr(){ if [ "$2" = 9 ]; then _restores=$((_restores+1)); [ "$_restores" = 2 ] && return 0; fi; printf '%s\n' "$2" > "$1"; }
+               finalist_stress fake_switch=0 "$_fgw/fake_switch 9 0" bypass >/dev/null 2>&1; _rc=$?
+               [ "$_rc" = 1 ] && [ -z "$BYPASS$BYPASS_HELD$ADDLINES" ] && echo OK ) 2>/dev/null)
+rm -rf "$_fgw" 2>/dev/null
+[ "$_fgresume" = OK ] \
+  && ok "one failed pause/resume cycle discards the candidate and its config line" \
+  || no "cycle-resume failure survived finalist stress (result=$_fgresume)"
+
 # ---- 6: the combo emitter produces a line ACC can actually parse ---------------------------------------------
 grep -q 'von1 \$voff1;' "$AMPS" \
   && no "the pair-combo line still carries a semicolon - ACC word-splits it and every field shifts" \

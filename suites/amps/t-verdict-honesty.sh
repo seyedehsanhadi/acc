@@ -87,7 +87,7 @@ grep -q 'LVL_BY_ACC:-0}" = 1 \] && aconf=from-ACC-history' "$AMPS" \
   && ok "a level node adopted from ACC's config is labelled from-ACC-history, not verified" \
   || no "the LVL_BY_ACC adoption no longer sets aconf=from-ACC-history - it will ship as conf=verified"
 # belt and braces: the artifact must never call an adopted node verified
-sed -n '/LVL_BY_ACC:-0}" = 1 \]/,+3p' "$AMPS" | grep -q 'conf=verified' \
+awk '/LVL_BY_ACC:-0}" = 1 \]/{n=4} n{print; n--}' "$AMPS" | grep -q 'conf=verified' \
   && no "the adopted-level branch still writes conf=verified" \
   || ok "  and that branch does not write conf=verified"
 

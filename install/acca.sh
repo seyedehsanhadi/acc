@@ -15,7 +15,8 @@ online() { :; }
 # setsid and nohup branches go through the symlink. execDir is persistent. Idempotent.
 ensure_tmpdir_links() {
   _eti="${id:-acc}"
-  [ -e "$TMPDIR/${_eti}d" ] && [ -d "$TMPDIR" ] && return 0
+  [ -e "$TMPDIR/${_eti}d" ] && [ -e "$TMPDIR/$_eti" ] \
+    && [ -e "$TMPDIR/${_eti}a" ] && return 0
   mkdir -p "$TMPDIR" 2>/dev/null || :
   ln -fs "$execDir/service.sh" "$TMPDIR/${_eti}d" 2>/dev/null || :
   ln -fs "$execDir/${_eti}.sh" "$TMPDIR/$_eti" 2>/dev/null || :
@@ -26,10 +27,46 @@ daemon_ctrl() {
   case "${1-}" in
     start|restart)
       ensure_tmpdir_links
+      # `start` MUST NOT TEAR DOWN A LIVE DAEMON. $TMPDIR/accd is service.sh, and service.sh runs
+      # `. release-lock.sh` before it launches - which is what makes `restart` work here at all,
+      # but it also made `start` a restart. Measured on a Pixel 6a: a healthy daemon at PID 23059
+      # was killed and replaced on a bare `acca -D start`, leaving a gap in charge control that
+      # nothing asked for. acc.sh has always refused this case (print_already_running, return 8);
+      # acca is the front-end AccA drives, and it did not. Exit 0 rather than 8: the caller asked
+      # for a running daemon and there is one, so this is success, not an error to surface.
+      #
+      # Confirm the PID by its exact daemon-script command line. Do not probe the flock here:
+      # persistent root shells can inherit an fd for the same lock and make `flock -n` report it
+      # available while the named daemon is healthy. That race made `start` kill and replace a
+      # live daemon on laurus. A stale/reused PID cannot pass the exact command-line check.
+      if [ "${1-}" = start ]; then
+        _dcp=$(cat $TMPDIR/acc.lock 2>/dev/null || echo)
+        case "${_dcp:-x}" in
+          ''|*[!0-9]*) : ;;
+          *)
+            if [ -r /proc/$_dcp/cmdline ] \
+              && tr '\0' ' ' < /proc/$_dcp/cmdline 2>/dev/null | grep -Fq "$execDir/${id:-acc}d.sh"; then
+              exit 0
+            fi
+          ;;
+        esac
+      fi
       # Detach so the daemon survives a transient caller. A bare `exec accd` leaves
       # accd in the caller's session/process-group; when that caller is a one-shot
       # script (e.g. the switch scanner run from a front-end), accd dies the moment
       # the script exits -- leaving charging UNCAPPED. Launch it in its own session.
+      # RELEASE HERE, not only inside service.sh. Two of the three launches below reach the daemon
+      # through $TMPDIR/accd, which is service.sh, and service.sh sources release-lock.sh before it
+      # starts anything - that is what makes a restart a restart. The start-stop-daemon branch does
+      # NOT: it runs $execDir/accd.sh directly, so nothing releases the lock, the new daemon dies on
+      # `flock -n 0 || exit 13` in acquire-lock, and the old one carries on. On that branch, and
+      # only on that branch, `restart` really was the silent no-op this was once reported to be.
+      #
+      # Doing it here covers all three branches and does not depend on which one a phone takes.
+      # Harmless where service.sh releases again: release-lock is a pkill plus an unlink, both
+      # idempotent. Guarded on `restart` because `start` above has already established there is no
+      # live daemon to release.
+      [ "${1-}" = restart ] && . $execDir/release-lock.sh || :
       if command -v setsid >/dev/null 2>&1; then
         setsid $TMPDIR/accd $config </dev/null >/dev/null 2>&1 &
       elif command -v start-stop-daemon >/dev/null 2>&1; then
@@ -37,6 +74,28 @@ daemon_ctrl() {
       else
         nohup $TMPDIR/accd $config </dev/null >/dev/null 2>&1 &
       fi
+      # DO NOT REPORT SUCCESS BEFORE THERE IS A DAEMON. acca backgrounds service.sh and exited at
+      # once, so AccA was told "started" while the lock was still unheld - the UI then shows "not
+      # running" for a moment and recovers on its own, which reads as a failed restart. Wait for the
+      # lock to be taken, briefly. Returns as soon as it is (measured under 2s on both phones), and
+      # gives up rather than hanging: the launch has already happened either way, and a front-end
+      # that blocks is worse than one that answers a little early.
+      #
+      # OBSERVE the lock, never TAKE it. `flock -n 0 <>acc.lock` - the form the status branch below
+      # uses - acquires the lock for as long as flock runs. Polling with it here would put this
+      # front-end in a race with the daemon it just launched, and the loser of that race is accd,
+      # which exits 13 in acquire-lock and leaves the phone with no daemon at all. Read the PID the
+      # daemon writes into the lock file instead: no contention, and it is the same evidence.
+      _dcw=0
+      while [ $_dcw -lt 10 ]; do
+        _dcp=$(cat $TMPDIR/acc.lock 2>/dev/null || echo)
+        case "${_dcp:-x}" in
+          ''|*[!0-9]*) : ;;
+          *) [ -d /proc/$_dcp ] && exit 0 || : ;;
+        esac
+        sleep 1
+        _dcw=$((_dcw + 1))
+      done
       exit 0
     ;;
     stop)
@@ -95,7 +154,12 @@ else
     done
     return 0
   }
-  cfg_srcsafe() { . "$1" 2>/dev/null || :; }
+  cfg_srcsafe() {
+    case $- in
+      *e*) set +e; . "$1" 2>/dev/null; set -e;;
+      *) . "$1" 2>/dev/null || :;;
+    esac
+  }
   cfg_check_kv() { return 0; }
 fi
 
@@ -157,7 +221,26 @@ case "$@" in
     # Parse-safe. A truncated config is a PARSE error in mksh: it aborts the process before any
     # `||` can act, so `acca -s` died on exactly the file a user runs it to repair. The defaults
     # are already loaded, so a malformed file leaves those in place and the write below repairs it.
-    if cfg_parses "$config"; then cfg_srcsafe "$config"; fi
+    if cfg_parses "$config"; then
+      cfg_srcsafe "$config"
+    elif [ -f "$config" ]; then
+      # THE CONFIG EXISTS AND WILL NOT PARSE. Overlaying nothing leaves the DEFAULTS loaded from
+      # the line above, and the write at the end of this branch then puts them ON DISK -- so one
+      # AccA toggle silently reset every unrelated setting the user had.
+      #
+      # Device-proven on a Pixel 6a: a single `acca -s language=en` against a truncated config
+      # turned temperature=(29 34 24 55) into (45 50 40 55), uiRefresh=42 into 60, and put the
+      # charge limit back to the shipped default. Nothing was logged and AccA reported success.
+      #
+      # REFUSE, rather than guess. .config-good is a snapshot and can predate the very edit being
+      # repaired, so restoring it still changes settings the user did not touch -- right for the
+      # daemon, which must keep enforcing something, wrong for an interactive write that can just
+      # report the problem. A file we cannot read is not a file we may replace. A genuinely
+      # MISSING config still falls through with the defaults loaded, which is the first-run
+      # repair this branch was written for.
+      echo "config.txt is unreadable; refusing to overwrite it. Fix or remove it, then retry." >&2
+      exit 1
+    fi
 
     # rc24: assign without export, so a value is taken literally - no re-expansion, no word
     # splitting - and only a real config key can be written.
@@ -192,7 +275,7 @@ case "$@" in
       case "${_as%%=*}" in
         mcv|max_charging_voltage|maxChargingVoltage|\
         mcc|max_charging_current|maxChargingCurrent|\
-        tl|temp_level)
+        tl|temp_level|tempLevel)
           ensure_tmpdir_links
           # ${id:-acc}, not ${id}: acca.sh never sets id (ensure_tmpdir_links uses ${id:-acc} for the
           # same reason), and under set -eu a bare ${id} aborts the whole front-end before write-config
@@ -250,6 +333,7 @@ esac
 
 # other acc commands
 set +eu
+ensure_tmpdir_links
 [ "${2:-x}" != q ] && exec $TMPDIR/acc $config "$@" \
   || {
     export logF=$TMPDIR/.logf

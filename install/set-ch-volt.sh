@@ -2,6 +2,15 @@ set_ch_volt() {
 
   local f=$TMPDIR/.volt-custom
   local isAccd=${isAccd:-false}
+  local _scvOnDisk= _scvDisk=
+
+  # Avoid CLI/daemon races.
+  $isAccd && [ -f $TMPDIR/.mcv-settling ] && return 0 || :
+
+  if ${_accdRelease:-false}; then
+    _scvDisk=$(sed -n 's/^maxChargingVoltage=(\([0-9][0-9]*\).*/\1/p' "${config:-$dataDir/config.txt}" 2>/dev/null)
+    [ -z "${_scvDisk:-}" ] || return 0
+  fi
 
   # Same reboot hole as set-ch-curr: the tmpfs marker alone must not gate a restore (a post-reboot
   # clear must still drop a stored config value), but the gate must not depend on the resolved
@@ -21,7 +30,6 @@ set_ch_volt() {
   # is exactly the signal wanted: a limit is still on record, therefore there is something to undo.
   # Same rule set-ch-curr.sh already applies ("a daemon release must consult the config ON DISK,
   # not the copy it loaded at the top").
-  local _scvOnDisk=
   _scvOnDisk=$(sed -n 's/^maxChargingVoltage=(\([0-9][0-9]*\).*/\1/p' "${config:-$dataDir/config.txt}" 2>/dev/null)
   [[ ! -f $f && .${1-} = .- ]] \
     && [ -z "${maxChargingVoltage[0]-}${max_charging_voltage-}${mcv-}${_scvOnDisk}" ] && return 0 || :
@@ -41,7 +49,8 @@ set_ch_volt() {
     # voltage limit can never linger on the config (resurrected by the editor on reload) or on the
     # nodes until the next reboot.
     if [ $1 = - ]; then
-      grep -q / $TMPDIR/ch-volt-ctrl-files 2>/dev/null && apply_on_boot_ default force || :
+      # Release blocked controls too.
+      grep -q / $TMPDIR/ch-volt-ctrl-files 2>/dev/null && _BLRELEASE=1 apply_on_boot_ default force || :
       max_charging_voltage=
       maxChargingVoltage=()
       unset mcv
@@ -50,38 +59,99 @@ set_ch_volt() {
       return 0
     fi
 
-    # A numeric SET needs the resolved control files to know which nodes to write.
+    # A numeric SET needs the resolved control files to know which nodes to write. Current-control
+    # files and switches are NOT a completion signal for this probe: on a live Mi A3 they existed
+    # before ch-volt-ctrl-files was published, so the CLI discarded 4150 during that small window.
+    # Keep bare intent until accd publishes the explicit completion marker; its next charging tick
+    # expands the value to node entries and writes the config again.
     grep -q / $TMPDIR/ch-volt-ctrl-files 2>/dev/null || {
-      $isAccd || print_no_ctrl_file v
-      # Telling the CLI caller is not enough. write-config persists whatever the CLI parsed,
-      # independently of this function, so the value lands in config anyway - and AccA reads config,
-      # not the CLI. A Pixel 6a showed "No voltage control file found" followed by a success tick,
-      # then displayed an active 3900 mV limit that nothing could ever apply.
-      #
-      # Absent control files mean one of two things, and they need different handling:
-      #   probe has run, found none  -> this device has no voltage node. Drop the value; keeping it
-      #                                 shows a limit that can never act.
-      #   probe has not run yet      -> keep it as intent, exactly as the current path does, so the
-      #                                 daemon applies it at the next charging tick.
-      # The probe resolves current and voltage in one pass, so its current-side output existing is
-      # what says the pass completed. On a phone with no current control either, neither file exists
-      # and this falls through to keeping the value, which is the safe direction.
-      if [ -s $TMPDIR/ch-curr-ctrl-files ] || [ -s $TMPDIR/ch-switches ]; then
-        max_charging_voltage=
-        maxChargingVoltage=()
-        unset mcv
+      if [ ! -f $TMPDIR/.mcv-read ]; then
+        maxChargingVoltage=($1)
+        unset max_charging_voltage mcv
+        return 0
       fi
-      return 0
+
+      # Discovery really completed and found no usable voltage node. Do not leave AccA displaying
+      # a cap that cannot act, and do not print a success tick for it.
+      $isAccd || print_no_ctrl_file v
+      max_charging_voltage=
+      maxChargingVoltage=()
+      unset mcv
+      return 1
     }
 
     apply_voltage() {
       eval "maxChargingVoltage=($1 $(sed "s|::v|::$1|" $TMPDIR/ch-volt-ctrl-files) ${2-})" \
         && unset max_charging_voltage mcv \
-        && apply_on_boot_ \
-        && {
-          $isAccd || print_volt_set $1
-        } || return 1
+        && apply_on_boot_ || return 1
+
+      local _mcvTarget=$1 _mcvExtra=${2-}
+      local _mcvHeld=false _mcve _mcvf _mcvt _mcvd _mcvm _mcvOk= _mcvWasFV=false
+      : > "$TMPDIR/ch-volt-ctrl-files.ok"
+      for _mcve in ${maxChargingVoltage[@]-}; do
+        case "$_mcve" in *::*::*) ;; *) continue;; esac
+        case "$_mcve" in *pmic-votable/FV/*) _mcvWasFV=true;; esac
+        set -- ${_mcve//::/ }
+        _mcvf=${1-}; _mcvt=${2-}
+        case "$_mcvf" in /*) ;; *) _mcvf=${PS:-/sys/class/power_supply}/$_mcvf;; esac
+        if [ "$(cat "$_mcvf" 2>/dev/null)" = "$_mcvt" ]; then
+          _mcvHeld=true
+          _mcvOk="${_mcvOk:+$_mcvOk }$_mcve"
+          _mcvd=${_mcve##*::}
+          # Preserve the discovery marker, rather than reconstructing it from the default's digit
+          # count. Qualcomm FV/force_val defaults to 0 but still needs v000 (mV -> uV), while its
+          # paired force_active entry has a fixed target of 1. Guessing turns both into 4150.
+          _mcvm=$(awk -F'::' -v p="${_mcve%%::*}" '$1 == p { print $2; exit }' "$TMPDIR/ch-volt-ctrl-files" 2>/dev/null)
+          [ -n "$_mcvm" ] || _mcvm=v${_mcvd#????}
+          printf '%s::%s::%s\n' "${_mcve%%::*}" "$_mcvm" "$_mcvd" >> "$TMPDIR/ch-volt-ctrl-files.ok"
+        fi
+      done
+      if ! $_mcvHeld; then
+        # A VOTABLE THAT NEVER HOLDS MUST NOT LOCK OUT THE NODES THAT WOULD.
+        #
+        # The wipe below deliberately forces one clean rediscovery. On a phone whose FV votable
+        # exists but does not actually take the vote, that rediscovery sees FV present, goes
+        # exclusive on it again, fails to hold again, and wipes again - forever. The power_supply
+        # voltage_max mirrors are dropped from the list the moment FV is chosen, so the user is
+        # left with NO voltage cap on a phone where the mirrors would have worked.
+        #
+        # Leave a breadcrumb so the next discovery skips FV exclusivity and keeps the mirrors.
+        # It lives in tmpfs, so a reboot retries the votable once: a transient miss must not
+        # disable the better control permanently.
+        $_mcvWasFV && { : > $TMPDIR/.fv-nohold 2>/dev/null || :; } || :
+        _BLRELEASE=1 apply_on_boot_ default force || :
+        max_charging_voltage=
+        maxChargingVoltage=()
+        unset mcv
+        # A transient writer/daemon overlap can make every candidate miss this one verification
+        # pass. Invalidate completion with the failed list so the caller forces one clean init;
+        # otherwise a stale .mcv-read turns "retry discovery" into "unsupported forever".
+        rm -f "$f" "$TMPDIR/.mcv-read" "$TMPDIR/ch-volt-ctrl-files" "$TMPDIR/ch-volt-ctrl-files.ok" 2>/dev/null || :
+        $isAccd || print_no_ctrl_file v
+        return 1
+      fi
+      mv -f "$TMPDIR/ch-volt-ctrl-files.ok" "$TMPDIR/ch-volt-ctrl-files"
+      eval "maxChargingVoltage=($_mcvTarget $_mcvOk $_mcvExtra)"
+      $isAccd || print_volt_set $_mcvTarget
     }
+
+    # REJECT A NON-NUMBER INSTEAD OF REPORTING SUCCESS FOR IT.
+    #
+    # The three branches below are all arithmetic comparisons. Given a value like `abc` every one
+    # of them is false, execution falls past the whole if/elif chain to the `touch $f` after it, and
+    # the caller returns 0 -- so `acc -s maxChargingVoltage=abc` printed the success tick, wrote
+    # nothing, and left the previous limit standing. Device-verified on a Mi A3: exit 0 and a ✅ for
+    # a value that is not a voltage. The same hole is in the current setter, which was believed to
+    # have a guard and does not: `acc -s maxChargingCurrent=abc` answers ✅ as well.
+    #
+    # A front-end cannot tell that apart from a cap that was accepted, which is the whole problem:
+    # AccA shows the tick and the user believes a limit is in force.
+    case "${1:-}" in
+      ''|*[!0-9]*)
+        $isAccd || echo "[3700-4300]$(print_mV; print_only)"
+        return 1
+      ;;
+    esac
 
     # = [3700-4300] millivolts
     if [ $1 -ge 3700 -a $1 -le 4300 ]; then

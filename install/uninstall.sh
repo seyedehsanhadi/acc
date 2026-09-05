@@ -168,6 +168,23 @@ rm -rf \
   # symptom still there. Unconditional and harmless when no mask was ever set.
   /system/bin/dumpsys battery reset >/dev/null 2>&1 || :
 
+  # Drop ACC's independent Google MSC_FCC ballot. This is deliberately NOT a force-value reset:
+  # disabling only DEBUGFS leaves Android's thermal and charger votes untouched. A reboot clears
+  # the ballot too, but no-reboot uninstall must restore full current immediately.
+  _mfd=$TMPDIR/.debugfs/gvotables/MSC_FCC
+  _mfm=$TMPDIR/.debugfs
+  if [ -f /data/adb/$domain/${id}-data/.msc-fcc-debugfs-vote ]; then
+    if [ ! -w "$_mfd/disable_vote" ]; then
+      mkdir -p "$_mfm" 2>/dev/null || :
+      chmod 0700 "$_mfm" 2>/dev/null || :
+      mount -t debugfs debugfs "$_mfm" 2>/dev/null || :
+    fi
+    [ -w "$_mfd/disable_vote" ] && printf DEBUGFS > "$_mfd/disable_vote" 2>/dev/null || :
+    rm -f /data/adb/$domain/${id}-data/.msc-fcc-debugfs-vote 2>/dev/null || :
+    umount "$_mfm" 2>/dev/null || :
+  fi
+  unset _mfd _mfm
+
   # (a0) rc13: CONFIG-DRIVEN restore FIRST -- replay ACC's own recorded stock values. The generic
   # sweeps below un-cap by hardcoded node names + a */voltage_max_design sibling, but that misses
   # (i) voltage_max nodes with NO _design sibling (battery/bms/main on curtana were left capped at

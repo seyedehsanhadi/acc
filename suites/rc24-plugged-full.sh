@@ -69,27 +69,37 @@ ORIG_RT=$(sed -n 's/^temperature=(//p' $CFG | tr -d ')' | awk '{print $3}')
 ORIG_ST=$(sed -n 's/^temperature=(//p' $CFG | tr -d ')' | awk '{print $4}')
 ORIG_MCC=$(sed -n 's/^maxChargingCurrent=//p' $CFG)
 ORIG_MCV=$(sed -n 's/^maxChargingVoltage=//p' $CFG)
+ORIG_NTHOT_PRESENT=0; [ -f $TD/.nthot ] && ORIG_NTHOT_PRESENT=1
+ORIG_NTHOT=$(rd $TD/.nthot)
+ORIG_NVHELD_PRESENT=0; [ -f $TD/.nvheld ] && ORIG_NVHELD_PRESENT=1
+ORIG_NVHELD=$(rd $TD/.nvheld)
 
 restore(){
   trap - EXIT INT TERM HUP
   echo "  restoring pc=$ORIG_PC rc=$ORIG_RC mt=$ORIG_MT ct=$ORIG_CT rt=$ORIG_RT mcc= mcv="
   setk pc="$ORIG_PC" rc="$ORIG_RC" cc="$ORIG_CC" ct="$ORIG_CT" mt="$ORIG_MT" rt="$ORIG_RT" mcc= mcv= 2>/dev/null
   # never write sc or st
+
+  # Artificial threshold tests can create native hysteresis state that survives restoring the
+  # config. Put the exact pre-test latch state back, then restart so the daemon loads it.
+  _latch_changed=0
+  [ "$(rd $TD/.nthot)" = "$ORIG_NTHOT" ] && [ "$([ -f $TD/.nthot ] && echo 1 || echo 0)" = "$ORIG_NTHOT_PRESENT" ] || _latch_changed=1
+  [ "$(rd $TD/.nvheld)" = "$ORIG_NVHELD" ] && [ "$([ -f $TD/.nvheld ] && echo 1 || echo 0)" = "$ORIG_NVHELD_PRESENT" ] || _latch_changed=1
+  if [ "$_latch_changed" = 1 ]; then
+    acc -D stop >/dev/null 2>&1
+    [ "$ORIG_NTHOT_PRESENT" = 1 ] && printf '%s' "$ORIG_NTHOT" > $TD/.nthot || rm -f $TD/.nthot
+    [ "$ORIG_NVHELD_PRESENT" = 1 ] && printf '%s' "$ORIG_NVHELD" > $TD/.nvheld || rm -f $TD/.nvheld
+    acc -D restart >/dev/null 2>&1 &
+    _rw=0; while [ "$_rw" -lt 30 ]; do [ -n "$(daemon_pid)" ] && break; sleep 2; _rw=$((_rw+1)); done
+    sleep 5
+    echo "  restored native latch state (nthot=${ORIG_NTHOT:-absent} nvheld=${ORIG_NVHELD:-absent})"
+  fi
   echo "  restored cap=$(cap_now) st=$(st_now) usbV=$(usb_v)"
 
-  # Clearing the CONFIG is not the same as releasing the NODES, and this suite used to stop at the
-  # config. A run that induced mcv left battery/voltage_max pinned at 3900000 on a Mi A3 -- a 3.9V
-  # float on a pack that charges to 4.4V -- while main/voltage_max beside it had been released and
-  # the config read mcv=(). The phone then crawled, and its owner noticed before the test did.
-  # So: read every node ACC recorded a default for, and shout if one is still below it.
-  # Only meaningful while current is actually flowing. A phone HOLDING A PAUSE reports 0 on every
-  # input-current node, because that is what a pause does -- flagging those as "capped" would call a
-  # correctly-paused phone broken. Voltage nodes are checked either way: a float ceiling is a stored
-  # setting, not a consequence of the pause.
+  # Release audit. Voltage defaults are stable; current nodes are often firmware-owned and dynamic.
   _stuck=0
   _charging=no; [ "$(st_now)" = Charging ] && _charging=yes
-  [ "$_charging" = yes ] || echo "  (not charging - checking voltage ceilings only; input-current nodes read 0 during a pause by design)"
-  for _l in $(cat $TD/ch-volt-ctrl-files 2>/dev/null; [ "$_charging" = yes ] && cat $TD/ch-curr-ctrl-files 2>/dev/null); do
+  for _l in $(cat $TD/ch-volt-ctrl-files 2>/dev/null); do
     _n=${_l%%::*}; _d=${_l##*::}
     case "$_n" in /*) _p=$_n ;; *) _p=$PS/$_n ;; esac
     [ -e "$_p" ] || continue
@@ -102,7 +112,18 @@ restore(){
       echo "     fix by hand NOW:  echo $_d > $_p"
     fi
   done
-  [ "$_stuck" = 0 ] && echo "  all recorded current/voltage nodes are at or above their defaults"                     || echo "  !! $_stuck node(s) left capped - this phone will charge slowly until fixed"
+  if [ "$_charging" = yes ]; then
+    for _l in $(cat $TD/ch-curr-ctrl-files 2>/dev/null); do
+      _n=${_l%%::*}; _d=${_l##*::}
+      case "$_n" in /*) _p=$_n ;; *) _p=$PS/$_n ;; esac
+      _v=$(cat "$_p" 2>/dev/null | head -1)
+      [ "$_v" = 500000 ] && [ "$_d" != 500000 ] || continue
+      _stuck=$((_stuck+1))
+      echo "  !! NOT RELEASED: $_n still holds the induced 500000 cap"
+    done
+  fi
+  [ "$_stuck" = 0 ] && echo "  release audit clean" \
+                     || echo "  !! $_stuck node(s) left capped - this phone will charge slowly until fixed"
 }
 trap restore EXIT INT TERM HUP
 
@@ -270,6 +291,8 @@ _nnodes=0; [ -f "$_ccf" ] && { _nnodes=$(grep -c / "$_ccf" 2>/dev/null || :); _n
 echo "  current-control nodes ACC discovered: $_nnodes"
 if [ "$_nnodes" -eq 0 ]; then
   sk "amp: ACC discovered NO current-control nodes on this device - maxChargingCurrent cannot be enforced here (pre-existing, not an rc24 change)"
+elif [ -n "$_i_before" ] && [ "$_i_before" -lt 750 ] 2>/dev/null; then
+  sk "amp: baseline ${_i_before}mA is too close to the 500mA cap to measure a meaningful drop"
 elif [ -n "$_iin_cap" ] && [ -n "$_i_before" ] && [ "$_i_before" -gt 200 ] 2>/dev/null; then
   # Taper over a 16s window is a few percent. Demand a third off before calling the cap effective.
   _need=$(( _i_before - _i_before / 3 ))

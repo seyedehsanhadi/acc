@@ -285,13 +285,19 @@ c_kicked_unplug() { A=$1
 }
 dual "the unplug branch clears .hvkicked alongside the other per-plug markers" c_kicked_unplug
 
-c_kicked_one_site() { A=$1
-  n=$( { src $A accd.sh; src $A misc-functions.sh; } | grep -F '.hvkicked' | grep -c 'rm ' )
-  case "${n:-x}" in ''|*[!0-9]*) n=0;; esac
-  # rc23 has no marker at all (0 sites) and rc24 must have exactly one.
-  [ "$n" -eq 1 ] && echo SAFE || echo UNSAFE
+c_kicked_with_plug_identity() { A=$1
+  # A missed unplug can now clear the marker too: if the daemon slept through a whole cable cycle,
+  # keeping the old plug's budget is just as wrong as keeping it after an observed unplug. Do not
+  # count sites. Require every clear to travel with the plug-identity markers instead, and forbid a
+  # second owner in misc-functions.sh. rc23 still answers UNSAFE because it has no clear at all.
+  _r=$(src $A accd.sh | grep -F '.hvkicked' | grep 'rm ')
+  [ -n "$_r" ] || { echo UNSAFE; return; }
+  printf '%s\n' "$_r" | grep -vF '.hvpeak' | grep -q . && { echo UNSAFE; return; }
+  printf '%s\n' "$_r" | grep -vF '.hvaim' | grep -q . && { echo UNSAFE; return; }
+  src $A misc-functions.sh | grep -F '.hvkicked' | grep -q 'rm ' && { echo UNSAFE; return; }
+  echo SAFE
 }
-dual "there is exactly one .hvkicked removal site" c_kicked_one_site
+dual ".hvkicked is cleared only with the rest of the plug identity" c_kicked_with_plug_identity
 
 # ============================================================================================
 sec "6  MUTATION - can this suite still fail?"

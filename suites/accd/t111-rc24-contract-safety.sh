@@ -265,8 +265,20 @@ dual "aim-high writes an allow-list, not every */current_max" c_aim_nodes
 # ============================================================================================
 sec "5  RESUME - a successful resume must not trigger a re-kick"
 c_flip_clear(){ A=$1
-  s=$(src $A misc-functions.sh | grep -B3 -F 'rekick_usb resume' | grep -cF 'flip=')
-  [ "${s:-0}" -ge 1 ] && echo SAFE || echo UNSAFE
+  # DOMINANCE, not adjacency. This used to demand `flip=` within 3 lines above `rekick_usb resume`,
+  # which only ever described the *current_max* arm - the *suspend*|*bypass*|*vbus* arm three lines
+  # below it was reached with whatever flip_sw on had left in `flip`, and the test called that safe.
+  # Clearing it once after `flip_sw on`, before the `if present` that both arms live inside, covers
+  # both; the adjacency form then reported the stronger code as unsafe. So: find the clear and the
+  # first resume call, and require the clear to come first with nothing re-arming flip in between.
+  s=$(src $A misc-functions.sh | grep -n -e '^ *flip=$' -e 'rekick_usb resume' -e '^ *flip=[^ ]' | head -20)
+  _fc=$(printf '%s\n' "$s" | grep -m1 ':[[:space:]]*flip=$' | cut -d: -f1)
+  _rk=$(printf '%s\n' "$s" | grep -m1 'rekick_usb resume' | cut -d: -f1)
+  [ -n "$_fc" ] && [ -n "$_rk" ] || { echo UNSAFE; return; }
+  [ "$_fc" -lt "$_rk" ] || { echo UNSAFE; return; }
+  # nothing may set flip to a VALUE between the clear and the resume call
+  _bad=$(printf '%s\n' "$s" | awk -F: -v a="$_fc" -v b="$_rk" '$1>a && $1<b && /flip=[^ ]/{c++} END{print c+0}')
+  [ "${_bad:-0}" -eq 0 ] && echo SAFE || echo UNSAFE
 }
 dual "flip is cleared before the resume-time not_charging" c_flip_clear
 

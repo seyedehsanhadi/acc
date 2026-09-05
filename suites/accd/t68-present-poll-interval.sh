@@ -66,6 +66,31 @@ for _fn in _nap_idle _nap_hold; do
     || ok "$_fn keeps _tick on every tick, so config edits still apply within ~1s"
 done
 
+# A FIFO byte is the lossless config-change signal. Filesystem mtimes can tie when a CLI save and
+# nap start land in the same second, so merely draining the byte and consulting -nt can sleep 30s.
+_tb=$(body _tick)
+printf '%s' "$_tb" | grep -qE 'read .*&& return 1|read .*then.*return 1' \
+  && ok "_tick breaks a nap when the config writer sends a wake byte" \
+  || no "_tick discards its wake byte and can miss same-timestamp config edits"
+
+_td=$(mktemp -d 2>/dev/null || echo /data/local/tmp/t68.$$)
+mkdir -p "$_td" 2>/dev/null
+if mkfifo "$_td/wake" 2>/dev/null; then
+  ( eval "$(sed -n '/^  _tick() {/,/^  }/p' "$AD")"
+    TMPDIR=$_td; config=$_td/config; : > "$config"; : > "$TMPDIR/.nap-ref"
+    hasWakeFifo=true
+    exec 9<>"$TMPDIR/wake"
+    echo w > "$TMPDIR/wake"
+    _tick
+    echo $? ) > "$_td/rc" 2>/dev/null
+  [ "$(cat "$_td/rc" 2>/dev/null)" = 1 ] \
+    && ok "a real FIFO wake makes _tick return the nap-break status" \
+    || no "a real FIFO wake did not break _tick"
+else
+  no "could not create FIFO for the wake test"
+fi
+rm -rf "$_td" 2>/dev/null || :
+
 # ---- 3: the interval is sane -------------------------------------------------------------------------
 # Zero or empty would divide the fix by itself; something huge would delay plug detection past the
 # point a user notices. Anything from 2 to 15 is defensible; the default is 5.

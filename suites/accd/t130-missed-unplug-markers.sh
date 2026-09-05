@@ -61,6 +61,12 @@ case "$_g" in
   *) no "the guard does not clear .hvpeak, so a stale peak makes a weak supply look negotiated" ;;
 esac
 
+_start=$(printf '%s' "$_src" | grep -B3 'sawUnplug=false')
+case "$_start" in *'.hvcontract'*'.hvpeak'*'.hvkicked'*)
+  ok "daemon start drops stale plug identity and repair budget" ;;
+  *) no "daemon start leaves peak/kicked from a charger changed while ACC was stopped" ;;
+esac
+
 # ---- 2: live ------------------------------------------------------------------------------------
 [ "$(id -u 2>/dev/null)" = 0 ] || { sk "not root; skipping the live clear"; fin; }
 T=/dev/.vr25/acc

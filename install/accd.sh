@@ -87,6 +87,18 @@ if ! $_INIT; then
   }
 
 
+  system_charge_policy_active() {
+    local _p _v
+    for _p in "${ACC_PSY:-/sys/class/power_supply}"/*/charging_policy; do
+      [ -r "$_p" ] || continue
+      _v=; { read -r _v < "$_p"; } 2>/dev/null || :
+      case ${_v:-x} in ''|x|*[!0-9]*) continue;; esac
+      [ "$_v" -gt 1 ] 2>/dev/null && return 0
+    done
+    return 1
+  }
+
+
   probe_due() {
     # True when the pause point is close enough that ACC will actually need a switch soon, so the
     # discovery sweep is worth the interruption it costs.
@@ -95,6 +107,9 @@ if ! $_INIT; then
     # an unreadable gauge. Discovery must never be blocked by a value we cannot read; the worst case
     # of failing open is the behaviour that shipped before this guard existed.
     local _c=
+    # Android 16+ exposes the OS charge-control owner here. Values above DEFAULT (1) mean the
+    # platform has an active policy; probing switches underneath it makes two controllers fight.
+    system_charge_policy_active && return 1
     case "${capacity[3]-}" in ''|*[!0-9]*) return 0;; esac
     [ "${capacity[3]}" -le 100 ] 2>/dev/null || return 0
     _c=$(batt_cap 2>/dev/null)
@@ -166,6 +181,57 @@ if ! $_INIT; then
     case ${_th:-x} in ''|*[!0-9-]*) return 1;; esac
     [ "$_th" -ge $(( ${temperature[1]} * 10 )) ] 2>/dev/null
   }
+
+  _temp_shutdown_check() {
+    # rc24: THE THERMAL CUTOFF MUST NOT BE REACHABLE ONLY FROM is_charging().
+    #
+    # This block lived inline in is_charging(), and the firmware-limit branch `continue`s
+    # before is_charging() is ever called -- the same `continue` that has now swallowed
+    # allowIdleAbovePcap, idleApps, auto_shutdown, mask_capacity and the charging limits in
+    # turn. So on every phone with a native charge limit, shutdown_temp was accepted, written
+    # to the config, displayed by AccA, and enforced by nothing: the pack could pass
+    # shutdown_temp on the default Pixel path and the daemon would never power the phone off.
+    # A copy existed under leak_backstop, which is a conditional repair path and not where a
+    # thermal cutoff belongs.
+    #
+    # One definition, called from both paths, so the two cannot drift the way the mcc and mcv
+    # gates did. Every guard below is preserved verbatim; nothing here is new logic.
+    # Coerce a garbage/empty shutdown-temp so a hand-edited / partially-migrated config cannot
+    # trigger a SPURIOUS shutdown (non-numeric -> arithmetic 0 -> the -lt test fails -> shutdown).
+    _st=${temperature[3]}; case "$_st" in ''|*[!0-9]*) _st=55;; esac
+    # rc20 CRITICAL: BAND-check too, not just "is it a number". A low NUMERIC shutdown_temp
+    # (st=9) is a number, passes the guard above, and then "temp >= 9C" is true at any room
+    # temperature -- so the daemon powers the phone off on its very next loop. write-config
+    # clamps this on the write path, but the daemon is the last line of defence for a config
+    # that never went through it: a hand edit, a restored/older backup, a partially written
+    # file, or another tool. Device-proven: st=9 fired the shutdown branch at 26C.
+    # Battery temperatures are always Celsius here (no millivolt domain), so a fixed sane
+    # band is safe; anything outside it is garbage, not a user preference.
+    { [ "$_st" -ge 40 ] && [ "$_st" -le 70 ]; } 2>/dev/null || _st=55
+    # rc21 CRITICAL: only ever power the phone off on a reading we actually TRUST.
+    #
+    # This line used to be `[ $(temp_now) -lt $(( _st * 10 )) ] || shutdown`, with the
+    # substitution UNQUOTED. When the temperature read came back empty the word disappeared, so
+    # the shell saw `[ -lt 550 ]`, which is not a valid test -- mksh returns 2 ("unexpected
+    # operator/operand"), that counts as false, and the `||` powered the phone off. The check
+    # failed OPEN, in the worst possible direction: an unreadable sensor was treated as an
+    # overheating battery.
+    #
+    # temp_now coerces a bad read to 250, so this looked impossible; it is not. The relative
+    # sysfs paths (temp=battery/temp, battStatus=battery/status) all resolve against the daemon's
+    # CWD, and when that goes the reads fail together and the function's own output is lost with
+    # them. Device-proven on a Mi A3: `accd shutdown` logged with level=, temp= AND status= all
+    # empty, config perfectly sane (shutdown_temp 55) and the battery at 31C, immediately
+    # followed by ShutdownActivity in logcat. It powered the phone off four times.
+    #
+    # Now: read once, demand a plain number, and only compare a value we have. No reading means
+    # no shutdown -- max_temp still pauses charging, so nothing is left unprotected. A thermal
+    # cutoff that cannot read the thermometer must do nothing, never fire.
+    _tn=$(temp_now 2>/dev/null) || _tn=
+    case "${_tn:-x}" in ''|*[!0-9-]*) _tn=;; esac
+    [ -z "$_tn" ] || [ "$_tn" -lt $(( _st * 10 )) ] || shutdown
+  }
+
 
 
   _le_pause_cap() {
@@ -270,7 +336,11 @@ if ! $_INIT; then
     # builtin -nt test against a tmpfs ref file the caller refreshes at nap start.
     # Returns 1 (break the nap) when the config changed; degrades to sleep if the fifo
     # could not be created at init. mksh read -t returns >128 on timeout -- swallowed.
-    if $hasWakeFifo; then read -t 1 -u9 _wk 2>/dev/null || :; else sleep 1; fi
+    if $hasWakeFifo; then
+      read -t 1 -u9 _wk 2>/dev/null && return 1
+    else
+      sleep 1
+    fi
     [ ! $config -nt $TMPDIR/.nap-ref ]
   }
 
@@ -621,6 +691,9 @@ if ! $_INIT; then
       # Wait until a cut is nearly needed. probe_due fails OPEN on anything it cannot parse, so no
       # device loses discovery - it only stops the sweep landing on a charge that is nowhere near
       # the limit. The result is persisted, so this still happens exactly once per install.
+      if [ -z "${chargingSwitch[0]-}" ] && system_charge_policy_active; then
+        warn_once_per ospolicy 86400 "ACC: Android's built-in charge control is active, so automatic switch discovery is paused to avoid two controllers fighting. Turn off the OS charge limit if you want ACC to own the capacity limit; current and voltage caps remain available." || :
+      fi
       if [ -z "${chargingSwitch[0]-}" ] && probe_due; then
         # rc24: defensive. set -e is suspended here today because is_charging is called from an if,
         # but that safety belongs to the CALLER; a future plain call would inherit a daemon-killing
@@ -678,41 +751,8 @@ if ! $_INIT; then
     # worse than no heuristic. The fast-charge cooldown guard (fast_session) is
     # unaffected and stays: it has two independent field confirmations.
 
-    # shutdown if battery temp >= shutdown_temp
-    # Coerce a garbage/empty shutdown-temp so a hand-edited / partially-migrated config cannot
-    # trigger a SPURIOUS shutdown (non-numeric -> arithmetic 0 -> the -lt test fails -> shutdown).
-    _st=${temperature[3]}; case "$_st" in ''|*[!0-9]*) _st=55;; esac
-    # rc20 CRITICAL: BAND-check too, not just "is it a number". A low NUMERIC shutdown_temp
-    # (st=9) is a number, passes the guard above, and then "temp >= 9C" is true at any room
-    # temperature -- so the daemon powers the phone off on its very next loop. write-config
-    # clamps this on the write path, but the daemon is the last line of defence for a config
-    # that never went through it: a hand edit, a restored/older backup, a partially written
-    # file, or another tool. Device-proven: st=9 fired the shutdown branch at 26C.
-    # Battery temperatures are always Celsius here (no millivolt domain), so a fixed sane
-    # band is safe; anything outside it is garbage, not a user preference.
-    { [ "$_st" -ge 40 ] && [ "$_st" -le 70 ]; } 2>/dev/null || _st=55
-    # rc21 CRITICAL: only ever power the phone off on a reading we actually TRUST.
-    #
-    # This line used to be `[ $(temp_now) -lt $(( _st * 10 )) ] || shutdown`, with the
-    # substitution UNQUOTED. When the temperature read came back empty the word disappeared, so
-    # the shell saw `[ -lt 550 ]`, which is not a valid test -- mksh returns 2 ("unexpected
-    # operator/operand"), that counts as false, and the `||` powered the phone off. The check
-    # failed OPEN, in the worst possible direction: an unreadable sensor was treated as an
-    # overheating battery.
-    #
-    # temp_now coerces a bad read to 250, so this looked impossible; it is not. The relative
-    # sysfs paths (temp=battery/temp, battStatus=battery/status) all resolve against the daemon's
-    # CWD, and when that goes the reads fail together and the function's own output is lost with
-    # them. Device-proven on a Mi A3: `accd shutdown` logged with level=, temp= AND status= all
-    # empty, config perfectly sane (shutdown_temp 55) and the battery at 31C, immediately
-    # followed by ShutdownActivity in logcat. It powered the phone off four times.
-    #
-    # Now: read once, demand a plain number, and only compare a value we have. No reading means
-    # no shutdown -- max_temp still pauses charging, so nothing is left unprotected. A thermal
-    # cutoff that cannot read the thermometer must do nothing, never fire.
-    _tn=$(temp_now 2>/dev/null) || _tn=
-    case "${_tn:-x}" in ''|*[!0-9-]*) _tn=;; esac
-    [ -z "$_tn" ] || [ "$_tn" -lt $(( _st * 10 )) ] || shutdown
+    # shutdown if battery temp >= shutdown_temp (shared with the firmware-limit branch)
+    _temp_shutdown_check
 
     [ -z "${cooldownCurrent-}" ] || {
       # N1: coerce cooldown(=[0])/resume(=[2]) temps so a corrupt/hand-edited value can't abort
@@ -748,7 +788,7 @@ if ! $_INIT; then
        # set charging voltage control files, as needed
       if [ -n "${maxChargingVoltage[0]-}" ] \
         && { [ -z "${maxChargingVoltage[1]-}" ] || [[ "${maxChargingVoltage[1]-}" = -* ]]; } \
-        && grep -q / $TMPDIR/ch-volt-ctrl-files 2>/dev/null
+        && [ -f $TMPDIR/.mcv-read ]
       then
         set_ch_volt ${maxChargingVoltage[0]} || :
         . $execDir/write-config.sh
@@ -1052,7 +1092,17 @@ if ! $_INIT; then
       # contract re-latches on the very next loop, so nothing here can open a re-kick against one.
       _pgNow=$(date +%s 2>/dev/null || echo 0)
       case ${_pgLast:-} in ''|*[!0-9]*) _pgLast=$_pgNow;; esac
-      if [ "$_pgNow" -gt 0 ] 2>/dev/null && present 2>/dev/null          && [ $(( _pgNow - _pgLast )) -gt ${plugGapMax:-60} ] 2>/dev/null; then
+      # ...but a SWEEP is an explained gap, not an unknown one. cycle_switches_off budgets 120s and
+      # its honest ceiling is ~164s, so every ordinary discovery pass tripped the test above and
+      # dropped markers on a plug that never moved. .hvkicked and .hvrecover are the re-kick budget;
+      # clearing them mid-plug lets an APSD fire against a live QC/PD contract, which is the 9V ->
+      # 4.4V drop this release exists to end. cycle_switches stamps $TMPDIR/.sw-at on entry, so a
+      # sweep that STARTED inside this gap accounts for it. Read then removed, so one sweep excuses
+      # one gap and a real cable event in the next window is still caught.
+      _pgSw=$(cat $TMPDIR/.sw-at 2>/dev/null || echo 0)
+      case ${_pgSw:-x} in ''|*[!0-9]*) _pgSw=0;; esac
+      rm -f $TMPDIR/.sw-at 2>/dev/null || :
+      if [ "$_pgNow" -gt 0 ] 2>/dev/null && present 2>/dev/null          && [ "$_pgSw" -lt "$_pgLast" ] 2>/dev/null          && [ $(( _pgNow - _pgLast )) -gt ${plugGapMax:-60} ] 2>/dev/null; then
         rm -f $TMPDIR/.hvcontract $TMPDIR/.hvpeak $TMPDIR/.hvkicked $TMPDIR/.hvaim               $TMPDIR/.hvfloor $TMPDIR/.hvlost $TMPDIR/.hvrecover $TMPDIR/.hvzero 2>/dev/null || :
       fi
       _pgLast=$_pgNow
@@ -1157,7 +1207,18 @@ if ! $_INIT; then
         #     enable_charging` sweep that rc22 removed from the native path precisely because it froze
         #     a Pixel 6a for 90s. The input reading alone answers the question: if under 50 mA is
         #     crossing the port, nothing is charging from the wall, whatever the pack is doing.
+        #   ! _iclHeld         - a FIRMWARE thermal hold produces the same signature as the two
+        #     exclusions above and is caught by neither. chDisabledByAcc is false (ACC did not
+        #     pause), and _ge_pause_cap is false whenever the hold lands BELOW the pause level,
+        #     which is where a thermal hold usually lands. The input goes to ~0 with present and
+        #     online both still 1, so after 5 passes this branch spent the once-per-plug
+        #     .hvrecover budget and wrote 5000000 into the very votes the firmware had zeroed --
+        #     leaving a genuine collapse later on that same plug unrepairable. _iclHeld is the
+        #     hold read off the vote, which is what native_icl_hold already decides every pass,
+        #     so this reuses that verdict rather than inventing a second thermal detector. Unset
+        #     on a non-native phone, where ${_iclHeld:-0} is 0 and nothing here changes.
         if [ ! -f $TMPDIR/.hvrecover ] && ! ${chDisabledByAcc:-false} \
+           && [ "${_iclHeld:-0}" != 1 ] \
            && ! _ge_pause_cap 2>/dev/null && online 2>/dev/null; then
           # Whichever node this kernel has, in mA.
           _hvin=$(_iin_ma) || _hvin=
@@ -1354,6 +1415,7 @@ if ! $_INIT; then
       # current-cap pause and then spend up to 17s (sleep 2 + a 15s poll) with nothing enforced.
       if { { $freshPlug && ${sawUnplug:-false}; } || ${_aimStall:-false}; } \
          && ! $chDisabledByAcc && _lt_pause_cap \
+         && [ "${_iclHeld:-0}" != 1 ] \
          && [ ! -f $TMPDIR/.hvcontract ] && [ ! -f $dataDir/.rekick-off ]; then
         sawUnplug=false
         # Once per plug, whichever entry got here. Cleared beside .hvcontract on unplug.
@@ -1448,6 +1510,10 @@ if ! $_INIT; then
         # loop. The firmware limit keeps holding regardless, but the daemon must
         # not fall over.
         _srccfg
+        # rc24: the thermal cutoff, which this branch has never reached (see _temp_shutdown_check).
+        # Placed straight after _srccfg so it runs on a config we have just re-read, and before any
+        # of the firmware-limit work below -- a pack over shutdown_temp must not wait on it.
+        _temp_shutdown_check
         # rc21: say so when the switch shown in settings is NOT what holds the limit. This branch
         # `continue`s before the generic switch logic, so on a phone with a firmware limit the
         # configured chargingSwitch is never written -- yet AccA still displays it. A Pixel 4a 5G
@@ -1487,10 +1553,8 @@ if ! $_INIT; then
         # at 1.9A against a 500mA cap and wrote no node. A Mi A3, whose switch is not native,
         # applies the same cap correctly -- so this is the branch, not the hardware.
         #
-        # Gated on a live charging supply for the same reason the discovery script states in its own
-        # header: it reads each node's DEFAULT, and off-charge most of them read zero, which would
-        # record a garbage default and cap the phone at it forever.
-        if present 2>/dev/null && [ "$(cat $battStatus 2>/dev/null)" = Charging ]; then
+        # native_icl_restore owns the resume verdict; Tensor status can remain Not charging briefly.
+        if present 2>/dev/null && [ "${_iclHeld:-0}" != 1 ]; then
           if [ -f $TMPDIR/.mcc-read ]; then
             if [ -n "${maxChargingCurrent[0]-}" ]               && { [ -z "${maxChargingCurrent[1]-}" ] || [[ "${maxChargingCurrent[1]-}" = -* ]]; }               && grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null
             then
@@ -1512,7 +1576,21 @@ if ! $_INIT; then
           # is_charging() pairs set_ch_curr with apply_on_plug for exactly this reason; the native
           # path needs the same pair.
           apply_on_plug || :
-          if [ -n "${maxChargingVoltage[0]-}" ]             && { [ -z "${maxChargingVoltage[1]-}" ] || [[ "${maxChargingVoltage[1]-}" = -* ]]; }             && grep -q / $TMPDIR/ch-volt-ctrl-files 2>/dev/null
+        fi
+        # SAME GATE AS THE CURRENT PATH ABOVE, for the same measured reason.
+        #
+        # This branch read battery/status directly while the current branch beside it had already
+        # moved to _iclHeld. That split is not defensible on the hardware this file documents at
+        # 2626-2635: bluejay reads "Not charging" for a sample at a time while charging perfectly
+        # normally, and a firmware hold can keep it there for a full 96s window. A bare
+        # maxChargingVoltage set during either stretch never expanded to node entries, so the cap
+        # was displayed by acc -i and AccA and enforced by nothing - the exact defect that was
+        # fixed for mcc and left standing for mcv.
+        #
+        # native_icl_restore owns the resume verdict; _iclHeld is the firmware's own pause
+        # signature read off the vote, and it does not flap the way status does.
+        if present 2>/dev/null && [ "${_iclHeld:-0}" != 1 ]; then
+          if [ -n "${maxChargingVoltage[0]-}" ]             && { [ -z "${maxChargingVoltage[1]-}" ] || [[ "${maxChargingVoltage[1]-}" = -* ]]; }             && [ -f $TMPDIR/.mcv-read ]
           then
             set_ch_volt ${maxChargingVoltage[0]} || :
             . $execDir/write-config.sh
@@ -1528,7 +1606,7 @@ if ! $_INIT; then
         # the daemon spends most of its life here not charging. Same reasoning the voltage release
         # carries in is_charging().
         [ -n "${maxChargingCurrent[0]-}" ] || [ -f $TMPDIR/.mcc-settling ] || (_accdRelease=true; set_ch_curr - || :)
-        [ -n "${maxChargingVoltage[0]-}" ] || (set_ch_volt - || :)
+        [ -n "${maxChargingVoltage[0]-}" ] || (_accdRelease=true; set_ch_volt - || :)
         # Cool-down cycling is the one feature lost to this branch that is NOT being restored here.
         # It works by repeatedly pausing and resuming charging to shed heat, and on a phone whose
         # limit is held by firmware that means fighting the firmware every cycle -- the daemon
@@ -1937,12 +2015,21 @@ if ! $_INIT; then
         # Cheap: set_ch_curr short-circuits on its marker once the defaults are restored.
         [ -n "${maxChargingCurrent[0]-}" ] || [ -f $TMPDIR/.mcc-settling ] || (_accdRelease=true; set_ch_curr - || :)
 
-        # Same story for a cleared voltage limit. The charging branch releases voltage via
-        # set_ch_volt above, but the daemon spends its resting life in THIS not-charging branch,
-        # so a user who disabled a voltage cap while it held kept the old value on the nodes until
-        # reboot - identical to the current-limit report. Release it here too when the config is
-        # clean; set_ch_volt is a no-op once the defaults are back.
-        [ -n "${maxChargingVoltage[0]-}" ] || (set_ch_volt - || :)
+        # Voltage nodes can drift back to their firmware defaults while battery/status says
+        # Discharging. That is ordinary on the Mi A3 even while real input current is flowing, and
+        # the old one-sided branch only RELEASED a cleared cap here; it never re-applied a live one.
+        # Enforce resolved entries in either charging verdict. Bare intent waits for completed
+        # discovery, then its first expansion is persisted exactly once.
+        if [ -n "${maxChargingVoltage[0]-}" ]; then
+          _mcvBare=false
+          { [ -z "${maxChargingVoltage[1]-}" ] || [[ "${maxChargingVoltage[1]-}" = -* ]]; } && _mcvBare=true
+          if ! $_mcvBare || [ -f $TMPDIR/.mcv-read ]; then
+            set_ch_volt ${maxChargingVoltage[0]} || :
+            ! $_mcvBare || . $execDir/write-config.sh
+          fi
+        else
+          _accdRelease=true; set_ch_volt - || :
+        fi
 
         # rc6 (L1 self-heal): some devices report current_now with an unreliable / rate-dependent
         # sign (e.g. Mi A3: charging reads NEGATIVE at full rate but POSITIVE when tapered near the
@@ -2256,7 +2343,68 @@ if ! $_INIT; then
     # value can never be written raw to charge_stop_level / charge_start_level.
     case $stop in ''|*[!0-9]*) stop=80;; esac; [ "$stop" -le 100 ] || stop=100
     case $start in ''|*[!0-9]*) start=75;; esac; [ "$start" -le 100 ] || start=100
-    t=$(cat $temp 2>/dev/null || echo 0)
+    # A MILLIVOLT PAUSE IS NOT A PERCENTAGE, AND CLAMPING IT TO 100 DISABLES THE LIMIT.
+    #
+    # capacity[3] carries two domains: 0-100 is a percentage, 3001-5000 is millivolts (see
+    # _ge_pause_cap, which handles both). The clamp above only knows the first, so a config like
+    # capacity=(5 101 4100 4200 false) arrived here as stop=4200, failed `-le 100`, and was
+    # rewritten to 100 -- charge_stop_level=100 is not a cap at all, it is the firmware's "never
+    # pause". A user who asked to stop at 4.2V got no limit whatsoever, silently, on every phone
+    # that uses the firmware path.
+    #
+    # The percentage nodes cannot express a voltage, so do not try to convert one. Drive them off
+    # the verdict instead: _ge_pause_cap already measures the millivolt condition against volt_now,
+    # and the _ntHot block below already knows how to hold at the present level. Reuse both -- when
+    # the pause is in millivolts and the pack is at or above it, hold; otherwise leave the firmware
+    # unrestricted and let the next loop re-decide, which is exactly how the thermal clamp behaves.
+    _nvPause=false
+    case ${capacity[3]-} in
+      ''|*[!0-9]*) ;;
+      *) [ "${capacity[3]}" -gt 3000 ] 2>/dev/null && [ "${capacity[3]}" -le 5000 ] 2>/dev/null \
+           && _nvPause=true || : ;;
+    esac
+    # A VOLTAGE PAUSE NEEDS HYSTERESIS FOR THE SAME REASON A THERMAL ONE DOES, AND FOR A SHARPER
+    # REASON: THE ACT OF PAUSING MOVES THE THING BEING MEASURED.
+    #
+    # A pack under charge sits well above its resting voltage. Engage on `volt >= pause` alone and
+    # the sequence is: charge, cross the threshold, hold -> charging stops -> the voltage sags back
+    # under the threshold within seconds -> release -> charge again. Measured on bluejay from the
+    # write ledger, with pause=3886mV: the hold fired correctly at 4036mV (stop 48, start 47), and
+    # ELEVEN SECONDS later both nodes went back to 100 because the pack had sagged to 3864mV. That
+    # is not a limit, it is an oscillator, and every cycle re-triggers the google_charger state
+    # machine the idempotent write below exists to protect.
+    #
+    # capacity[2] is the resume level and is in the SAME millivolt domain, so the config already
+    # carries the release threshold. Latch between the two, exactly as _ntHot does for temperature:
+    # engage at pause, release only once the pack has fallen to resume. A resume at or above pause
+    # could never release, so degrade that to a fixed 100mV band rather than hold charge off forever.
+    if $_nvPause; then
+      _nvmv=$(volt_now 2>/dev/null) || _nvmv=
+      _nvres=${capacity[2]-}
+      case ${_nvres:-x} in ''|*[!0-9]*) _nvres=;; esac
+      { [ -n "$_nvres" ] && [ "$_nvres" -gt 3000 ] 2>/dev/null && [ "$_nvres" -lt "${capacity[3]}" ] 2>/dev/null; } \
+        || _nvres=$(( ${capacity[3]} - 100 ))
+      case ${_nvmv:-x} in
+        ''|*[!0-9]*) : ;;
+        *)
+          if [ "$_nvmv" -ge "${capacity[3]}" ] 2>/dev/null; then _nvHeld=1
+          elif [ "$_nvmv" -le "$_nvres" ] 2>/dev/null; then _nvHeld=0
+          fi
+        ;;
+      esac
+    else
+      _nvHeld=0
+    fi
+    # A FAILED TEMPERATURE READ IS NOT A COLD PACK.
+    #
+    # This coerced an unreadable node to 0, which is 0.0C, which is at or below every possible
+    # resume_temp -- so one sysfs blip anywhere in the cooldown band cleared _ntHot and resumed
+    # charging on a pack that was still hot. The generic path never had this hole: it reads through
+    # temp_now(), whose fallback is 250 (fail-safe HIGH, forces a pause, never a false release).
+    # Here the safe direction is to change NOTHING: hold the latch and wait for a trusted reading.
+    t=
+    { read -r t < "${temp:-/nonexistent}"; } 2>/dev/null || t=
+    case "${t:-x}" in ''|*[!0-9-]*) t=;; esac
     # rc23: HYSTERESIS. Engage at max_temp, then HOLD until the pack has cooled to resume_temp.
     #
     # This tested max_temp on both edges, so the hold lifted the moment the pack fell one tenth of a
@@ -2277,12 +2425,24 @@ if ! $_INIT; then
     # A resume_temp at or above max_temp could never release. Degrade to the old single-threshold
     # behaviour rather than hold the charge off forever on a mis-edited config.
     [ "$_rt" -lt "$_mt" ] 2>/dev/null || _rt=$_mt
-    if [ "$t" -ge "$_mt" ] 2>/dev/null; then
+    if [ -z "$t" ]; then
+      : # unreadable: hold the latch where it is, neither engage nor release
+    elif [ "$t" -ge "$_mt" ] 2>/dev/null; then
       _ntHot=1
     elif [ "$t" -le "$_rt" ] 2>/dev/null; then
       _ntHot=0
     fi
-    if [ "${_ntHot:-0}" = 1 ] 2>/dev/null; then
+    # HB: both latches must survive a daemon restart. They are plain shell variables, so a restart
+    # re-initialised them to 0 -- and a restart while the pack was still in the cooldown band, or
+    # while a millivolt hold was in force, lifted the firmware clamp until the threshold was
+    # crossed again. _iclSave already solves exactly this by persisting to tmpfs; do the same.
+    # tmpfs is wiped on reboot, which is correct: a fresh boot re-derives both from a live reading.
+    printf '%s' "${_ntHot:-0}" > $TMPDIR/.nthot 2>/dev/null || :
+    printf '%s' "${_nvHeld:-0}" > $TMPDIR/.nvheld 2>/dev/null || :
+    # A millivolt pause that has been REACHED holds exactly the way a thermal one does: clamp the
+    # firmware to the present level so it stops, and let the next loop lift it when volt_now falls
+    # back. _ge_pause_cap is the measurement; the block below is the mechanism.
+    if [ "${_ntHot:-0}" = 1 ] 2>/dev/null || { $_nvPause && [ "${_nvHeld:-0}" = 1 ]; }; then
       # rc22: a thermal pause has to be BELOW the current level to be a pause at all. The firmware
       # charges until level >= charge_stop_level, so clamping stop to start only holds when the pack
       # already sits above start -- and below that it does nothing whatsoever. Measured on a Pixel 6a
@@ -2470,7 +2630,24 @@ if ! $_INIT; then
     [ -n "$nvb_node" ] || { nvb_node=${NVB_NODE:-/sys/class/power_supply/usb/input_current_max}; nvb_cut=0; }
     [ -f "$nvb_node" ] || return 0
     cap=$(batt_cap) || return 0
-    if [ "$cap" -le $(( stop + 1 )) ] || ! online; then
+    # AN INPUT CUT IS NOT AN UNPLUG, AND online CANNOT TELL THEM APART.
+    #
+    # The unplug test below used `! online` unconditionally. The cut this function applies is, by
+    # preference, one of input_suspend / charge_disable / batt_slate_mode / op_disable_charge -- and
+    # every one of those MASKS */online to 0 while the cable is still in. So the moment the backstop
+    # cut, the next loop read `! online` as "the charger went away", restored the node, and charging
+    # resumed. The one mechanism standing between a Tensor that ignores charge_stop_level and an
+    # overcharge switched itself off one loop after engaging.
+    #
+    # present() is the right primitive here for exactly the reason it is elsewhere in this file: an
+    # input-cut switch zeroes online while present stays 1. Only consult it while OUR cut is in
+    # force; with no cut applied, online is still the more responsive signal and is left alone.
+    if [ -f $TMPDIR/.nvb-on ] && [ "${nvb_cut:-0}" = 1 ]; then
+      _nvbGone=false; present 2>/dev/null || _nvbGone=true
+    else
+      _nvbGone=false; online 2>/dev/null || _nvbGone=true
+    fi
+    if [ "$cap" -le $(( stop + 1 )) ] || $_nvbGone; then
       if [ -f $TMPDIR/.nvb-on ]; then
         chmod 0644 "$nvb_node" 2>/dev/null || :
         cat $TMPDIR/.nvb-restore > "$nvb_node" 2>/dev/null || :
@@ -2579,6 +2756,26 @@ if ! $_INIT; then
     # raised limit: sync_native_limit runs unconditionally on the line BEFORE native_unlatch every
     # loop, so a config change is already applied by the time this is reached.
     ! _temp_hold || return 0
+    # ...AND THE HOLD THIS PULSE WOULD BREAK IS NOT _temp_hold's. The guard above asks a LIVE
+    # question -- is the pack at or above max_temp right now -- while the thing it is protecting,
+    # sync_native_limit's thermal clamp, is LATCHED: _ntHot sets at max_temp and clears only once
+    # the pack has cooled to resume_temp. Through that whole band _temp_hold is false, so this
+    # returned early on none of it: the pulse wrote charge_stop_level=100, slept a full loopDelay
+    # with no limit at all, and sync_native_limit put the clamp back on the next line. _le_resume_cap
+    # is true on every loop while the level sits under resume, so it repeated for the entire cooldown.
+    # That is the same ~10s unrestricted window the note above says must never happen, aimed at the
+    # wrong signal. Ask the latch itself; sync_native_limit runs on the line BEFORE this every loop,
+    # so _ntHot is current, and it is 0 on any phone that never took the thermal path.
+    [ "${_ntHot:-0}" != 1 ] || return 0
+    # ...AND THE MILLIVOLT LATCH, for exactly the same reason.
+    #
+    # The guard above was added for _ntHot and stopped there, which left the voltage latch with the
+    # identical hole: during an _nvHeld hold this still pulsed charge_stop_level and
+    # charge_start_level to 100 and slept a loopDelay with no limit, and sync_native_limit put the
+    # clamp back on the next pass. Caught on bluejay from the write ledger during a live 9V run --
+    # seven "charge_start_level <- 100 (was 34)" entries inside forty seconds while a millivolt
+    # pause was in force. Two latches, one rule: if either says hold, this must not pulse.
+    [ "${_nvHeld:-0}" != 1 ] || return 0
     if { $freshPlugOnline && _lt_pause_cap; } || _le_resume_cap; then
       [ "$(read_status)" = Charging ] && return 0 || :
       # rc(6.4-rc2): stop=100 ALONE re-arms the Tensor FET only SLOWLY (1-3 min via the
@@ -2805,6 +3002,7 @@ if ! $_INIT; then
     # away the only fallback, on a file that was fine.
     if cfg_parses $dataDir/.config-good; then
       _srcsafe $dataDir/.config-good
+      _cfgFallback=1   # running on the fallback: write-config must not persist it
     else
       rm -f $dataDir/.config-good 2>/dev/null || :   # poisoned: never trust it again
     fi
@@ -2853,6 +3051,7 @@ if ! $_INIT; then
     # caller's positional params are untouched.
     if cfg_parses $config; then
       _srcsafe $config
+      _cfgFallback=0   # the real config is loaded again; persisting is safe
       # The config just replaced capacity[], so any pause_now override from the previous pass is
       # gone and the names that shadow it for write-config.sh must go with it -- otherwise the
       # first pass's levels would be republished forever.
@@ -2873,9 +3072,14 @@ if ! $_INIT; then
           # Keyed on the path rather than on -f: the rule is that a file in tmpfs cannot be a persistent
           # fallback, which covers the two daemon temporaries as well. A user running accd on their own
           # persistent config still caches it, as before.
+          # Only the CANONICAL config may become the fallback. The old test excluded $TMPDIR,
+          # which stops the two daemon temporaries and `acc -f`, but any other persistent path
+          # still qualified -- including one carrying the shipped defaults. That is how
+          # .config-good came to hold capacity=(5 101 70 75 false) on a phone whose user had
+          # set 80: the snapshot meant to protect the config had been taken FROM the defaults,
+          # so the safety net restored a setting the user never chose.
           case $config in
-            "$TMPDIR"/*) ;;
-            *)
+            "$dataDir"/config.txt)
               if [ "${capacity[*]}" != "${_cfggood-}" ]; then
                 cat $config > $dataDir/.config-good 2>/dev/null || :
                 _cfggood="${capacity[*]}"
@@ -3224,7 +3428,12 @@ if ! $_INIT; then
   mtReached=false
   # native thermal hold latch. Deliberately initialised HERE, outside the loop: the reset next to
   # `xIdle=false` runs on every charging pass, and a latch cleared every pass is not a latch.
-  _ntHot=0
+  # Restored from tmpfs, not assumed 0: a restart mid-hold must not lift the firmware clamp.
+  _ntHot=$(cat $TMPDIR/.nthot 2>/dev/null || echo 0)
+  case ${_ntHot:-x} in ''|*[!0-9]*) _ntHot=0;; esac
+  # native millivolt-pause latch, same reasoning and the same scope as _ntHot above.
+  _nvHeld=$(cat $TMPDIR/.nvheld 2>/dev/null || echo 0)
+  case ${_nvHeld:-x} in ''|*[!0-9]*) _nvHeld=0;; esac
   resetBattStatsOnPlug=false
   resetBattStatsOnUnplug=false
   restrictCurr=false
@@ -3250,12 +3459,9 @@ if ! $_INIT; then
   # verbose
   [ -z "${LINENO-}" ] || export PS4='$LINENO: '
   echo "###$(date)###" >> $log
-  # The high-voltage contract latch is a statement about the plug THIS daemon run has observed.
-  # tmpfs survives `acca -D stop`, so without this a latch set on yesterday's 9V charger is still
-  # present after the user stops ACC, unplugs, and plugs into a stalled port - and every repair for
-  # the whole session is then refused, citing a contract that is not attached. Clear it at start
-  # and let the loop re-establish it from what is actually there.
-  rm -f $TMPDIR/.hvcontract 2>/dev/null || :
+  # Per-plug state cannot survive a daemon stop; the first loop re-latches a live HV contract.
+  rm -f $TMPDIR/.hvcontract $TMPDIR/.hvpeak $TMPDIR/.hvkicked $TMPDIR/.hvaim \
+    $TMPDIR/.hvfloor $TMPDIR/.hvlost $TMPDIR/.hvrecover $TMPDIR/.hvzero 2>/dev/null || :
   sawUnplug=false
 
   exec >> $log 2>&1
@@ -3355,6 +3561,33 @@ if ! $_INIT; then
   # the FIRST charge after every reboot ran with the guard active and skipped every node that
   # actually throttles: the cap was configured, displayed as active, and enforced nowhere. The
   # config is the durable record of intent; the marker is only its runtime shadow, so rebuild it.
+  # Replace stale Tensor power_supply mirrors immediately on upgrade/restart. A live Pixel 6a
+  # accepted those writes, reverted every node, and kept drawing 1.4 A. MSC_FCC is the charger's
+  # durable min-election: ACC gets one DEBUGFS ballot and Android retains its independent thermal
+  # ballot, so neither can weaken the other. Reducing an old expanded array to its requested mA
+  # makes the normal set_ch_curr path rebuild and persist the synthetic entry on the next tick.
+  if command -v msc_fcc_init >/dev/null 2>&1 && msc_fcc_init; then
+    echo 'gvotable/MSC_FCC::v000::-1' > $TMPDIR/ch-curr-ctrl-files
+    touch $TMPDIR/.mcc-read
+    case "${maxChargingCurrent[1]-}" in
+      gvotable/MSC_FCC::*) ;;
+      *)
+        if [ -n "${maxChargingCurrent[0]-}" ]; then
+          _mcm=${maxChargingCurrent[0]}
+          maxChargingCurrent=($_mcm)
+          # Persist during init. Otherwise the first loop re-sources the old expanded mirror list
+          # from disk before it can reach the ordinary expansion branch, undoing the migration.
+          set_ch_curr "$_mcm" && . $execDir/write-config.sh || :
+          unset _mcm
+        fi
+        ;;
+    esac
+    if [ -z "${maxChargingCurrent[0]-}" ] \
+      && [ -f "${dataDir:-/data/adb/vr25/acc-data}/.msc-fcc-debugfs-vote" ]; then
+      msc_fcc_vote - || :
+    fi
+  fi
+
   [ -n "${maxChargingCurrent[0]-}" ] && { touch $TMPDIR/.mcc-custom 2>/dev/null || :; }
 
   if [ -z "${maxChargingCurrent[0]-}" ] && [ -f $TMPDIR/ch-curr-ctrl-files ]; then
@@ -3454,7 +3687,7 @@ if ! $_INIT; then
   # lock the scanner out forever (the audit bug). The attempt-count, give-up flag and
   # blacklist are intentionally NOT cleared here so reruns stay bounded across the
   # scanner's own daemon restart; they reset when charging stops (see is_charging).
-  rm $TMPDIR/.testingsw $TMPDIR/.sw-strict-done $TMPDIR/.breach \
+  rm $TMPDIR/.testingsw $TMPDIR/.sw-at $TMPDIR/.sw-strict-done $TMPDIR/.breach \
      $TMPDIR/.autolock-tried $TMPDIR/.lockfail-count \
      $TMPDIR/.statusheal $TMPDIR/.statusheal-gaveup \
      $TMPDIR/.resumewarned 2>/dev/null || :   # rc6 (H5)/rc8/rc15: clear self-heal + resume-warn markers on (re)start (NOT $dataDir/.user-locked or the $dataDir/.warn-* rate-limit stamps, which persist by design)
@@ -3535,7 +3768,7 @@ else
     # auto-locked it on a Mi A3 after a clean install, giving a "switch" that cannot hold.
     sw_excluded() {
       case "$1" in
-        *step_charging*|*restricted_charging*|*cool_mode*|*cool_down*|*system_temp*level*|*temp_cool*|*hmt_ta_charge*) return 0;;
+        *charging_policy*|*step_charging*|*restricted_charging*|*cool_mode*|*cool_down*|*system_temp*level*|*temp_cool*|*hmt_ta_charge*) return 0;;
         *_now) return 0;;
       esac
       return 1
@@ -3751,12 +3984,30 @@ else
   # The CANONICAL config path, not $config. By this point $config can be the daemon's own
   # stripped tmpfs copy from a previous exit, which predates the cap the user just set -- so
   # the guard read an empty value and stood down exactly when it was needed.
-  _vcapcfg=$(sed -n 's/^maxChargingVoltage=(//p' ${config:-} 2>/dev/null | cut -d' ' -f1 | tr -d ')')
+  _vcapline=$(sed -n 's/^maxChargingVoltage=(//p' ${config:-} 2>/dev/null | sed -n '1p')
   # $config can be the daemon's own stripped tmpfs copy from a previous exit, which predates the
   # cap the user just set -- so fall through to the canonical file rather than read an empty
   # value and stand down exactly when the guard is needed. Trying $config first keeps this
   # drivable from a fixture.
-  [ -n "${_vcapcfg:-}" ] || _vcapcfg=$(sed -n 's/^maxChargingVoltage=(//p' /data/adb/vr25/acc-data/config.txt 2>/dev/null | cut -d' ' -f1 | tr -d ')')
+  [ -n "${_vcapline:-}" ] || _vcapline=$(sed -n 's/^maxChargingVoltage=(//p' /data/adb/vr25/acc-data/config.txt 2>/dev/null | sed -n '1p')
+  _vcapline=${_vcapline%)}
+  _vcapcfg=${_vcapline%% *}
+  # Cold boot wipes tmpfs. Rebuild known originals from the persisted capped entries instead of
+  # reading the capped nodes back as their own defaults.
+  if [ -n "${_vcapcfg:-}" ] && [ ! -s $TMPDIR/ch-volt-ctrl-files ]; then
+    : > $TMPDIR/ch-volt-ctrl-files.config
+    for _vce in $_vcapline; do
+      case "$_vce" in *::*::*) ;; *) continue;; esac
+      _vcf=${_vce%%::*}; _vcd=${_vce##*::}
+      case "$_vcf" in */*) ;; *) continue;; esac
+      case "$_vcd" in ''|*[!0-9]*) continue;; esac
+      printf '%s::v%s::%s\n' "$_vcf" "${_vcd#????}" "$_vcd" >> $TMPDIR/ch-volt-ctrl-files.config
+    done
+    grep -q / $TMPDIR/ch-volt-ctrl-files.config 2>/dev/null \
+      && mv -f $TMPDIR/ch-volt-ctrl-files.config $TMPDIR/ch-volt-ctrl-files \
+      || rm -f $TMPDIR/ch-volt-ctrl-files.config 2>/dev/null || :
+    unset _vce _vcf _vcd
+  fi
   if [ -n "${_vcapcfg:-}" ] && [ -f $TMPDIR/ch-volt-ctrl-files ]; then
     _wlog "volt ctrl-files: keeping the existing defaults, a ${_vcapcfg}mV cap is applied" 2>/dev/null || :
   else
@@ -3770,6 +4021,67 @@ else
       echo ${file}::$(sed -n 's/^..../v/p' $file)::$(cat $file) \
         >> $TMPDIR/ch-volt-ctrl-files_
     done
+  # Qualcomm's power_supply voltage_max nodes are firmware-owned mirrors: writes verify and then
+  # snap back to 4.4V within seconds. The FV votable is the durable control. It is a paired
+  # transaction: set force_val first, then enable force_active; restoring writes both saved values.
+  # Prefer it exclusively when present so accd does not churn the transient mirror nodes forever.
+  _fvb=/sys/kernel/debug/pmic-votable/FV
+  # .fv-nohold is set by set-ch-volt when an FV vote was accepted by the node but never held.
+  # Without this the next discovery would pick FV again, fail again, and drop the power_supply
+  # mirrors again - leaving a phone whose votable does not actually control voltage with no cap
+  # at all. tmpfs, so a reboot gives the votable one more chance.
+  if [ -f $_fvb/force_val ] && [ -f $_fvb/force_active ] && [ ! -f $TMPDIR/.fv-nohold ]; then
+    _fvv=$(cat $_fvb/force_val 2>/dev/null); _fva=$(cat $_fvb/force_active 2>/dev/null)
+    case "${_fvv:-x}:${_fva:-x}" in
+      *[!0-9:]*) : ;;
+      *)
+        : > $TMPDIR/ch-volt-ctrl-files_
+        # THE THIRD FIELD IS THE RESTORE TARGET, so it must never be read out of a votable that is
+        # currently forcing something. Found live on a Mi A3: discovery ran while a 4150mV cap was
+        # applied and recorded force_val::v000::4150000 and force_active::1::1 as the DEFAULTS, so
+        # every later release re-applied the cap. The phone sat at a 4.15V float at 34% with the
+        # config reading () and nothing on screen explaining it -- a stranded cap that healed only
+        # on reboot, and re-poisoned itself on the next discovery.
+        #
+        # force_active=1 means 'a force is in effect'; it is never a resting state, so 0 is always
+        # its correct restore target. force_val keeps its live value only when nothing is being
+        # forced, which preserves a genuine vendor default without ever latching a cap.
+        _fvdef=0
+        [ "${_fva:-0}" = 0 ] && _fvdef=$_fvv || :
+        printf '%s::v000::%s\n' "$_fvb/force_val" "${_fvdef:-0}" >> $TMPDIR/ch-volt-ctrl-files_
+        printf '%s::1::0\n' "$_fvb/force_active" >> $TMPDIR/ch-volt-ctrl-files_
+        # RELEASE WHAT WE ARE ABOUT TO STOP TRACKING.
+        #
+        # Going FV-exclusive drops the power_supply voltage_max mirrors out of the list, and the
+        # list IS the release path: `acc -s maxChargingVoltage=` walks it, so a cap already applied
+        # to a mirror becomes unreachable. It then sits on the hardware with the config reading (),
+        # which is the state that leaves a pack refusing to charge -- the Mi A3 found flat with
+        # voltage_max pinned is exactly this. Measured here: battery/voltage_max and
+        # main/voltage_max both held 4150000 against an empty config, and they did NOT snap back;
+        # a restore to 4400000 stuck just as firmly. The mirrors are durable on this hardware, so
+        # handing voltage to the votable without releasing them first strands the cap.
+        #
+        # .prev carries the highest default ever recorded per node (the monotonic rule below), so
+        # it is the only trustworthy restore value: the freshly-read one may BE the cap.
+        if [ -f $TMPDIR/ch-volt-ctrl-files.prev ]; then
+          while IFS= read -r _fvl; do
+            case "$_fvl" in ''|'#'*|*pmic-votable/FV/*) continue;; esac
+            _fvn=${_fvl%%::*}; _fvd=${_fvl##*::}
+            case "${_fvd:-x}" in ''|*[!0-9]*) continue;; esac
+            case "$_fvn" in /*) :;; *) _fvn=${PS:-/sys/class/power_supply}/$_fvn;; esac
+            [ -f "$_fvn" ] || continue
+            [ "$(cat "$_fvn" 2>/dev/null)" = "$_fvd" ] && continue
+            chmod 0644 "$_fvn" 2>/dev/null || :
+            echo "$_fvd" > "$_fvn" 2>/dev/null || :
+            command -v _wlog >/dev/null 2>&1 \
+              && _wlog "volt mirror released $_fvn <- $_fvd (FV votable now owns voltage)" || :
+          done < $TMPDIR/ch-volt-ctrl-files.prev
+          unset _fvl _fvn _fvd
+        fi
+      ;;
+    esac
+  fi
+  unset _fvb _fvv _fva _fvdef
   grep -q / $TMPDIR/ch-volt-ctrl-files_ || rm $TMPDIR/ch-volt-ctrl-files_
   # Same monotonic rule as the current side: a recorded default may never go DOWN. The window this
   # closes is the moment just after a clear, when the config already reads () but the nodes still
@@ -3789,6 +4101,10 @@ else
     awk '!seen[$0]++' $file | grep -Eiv 'parallel|::-|bq[0-9].*/current_max' > ${file%_}
     rm $file
   done
+  # Unlike a missing ch-volt-ctrl-files file, this marker unambiguously means voltage discovery is
+  # finished. CLI sets arriving before it retain bare intent; sets after it can honestly report
+  # unsupported hardware. Publish it only after the final filtered file has been moved into place.
+  touch $TMPDIR/.mcv-read
 
 
   # prepare default config help text and version code for oem-custom.sh and write-config.sh

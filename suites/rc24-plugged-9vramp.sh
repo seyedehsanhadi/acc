@@ -49,6 +49,7 @@ ORIG_CT=$(sed -n 's/^temperature=(//p' $CFG | tr -d ')' | awk '{print $1}')
 ORIG_MT=$(sed -n 's/^temperature=(//p' $CFG | tr -d ')' | awk '{print $2}')
 ORIG_RT=$(sed -n 's/^temperature=(//p' $CFG | tr -d ')' | awk '{print $3}')
 ORIG_ST=$(sed -n 's/^temperature=(//p' $CFG | tr -d ')' | awk '{print $4}')
+REL_CT=$ORIG_CT; REL_MT=$ORIG_MT; REL_RT=$ORIG_RT
 
 restore(){
   trap - EXIT INT TERM HUP
@@ -77,6 +78,12 @@ note "unplug current_now=$_sign0"
 echo "$_sign0" > $W/sign0
 [ "$ORIG_SC" = 5 ] && ok "will not write shutdown_capacity"
 [ "$ORIG_ST" = 55 ] && ok "will not write shutdown_temp"
+_tc0=$(( $(rd $PS/battery/temp) / 10 ))
+if [ $(( _tc0 + 6 )) -lt "$ORIG_ST" ] 2>/dev/null; then
+  REL_CT=$_tc0; REL_RT=$(( _tc0 + 3 )); REL_MT=$(( _tc0 + 6 ))
+  setk ct="$REL_CT" mt="$REL_MT" rt="$REL_RT"
+  note "pre-plug thermal release cool=$REL_CT max=$REL_MT resume=$REL_RT (original $ORIG_CT/$ORIG_MT/$ORIG_RT)"
+fi
 _w0=$(lines $WLOG)
 
 echo
@@ -201,8 +208,13 @@ while [ $_j -lt 5 ]; do
   echo "  therm t=$((_j*5+5))s st=$(rd $PS/battery/status) temp=$(rd $PS/battery/temp) iin=$(cd $PS; TMPDIR=$W/tmp; . $W/u.sh; _iin_ma 2>/dev/null)"
   _j=$((_j + 1))
 done
+setk mt="$REL_MT" rt="$REL_RT" ct="$REL_CT"
+_tw=0
+while [ $_tw -lt 60 ]; do
+  sleep 5; _tw=$((_tw+5))
+  { [ "$(rd $PS/usb/online)" = 1 ] || [ "$(rd $PS/battery/status)" = Charging ]; } && break
+done
 setk mt="$ORIG_MT" rt="$ORIG_RT" ct="$ORIG_CT"
-sleep 10
 _stn=$(sed -n 's/^temperature=(//p' $CFG | tr -d ')' | awk '{print $4}')
 [ "$_stn" = "$ORIG_ST" ] && ok "shutdown_temp still $ORIG_ST" || no "shutdown temp mutated"
 ok "temp restored maxT=$ORIG_MT"

@@ -41,7 +41,7 @@ BLOCK=$(sed -n '/^_csr()/,/^log "+===/p' "$AMPS" | sed '$d')
 OUT=$( ( PSY=$PSY
          log(){ printf '%s\n' "$*"; }
          eval "$BLOCK"
-         printf 'VARS imax=%s iin=%s ib=%s iinbad=%s src=%s\n' "$_imax" "$_iin" "$_ib" "${_iinbad:-0}" "$_src" ) 2>&1 )
+         printf 'VARS imax=%s iin=%s ib=%s iinbad=%s ibbad=%s ccc=%s src=%s\n' "$_imax" "$_iin" "$_ib" "${_iinbad:-0}" "${_ibbad:-0}" "${_ccc:-0}" "$_src" ) 2>&1 )
 printf '%s\n' "$OUT" | sed 's/^/    /'
 
 IMAX=$(printf '%s' "$OUT" | sed -n 's/.*VARS imax=\([0-9]*\).*/\1/p')
@@ -168,6 +168,33 @@ _r=$(_enum 'USB_HVDCP_3')
 [ "$_r" = "USB_HVDCP_3/1" ] && ok "a plain single-value node (the Mi A3's QC3) still works" || no "USB_HVDCP_3 resolved to [$_r]"
 _r=$(_enum 'Unknown [PD] PD_PPS')
 [ "$_r" = "PD/1" ] && ok "an active PD contract is a fast port" || no "PD-active resolved to [$_r]"
+
+# DCP and 5V PD/PPS are valid 5V contracts. Only HVDCP is evidence that a sub-6V bus fell back;
+# otherwise the report invents "DCP runs at 9V or more" on a protocol that does not.
+sed -n '/_cvn=/,/CONTRACT COLLAPSED/p' "$AMPS" | grep -q 'case "$_ptype" in \*HVDCP\*' \
+  && ok "the sub-6V collapse explanation is limited to HVDCP" \
+  || no "the report says every fast type (including DCP/5V PD) must run at 9V or more"
+
+# A speed sample taken while a tested switch is still latched describes the probe's temporary
+# recovery state, not the charger. Caught live on Pixel 6a: normal ~1.4A before/after replug, but the
+# pre-restore report saw 500mA and falsely blamed USB SDP / a weak cable.
+printf '%s\n' "$BLOCK" | grep -q 'POST-PROBE RECOVERY REQUIRED' \
+  && printf '%s\n' "$BLOCK" | grep -q 'elif \[ -n "${STUCKS:-}" \]' \
+  && ok "a latched test switch suppresses charger-speed/cable conclusions until recovery" \
+  || no "a post-probe latch can still be misreported as a weak cable or normal input cap"
+
+# Mi A3 produced a one-shot 8697mA battery reading against a 3000mA IC ceiling and a steady 898mA
+# input. The old report called Iin stale and explicitly told users to trust the impossible 33.6W
+# battery number. A hard IC-cap sanity check must classify that side of the sample instead.
+grep -q '_ibbad=1' "$AMPS" && grep -q 'BATTERY CURRENT SAMPLE IS STALE' "$AMPS" \
+  && ok "an above-IC-ceiling battery spike is rejected instead of trusted" \
+  || no "an impossible battery-current spike can still make AMPS blame valid input telemetry"
+case "$OUT" in *'ibbad=1'*)
+  printf '%s' "$OUT" | grep -q 'stale/implausible sample' \
+    && ! printf '%s' "$OUT" | grep -q 'trust the battery-side power' \
+    && ok "this live impossible battery sample is labelled stale and never recommended" \
+    || no "the live above-ceiling battery sample is still presented as trustworthy" ;;
+*) ok "this live sample is within the IC ceiling; the spike branch is covered structurally";; esac
 
 # ---- 4: wireless votes do not inflate a wired ceiling -----------------------------------------------
 grep -q 'dc|wireless) \[ "$_src" = "$_u" \] || continue' "$AMPS" \

@@ -44,6 +44,31 @@ printf '%s' "$_aac" | grep -q 'id:-acc' \
   && ok "the delegation uses \${id:-acc} (acca never sets id; a bare \${id} aborts under set -eu)" \
   || no "the delegation uses a bare \${id} - under set -eu that kills the front-end before write-config"
 
+grep -q '_BLRELEASE=1 apply_on_boot_ default' "$execDir/set-ch-volt.sh" \
+  && ok "voltage clear bypasses the probe blacklist" \
+  || no "a blacklisted voltage node cannot be released"
+
+_scc=$(sed 's/^[[:space:]]*#.*//' "$execDir/set-ch-curr.sh")
+[ "$(printf '%s' "$_scc" | grep -c '_BLRELEASE=1 apply_on_plug')" -ge 2 ] \
+  && ok "both current-clear paths bypass the probe blacklist" \
+  || no "a current-clear path can strand a blacklisted cap"
+
+grep -q 'mcv-settling' "$execDir/set-prop.sh" && grep -q 'mcv-settling' "$execDir/set-ch-volt.sh" \
+  && ok "voltage changes block stale daemon writes until config publish" \
+  || no "voltage changes can race a stale daemon write"
+
+grep -q '! \$initDaemon ||.*daemon_ctrl stop' "$execDir/set-prop.sh" \
+  && ok "resolved voltage changes serialize without a disruptive daemon stop" \
+  || no "the daemon can still write voltage nodes during a CLI change"
+
+grep -q '_accdRelease' "$execDir/set-ch-volt.sh" \
+  && ok "a stale daemon voltage clear checks the published config" \
+  || no "a stale daemon can clear a newly published voltage cap"
+
+grep -q '_accdRelease=true; set_ch_volt -' "$execDir/accd.sh" \
+  && ok "daemon voltage releases are tagged" \
+  || no "set_ch_volt cannot distinguish daemon release from user clear"
+
 # ---- 2: behaviour, on the real phone --------------------------------------------------------------
 [ "$(id -u 2>/dev/null)" = 0 ] || { sk "not root; skipping the live round trip"; fin; }
 PS=/sys/class/power_supply

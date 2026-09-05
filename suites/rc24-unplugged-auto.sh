@@ -5,6 +5,14 @@ D=/data/adb/vr25/acc-data
 A=/dev/.vr25/acc
 OUT=/data/local/tmp/UNPLUGGED.log
 
+# Supervise with ash; old Android mksh can sleep forever after losing a child-exit notification.
+if [ -z "${_RC24_ASH:-}" ]; then
+  for _bb in /data/adb/magisk/busybox /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox; do
+    [ -x "$_bb" ] || continue
+    _RC24_ASH=1 exec "$_bb" ash "$0" "$@"
+  done
+fi
+
 # SINGLE INSTANCE. Every start truncates $OUT, so two rounds running at once overwrite each
 # other's log and interleave their suite runs -- which looks exactly like a stall: no suite
 # executing, a log that stopped advancing, and several round processes alive. Refuse to start
@@ -45,6 +53,7 @@ say "strays cleared"
 hr "1  UNIT SUITES (all of suites/accd)"
 cd /data/local/tmp/suites/accd || { say "suites not staged"; exit 1; }
 SUITEOUT=/data/local/tmp/.suite-out.$$
+UNIT_TIMEOUT=${UNIT_TIMEOUT:-600}
 P=0; F=0; FL=""
 for f in t*.sh; do
   # Read the suite through a FILE, never a command substitution. `out=$(sh "$f" 2>&1)` builds a
@@ -53,12 +62,29 @@ for f in t*.sh; do
   # before it clears the loop's flag and the orphan holds the pipe open forever. The runner then
   # sits in pipe_read with no children and a log that never advances, which reads as a hang and
   # was diagnosed as one twice. A file has no writer to wait on.
-  sh "$f" >"$SUITEOUT" 2>&1
+  # Poll a result file instead of waiting for a child. Old mksh can lose SIGCHLD after a suite
+  # starts a detached daemon, leaving the runner in sigsuspend with no child left to reap.
+  _rcf=/data/local/tmp/.suite-rc.$$
+  rm -f "$_rcf" 2>/dev/null || :
+  ( exec 9>&-; sh "./$f"; _x=$?; echo $_x > "$_rcf" ) >"$SUITEOUT" 2>&1 &
+  _sp=$!; _deadline=$(( $(date +%s) + UNIT_TIMEOUT )); _src=
+  while [ ! -s "$_rcf" ]; do
+    if [ "$(date +%s)" -ge "$_deadline" ]; then
+      kill -9 "$_sp" 2>/dev/null || :
+      _src=124
+      break
+    fi
+    sleep 1
+  done
+  [ -n "$_src" ] || _src=$(cat "$_rcf" 2>/dev/null || echo 1)
+  rm -f "$_rcf" 2>/dev/null || :
   out=$(cat "$SUITEOUT" 2>/dev/null)
   line=$(echo "$out" | grep -E "^t[0-9]+: " | tail -1)
   case "$line" in
     *" 0 failed"*) P=$((P+1));;
-    "") F=$((F+1)); FL="$FL $f(nosummary)"; say "---- $f produced no summary line";;
+    "") F=$((F+1)); FL="$FL $f(nosummary)"
+        [ "$_src" = 124 ] && say "---- $f TIMED OUT after ${UNIT_TIMEOUT}s" \
+                           || say "---- $f produced no summary line";;
     *) F=$((F+1)); FL="$FL $f"; say "---- $f"; echo "$out" | grep "FAIL" | head -8;;
   esac
 done
@@ -67,9 +93,10 @@ say "=> $P suites passed, $F failed"
 
 hr "2  rc24-unplugged.sh"
 if [ -f /data/local/tmp/suites/rc24-unplugged.sh ]; then
-  uout=$(execDir=/data/adb/vr25/acc sh /data/local/tmp/suites/rc24-unplugged.sh 2>&1)
-  echo "$uout" | grep -E '^  (FAIL|SKIP)' || :
-  uv=$(echo "$uout" | grep -E '^[a-zA-Z0-9_-]+: [0-9]+ passed' | tail -1)
+  UOUT=/data/local/tmp/.unplugged-sub.$$
+  execDir=/data/adb/vr25/acc sh /data/local/tmp/suites/rc24-unplugged.sh >"$UOUT" 2>&1
+  grep -E '^  (FAIL|SKIP)' "$UOUT" || :
+  uv=$(grep -E '^[a-zA-Z0-9_-]+: [0-9]+ passed' "$UOUT" | tail -1)
   say "=> ${uv:-NO VERDICT LINE}"
 else
   say "=> not staged"

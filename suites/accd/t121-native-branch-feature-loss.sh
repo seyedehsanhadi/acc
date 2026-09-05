@@ -49,9 +49,8 @@ cut_native(){
   awk '/^ *if \$nativeLimit; then/{f=1} f{print} f && /DO NOT hand a firmware-limit phone/{exit}' "$1/accd.sh"
 }
 
-for a in "$ARM23" "$ARM24"; do
-  cut_native "$a" > $W/$(basename $a).branch
-done
+cut_native "$ARM23" > $W/rc23tree.branch
+cut_native "$ARM24" > $W/rc24tree.branch
 _l23=$(wc -l < $W/rc23tree.branch); _l24=$(wc -l < $W/rc24tree.branch)
 [ "$_l23" -gt 20 ] && [ "$_l24" -gt 20 ] && ok "extracted the branch from both arms ($_l23 / $_l24 lines)" \
   || { no "could not extract the branch ($_l23 / $_l24)"; fin; }
@@ -82,12 +81,20 @@ _a=$(grep -c 'set_ch_volt ${maxChargingVoltage' $W/rc23tree.branch); _b=$(grep -
   || no "set_ch_volt absent (rc23=$_a now=$_b)"
 
 echo
-echo "-- 4  discovery must be gated on a live charging supply"
-# Off-charge most control nodes read 0; recording that as a node's DEFAULT would cap the phone there.
-if grep -q 'battStatus' $W/rc24tree.branch && grep -q 'present' $W/rc24tree.branch; then
-  ok "the new block is gated on present() and a Charging status"
+echo "-- 4  BOTH limits must use the native vote, not Tensor's stale status"
+# This case used to accept a split: current on _iclHeld, voltage still on battery/status. The split
+# was never a design - it was the mcc fix landing and the mcv path being left behind, and a review
+# on 2026-08-31 found it still standing. There is no safe reading of battery/status on this branch.
+# accd.sh's own native_icl block records why: bluejay reads "Not charging" for a sample at a time
+# while charging normally, and a firmware hold holds it there for a full 96s window. A bare
+# maxChargingVoltage set during either stretch never expanded to node entries, so the cap was shown
+# by acc -i and AccA and enforced by nothing - the identical defect this suite exists for. Both
+# gates keep `present`, so neither writes while unplugged.
+_nh=$(grep -c '\[ "${_iclHeld:-0}" != 1 \]' $W/rc24tree.branch)
+if [ "${_nh:-0}" -ge 2 ] && ! grep -q 'battStatus' $W/rc24tree.branch; then
+  ok "current and voltage both follow native_icl_restore ($_nh gates, no battery/status on the branch)"
 else
-  no "the new block is not gated on a live charging supply"
+  no "the branch still reads battery/status, or the two limits have drifted apart again (_iclHeld gates=$_nh)"
 fi
 
 echo
@@ -106,10 +113,18 @@ _rv=$(grep -c 'set_ch_volt -' $W/rc24tree.branch)
 echo "     release calls in the branch: current=$_rc voltage=$_rv"
 [ "$_rc" -ge 1 ] && [ "$_rv" -ge 1 ] && ok "the branch releases both limits when the config no longer holds one"                                      || no "release missing (current=$_rc voltage=$_rv) - a cap could never be cleared here"
 # and it must NOT be trapped behind the charging gate
-if awk '/if present 2>\/dev\/null && \[ "\$\(cat \$battStatus/{g=1} g&&/^        fi$/{g=0} {if(!g && /set_ch_curr -/) print "outside"}' $W/rc24tree.branch | grep -q outside; then
+# Keyed on the CURRENT gate. This used to look for `[ "$(cat $battStatus" and, once that gate was
+# replaced by _iclHeld, matched nothing at all - so every line counted as "outside" and the case
+# passed no matter where the release sat. A test that cannot fail is not a test.
+_awk_gate='/if present 2>\/dev\/null && \[ "\$\{_iclHeld/{g=1} g&&/^        fi$/{g=0} {if(!g && /set_ch_curr -/) print "outside"}'
+awk "$_awk_gate" $W/rc24tree.branch > $W/rel.out 2>/dev/null
+# Prove the marker the awk keys on is actually in the file, or "outside" means nothing.
+if ! grep -q '\[ "${_iclHeld:-0}" != 1 \]' $W/rc24tree.branch; then
+  no "the apply gate this case keys on is not in the branch - the release check below cannot fail"
+elif grep -q outside $W/rel.out; then
   ok "the release runs regardless of charging state"
 else
-  no "the release is trapped inside the charging gate - an unplugged phone could never clear a cap"
+  no "the release is trapped inside the apply gate - an unplugged phone could never clear a cap"
 fi
 
 echo

@@ -99,6 +99,38 @@ cfg_check_kv() {
       echo "Expected 0-100 (percent) or 3001-5000 (mV)" >&2
       return 2
     ;;
+    # THE CHARGE LIMITS, every spelling, on both front-ends.
+    #
+    # `acc -s maxChargingVoltage=abc` answered with the success tick and set nothing. Two separate
+    # holes produced that one wrong answer, which is why the check belongs here and not in either
+    # of them:
+    #
+    #   1. set-ch-volt.sh's branches are arithmetic comparisons. A non-number is false in all three,
+    #      so execution fell past the whole chain to the `touch` after it and returned 0.
+    #   2. set-prop.sh's apply path keys on `mcv` and `max_charging_voltage` only. The CONFIG
+    #      spelling `maxChargingVoltage` is accepted by its clear path but not its apply path, so
+    #      that form never reached the setter at all -- it wrote the config bare and left the daemon
+    #      to make sense of it. Device-verified on a Mi A3: exit 0 and a ✅ for `abc`.
+    #
+    # cfg_check_kv is the one gate both `acc -s` (set-prop.sh) and `acca -s` (acca.sh) already run
+    # every key through, so one case here covers every spelling and both front-ends, instead of a
+    # second copy of the rule in each setter free to drift the way the mcc and mcv gates did.
+    #
+    # Deliberately permissive about FORM, strict about nonsense: the accepted values are a bare
+    # number, empty or "-" to clear, a node spec (path::min::max), and for current a percentage.
+    # So the rule is "must contain a digit unless it is a clear", which is the same test set-prop.sh
+    # already applies on its own `-v` and `-c` shorthands.
+    maxChargingVoltage=*|max_charging_voltage=*|mcv=*|\
+    maxChargingCurrent=*|max_charging_current=*|mcc=*)
+      _cgv=${1#*=}
+      case "${_cgv:-}" in
+        ''|-) return 0 ;;
+        *[0-9]*) return 0 ;;
+      esac
+      echo "Invalid ${1%%=*}: $_cgv" >&2
+      echo "Expected a number, a node spec (path::min::max), or '-' to clear." >&2
+      return 2
+    ;;
   esac
   return 0
 }

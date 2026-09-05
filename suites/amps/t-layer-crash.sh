@@ -150,4 +150,12 @@ for _l in S1 6 6f 6g; do grep -q "lyr_skip $_l" "$AMPS" || _missing="$_missing $
 [ -z "$_missing" ] && ok "every layer declared skippable has a real lyr_skip call" \
                     || no "declared skippable with no call:$_missing"
 
+# A failed rewrite must not claim success. Node removal verifies the list after rewriting; layer
+# removal needs the same check or a full/read-only /data says "will be scanned again" while it is
+# still blocked.
+_lrm=$(sed -n '/^[ ]*layer:\*)/,/^[ ]*esac/p' "$AMPS")
+printf '%s\n' "$_lrm" | grep -q 'lyr_danger "$_rml"' \
+  && ok "layer removal verifies that the persistent skip entry is really gone" \
+  || no "layer removal reports success without checking whether the danger file changed"
+
 fin

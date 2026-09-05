@@ -24,7 +24,7 @@ set -u
 # reads exactly like a stall. toybox flock cannot see an fd opened with `exec 9>>file` - it
 # answers "Bad file descriptor" - so the fd must reach flock as a REDIRECT, the same form
 # acquire-lock.sh uses. Proven on laurus: holder rc=0, second attempt rc=1.
-PLOCK=/data/local/tmp/.plugged_round.lock
+PLOCK=/data/local/tmp/plug/.plugged_round.lock
 exec 9<>"$PLOCK" 2>/dev/null || :
 if ! flock -n 0 <&9 2>/dev/null; then
   echo "another plugged round holds $PLOCK; refusing to start a second"
@@ -157,16 +157,22 @@ else
   $A/acca -s allow_idle_above_pcap=false >/dev/null 2>&1
   say "config: $(grep -E '^capacity=|^allowIdleAbovePcap=' $D/config.txt | tr '
 ' ' ')"
-  _ia0=$_ia_lv; _i=0
+  _ia0=$_ia_lv; _ia_peak=$_ia_lv; _ia_cut=0; _i=0
   while [ $_i -lt 12 ]; do
     sleep 30; _i=$(( _i + 1 ))
-    _ia1=$($A/acca --state 2>/dev/null | sed -n 's/.*"capacityPct":\([0-9]*\).*/\1/p')
-    _cur=$($A/acca --state 2>/dev/null | sed -n 's/.*"current_raw":\(-*[0-9]*\).*/\1/p')
-    say "  t+$(( _i * 30 ))s level=${_ia1}% raw=${_cur}"
+    _iast=$($A/acca --state 2>/dev/null)
+    _ia1=$(printf '%s' "$_iast" | sed -n 's/.*"capacityPct":\([0-9]*\).*/\1/p')
+    _cur=$(printf '%s' "$_iast" | sed -n 's/.*"current_raw":\(-*[0-9]*\).*/\1/p')
+    _ias=$(printf '%s' "$_iast" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
+    case "$_ias" in Discharging|'Not charging') _ia_cut=$(( _ia_cut + 1 ));; esac
+    say "  t+$(( _i * 30 ))s level=${_ia1}% status=${_ias:-?} raw=${_cur}"
+    [ "${_ia1:-0}" -gt "${_ia_peak:-0}" ] 2>/dev/null && _ia_peak=$_ia1
     [ "${_ia1:-0}" -lt "${_ia0:-0}" ] && break
   done
-  if [ "${_ia1:-0}" -lt "${_ia0:-0}" ]; then
-    say "RESULT: level fell ${_ia0}% -> ${_ia1}% - it is discharging toward resume, not parked."
+  if [ "${_ia1:-0}" -lt "${_ia0:-0}" ] || [ "${_ia1:-0}" -lt "${_ia_peak:-0}" ]; then
+    say "RESULT: level fell ${_ia_peak}% -> ${_ia1}% - it is discharging toward resume, not parked."
+  elif [ "$_ia_cut" -ge 10 ] 2>/dev/null; then
+    say "RESULT: charging stayed cut in ${_ia_cut}/${_i} samples; the 1% gauge did not step, but it is not parked in idle."
   else
     say "RESULT: level did NOT fall in 6 minutes. Either this switch bypasses (phone runs off the"
     say "        charger, which is what aiapc=false exists to prevent) or idle-avoidance is not"
@@ -204,7 +210,8 @@ for s in rc24-plugged.sh rc24-plugged-full.sh \
   # slowest measured is diag-collect at ~340s on the A3), so hitting it means something is
   # genuinely stuck. Recording a TIMEOUT and moving on costs one suite; letting it run costs the
   # whole round and the charge that went into it.
-  execDir=/data/adb/vr25/acc timeout "${SUITE_TIMEOUT:-900}" sh "$P/$s" >"$PSUITEOUT" 2>&1
+  [ "$s" = rc24-plugged-full.sh ] && _args=${PLUG_CLASS:-5v} || _args=
+  execDir=/data/adb/vr25/acc timeout "${SUITE_TIMEOUT:-900}" sh "$P/$s" $_args >"$PSUITEOUT" 2>&1
   _src=$?
   [ "$_src" = 124 ] && say "  !! TIMED OUT after ${SUITE_TIMEOUT:-900}s - recorded, round continues"
   out=$(cat "$PSUITEOUT" 2>/dev/null)

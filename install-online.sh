@@ -143,7 +143,9 @@ get_ver() { sed -n 's/^versionCode=//p' ${1:-}; }
 }
 
 
-if ${insecure:-false}; then
+case " $* " in *" -k "*|*" --insecure "*) insecure=true;; *) insecure=false;; esac
+
+if $insecure; then
   _k_curl=--insecure; _k_wget=--no-check-certificate
   echo "WARNING: TLS certificate verification is DISABLED for this download." >&2
 else
@@ -165,9 +167,6 @@ set_dl() {
 }
 
 set_dl
-
-
-case " $* " in *" -k "*|*" --insecure "*) insecure=true;; *) insecure=false;; esac
 
 # -k/--insecure was missing from this strip list, so passing it made it the BRANCH NAME.
 commit=$(echo "$*" | sed -E 's/%.*%|-c|--changelog|-f|--force|-n|--non-interactive|-k|--insecure| //g')

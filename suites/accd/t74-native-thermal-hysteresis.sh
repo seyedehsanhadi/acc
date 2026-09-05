@@ -39,7 +39,15 @@ printf '%s' "$_blk" | grep -q 'temperature\[2\]' \
 # ---- 2: the latch is not reset every loop --------------------------------------------------------
 # A latch cleared on each pass is not a latch. The per-loop reset next to xIdle=false is the trap.
 _inloop=$(awk '/^        mtReached=false/{print NR}' "$AD" | head -1)
-_init=$(grep -n '^  _ntHot=0' "$AD" | head -1 | cut -d: -f1)
+# The initialiser is no longer literally `_ntHot=0`. rc24 PERSISTS the latch to tmpfs so a daemon
+# restart mid-hold cannot lift the firmware clamp -- a restart while the pack was still in the
+# cooldown band used to re-init to 0 and resume charging on a hot pack. So accept either form: the
+# old constant, or a restore from $TMPDIR whose value is then coerced to a number. Both are a
+# single top-level init; the persisted one is strictly stronger.
+_init=$(grep -n '^  _ntHot=0$' "$AD" | head -1 | cut -d: -f1)
+[ -n "$_init" ] || _init=$(grep -n '^  _ntHot=$(cat $TMPDIR/' "$AD" | head -1 | cut -d: -f1)
+# the coercion that guards that restore is part of the same initialiser, not a stray write
+_initc=$(grep -n "^  case \${_ntHot:-x} in" "$AD" | head -1 | cut -d: -f1)
 if [ -n "$_init" ]; then
   if [ -n "$_inloop" ] && [ "$_init" -lt "$_inloop" ] 2>/dev/null; then
     no "the latch is initialised before the loop reset - check it is not inside the loop"
@@ -56,6 +64,9 @@ _hy1=$(grep -n '_ntHot:-0' "$AD" | head -1 | cut -d: -f1)
 _stray=0
 for _ln in $(grep -n '_ntHot=' "$AD" | cut -d: -f1); do
   [ "$_ln" = "${_init:-0}" ] && continue
+  [ "$_ln" = "${_initc:-0}" ] && continue
+  # the tmpfs write-back that makes the latch survive a restart is part of the latch, not a reset
+  sed -n "${_ln}p" "$AD" | grep -q 'TMPDIR/.nthot' && continue
   if [ -n "$_hy0" ] && [ -n "$_hy1" ] && [ "$_ln" -ge "$_hy0" ] && [ "$_ln" -le "$_hy1" ] 2>/dev/null; then continue; fi
   _stray=$((_stray+1)); echo "        unexpected _ntHot assignment at line $_ln"
 done
