@@ -79,13 +79,62 @@ _ue_get() {   # $1 = KEY, $2 = uevent text -> $_ueval
 
 # Echo a clean (optionally negative) integer, else "null". Rule S1: a failed/garbage
 # read becomes null, never 0.
+_se_rd() {
+  _seraw=
+  { read -r _seraw < "${1:-/nonexistent}"; } 2>/dev/null || :
+}
+
+_se_int() {
+  local v="${1-}" sign=
+  _senum=null
+  [ "${#v}" -le 32 ] || return 0
+  case "$v" in -*) sign=-; v=${v#-};; +*) v=${v#+};; esac
+  case "$v" in ''|*[!0-9]*) return 0;; esac
+  while [ "${v#0}" != "$v" ]; do v=${v#0}; done
+  v=${v:-0}
+  [ "${#v}" -le "${2:-9}" ] || return 0
+  [ "$v" != 0 ] || sign=
+  _senum=$sign$v
+}
+
 _se_num() {
-  local v="${1-}"
-  case "$v" in -*) v="${v#-}";; esac
-  case "$v" in
-    ''|*[!0-9]*) echo null;;
-    *) echo "${1-}";;
+  _se_int "${1-}" 18
+  echo "$_senum"
+}
+
+# $3 = "bus" when the node is a SUPPLY voltage rather than the pack's. The power_supply class ABI
+# says microvolts, and a bus below 1V is noise, not a contract: a Fairphone 5 with nothing plugged
+# in reported usb/voltage_now = 18000 (18 mV of noise), the "under 100000 means it is already mV"
+# fallback turned that into 18000 mV, and the 1-50V sanity check then blessed "18 V". The exported
+# state showed a 15 V input on an unplugged phone, and the re-kick guard reads the same number
+# against a 6.5 V latch threshold.
+_se_voltage_mv() {
+  _se_int "${1-}"
+  _semv=null
+  [ "$_senum" != null ] || return 0
+  case "${2:-}" in
+    1000000) _semv=$((_senum / 1000));;
+    1000) _semv=$_senum;;
+    '') if [ "$_senum" -ge 100000 ]; then _semv=$((_senum / 1000))
+        elif [ "${3:-}" = bus ]; then return 0
+        else _semv=$_senum; fi;;
+    *) return 0;;
   esac
+  { [ "$_semv" -ge 1000 ] && [ "$_semv" -le 50000 ]; } || _semv=null
+}
+
+_se_temp_decic() {
+  _se_int "${1-}"
+  _setemp=null
+  [ "$_senum" != null ] || return 0
+  case "${tempFactor:-}" in
+    1) [ "${_senum#-}" -le 200 ] || return 0; _setemp=$((_senum * 10));;
+    10) _setemp=$_senum;;
+    1000) _setemp=$((_senum / 100));;
+    '') if [ "${_senum#-}" -gt 2000 ]; then _setemp=$((_senum / 100)); else _setemp=$_senum; fi;;
+    *) return 0;;
+  esac
+  { [ "$_setemp" -ge -1000 ] && [ "$_setemp" -le 2000 ]; } || _setemp=null
 }
 
 
@@ -244,10 +293,12 @@ _se_units() {
   case "${ampFactor:-${ampFactor_:-}}" in
     1000000) echo uA; return;;
     1000)    echo mA; return;;
+    '') :;;
+    *) echo unknown; return;;
   esac
   case "${1:-null}" in null|''|0) echo unknown; return;; esac
   local a="${1#-}"
-  if [ "$a" -gt 16000 ] 2>/dev/null; then echo uA; else echo mA; fi
+  if [ "$a" -ge 16000 ] 2>/dev/null; then echo uA; else echo unknown; fi
 }
 
 
@@ -275,12 +326,16 @@ _se_units() {
 # a device where no factor has been established yet.
 _se_ma() {
   _sema=null
-  case "${1:-}" in ''|null|*[!0-9-]*) return 0;; esac
+  _se_int "${1:-}"
+  [ "$_senum" != null ] || return 0
+  [ "${_senum#-}" -le 100000000 ] || return 0
   case "${ampFactor:-${ampFactor_:-}}" in
-    1000000) _sema=$(( $1 / 1000 )); return 0;;
-    1000)    _sema=$1; return 0;;
+    1000000) _sema=$(( _senum / 1000 )); return 0;;
+    1000)    [ "${_senum#-}" -le 100000 ] || return 0; _sema=$_senum; return 0;;
+    '') :;;
+    *) return 0;;
   esac
-  if [ "${1#-}" -ge 100000 ] 2>/dev/null; then _sema=$(( $1 / 1000 )); else _sema=$1; fi
+  if [ "${_senum#-}" -ge 100000 ]; then _sema=$(( _senum / 1000 )); elif [ "$_senum" = 0 ]; then _sema=0; fi
 }
 
 # polarity: learned from physics, cached with a confirmation streak, status cross-check only
@@ -312,8 +367,9 @@ _se_ma() {
 # $1=status $2=cur $3=plugged $4=units $5=capacityPct $6=now_ts
 _se_polarity() {
   local pc="${SE_POLCACHE:-${dataDir:-/data/adb/vr25/acc-data}/.se-polarity}"
-  local a thr p physics= confirmed= cand= n=0 ac= ats= sv= fl=0 cap kv line dirty=
+  local a thr p physics= confirmed= cand= n=0 ac= ats= as= sv= fl=0 cap kv line dirty= cs=
   case "${2:-null}" in null|'') echo unknown; return;; esac
+  case "${4:-}" in mA|uA) :;; *) echo unknown; return;; esac
   a="${2#-}"
   [ "${4:-}" = uA ] && thr=30000 || thr=30
   line=$(cat "$pc" 2>/dev/null)
@@ -325,34 +381,60 @@ _se_polarity() {
       n=*) n=${kv#*=};;
       ac=*) ac=${kv#*=};;
       ats=*) ats=${kv#*=};;
+      as=*) as=${kv#*=};;
       fl=*) fl=${kv#*=};;
     esac
   done
   case "$n" in ''|*[!0-9]*) n=0;; esac
   case "$fl" in ''|*[!0-9]*) fl=0;; esac
-  if [ -n "$line" ] && [ ".$sv" != .3 ]; then confirmed=; cand=; n=0; ac=; ats=; dirty=1; fi
+  # A stale schema is discarded wholesale, and that has to include the flip counter. It did not:
+  # fl survived the wipe, so a phone carrying two banked flips re-latched "unstable" on the very
+  # first flip after an upgrade, with none of the evidence that latched it the first time.
+  if [ -n "$line" ] && [ ".$sv" != .4 ]; then confirmed=; cand=; n=0; ac=; ats=; as=; fl=0; dirty=1; fi
   cap="${5:-}"
   case "$cap" in ''|*[!0-9]*) cap=;; esac
+  case "$2" in -*) cs=-;; *) cs=+;; esac
   if [ "$a" -ge "$thr" ] 2>/dev/null; then
     if [ "${3:-}" = false ]; then
       case "$2" in -*) p=normal;; *) p=inverted;; esac
       physics=1
     elif [ -n "$cap" ] && [ -n "${6:-}" ]; then
-      if [ -n "$ac" ] && [ -n "$ats" ] && [ $(( $6 - ats )) -ge 0 ] 2>/dev/null && [ $(( $6 - ats )) -le 3600 ] 2>/dev/null; then
+      # THE LEVEL DELTA AND THE SIGN MUST COME FROM THE SAME STRETCH.
+      #
+      # The anchor is allowed to be an hour old, but the sign is read from THIS sample. A phone
+      # that drained and was then put back on the charger inside that hour therefore measured
+      # "the level fell 2" against a sample whose current says "filling", and reported inverted
+      # on a phone that is not. Fairphone 5, 2026-09-09: level 88 -> 86 while unplugged, then
+      # +2780494 uA the moment the cable went back in. Two of those bank two flips and latch
+      # "unstable" for good, which retires the sign - the only arbiter that works on that phone,
+      # since its coulomb counter is too coarse to rule and its status word lies.
+      #
+      # So carry the sign that was live when the anchor was stamped and only rule while it holds.
+      # A sign change re-stamps instead, which costs one window and never invents a verdict.
+      if [ -n "$ac" ] && [ -n "$ats" ] && [ ".$as" = ".$cs" ] && [ $(( $6 - ats )) -ge 0 ] 2>/dev/null && [ $(( $6 - ats )) -le 3600 ] 2>/dev/null; then
         if [ $(( ac - cap )) -ge 2 ] 2>/dev/null; then
           case "$2" in -*) p=normal;; *) p=inverted;; esac
-          physics=1; ac=$cap; ats=$6; dirty=1
+          physics=1; ac=$cap; ats=$6; as=$cs; dirty=1
         elif [ $(( cap - ac )) -ge 2 ] 2>/dev/null; then
           case "$2" in -*) p=inverted;; *) p=normal;; esac
-          physics=1; ac=$cap; ats=$6; dirty=1
+          physics=1; ac=$cap; ats=$6; as=$cs; dirty=1
         fi
       else
-        ac=$cap; ats=$6; dirty=1
+        ac=$cap; ats=$6; as=$cs; dirty=1
       fi
     fi
   fi
-  if [ "${3:-}" = false ] && [ -n "$ac" ]; then ac=; ats=; dirty=1; fi
-  if [ -n "$physics" ] && [ ".$confirmed" != .unstable ]; then
+  if [ "${3:-}" = false ] && [ -n "$ac" ]; then ac=; ats=; as=; dirty=1; fi
+  # "unstable" was a PERMANENT latch with no way back. On a phone latched by the anchor bug above
+  # that is terminal: the sign is retired forever and _se_class is left with the status word. Let
+  # it heal, but only on evidence stronger than the two flips that set it - five consecutive
+  # agreeing physics readings. Hardware whose sign really does follow the engaged charge path
+  # (curtana's dual-path PMIC) alternates and never reaches five, so it stays latched.
+  if [ -n "$physics" ] && [ ".$confirmed" = .unstable ]; then
+    if [ ".$p" = ".$cand" ]; then n=$((n + 1)); else cand=$p; n=1; fi
+    dirty=1
+    if [ "$n" -ge 5 ]; then confirmed=$p; cand=; n=0; fl=0; fi
+  elif [ -n "$physics" ]; then
     if [ ".$p" = ".$confirmed" ]; then
       [ -n "$cand" ] && { cand=; n=0; dirty=1; }
     elif [ ".$p" = ".$cand" ]; then
@@ -371,7 +453,7 @@ _se_polarity() {
       cand=; n=0; dirty=1
     fi
   fi
-  [ -n "$dirty" ] && echo "sv=3 confirmed=$confirmed cand=$cand n=$n ac=$ac ats=$ats fl=$fl" > "$pc" 2>/dev/null
+  [ -n "$dirty" ] && echo "sv=4 confirmed=$confirmed cand=$cand n=$n ac=$ac ats=$ats as=$as fl=$fl" > "$pc" 2>/dev/null
   if [ -n "$physics" ]; then echo "$p"; return; fi
   if [ -n "$confirmed" ]; then echo "$confirmed"; return; fi
   case "$1" in
@@ -399,18 +481,38 @@ _se_polarity_source() {
 # $1 = current charge_counter reading (uAh). Echoes rising|falling|flat|unknown.
 _se_ccdir() {
   local cf="${SE_CCCACHE:-${dataDir:-/data/adb/vr25/acc-data}/.se-cc}"
-  local cc="$1" p= pts= now=$(date +%s 2>/dev/null) d= r=unknown
-  case "$cc" in ''|*[!0-9]*) echo unknown; return;; esac
+  local cc="$1" p= pts= now=$(date +%s 2>/dev/null) d= age= r=unknown
+  _se_int "$cc"; cc=$_senum
+  case "$cc" in null|0|-*) rm -f "$cf" 2>/dev/null; echo unknown; return;; esac
   [ -n "$now" ] || { echo unknown; return; }
   [ ! -f "$cf" ] || read -r p pts < "$cf" 2>/dev/null || :
-  if [ "${p:-0}" -gt 0 ] 2>/dev/null && [ $(( now - ${pts:-0} )) -ge 3 ] 2>/dev/null \
-    && [ $(( now - ${pts:-0} )) -le 90 ] 2>/dev/null; then
+  _se_int "$p"; p=$_senum
+  case "$pts" in ''|*[!0-9]*) pts=0;; esac
+  [ "${#pts}" -le 10 ] || pts=0
+  age=$((now - pts))
+  if [ "$p" != null ] && [ "$p" -gt 0 ] && [ "$age" -ge 3 ] && [ "$age" -le 90 ]; then
     d=$(( cc - p ))
-    if [ $d -ge 150 ]; then r=rising
+    if [ "${d#-}" -gt $((age * 30000)) ]; then r=unknown
+    elif [ $d -ge 150 ]; then r=rising
     elif [ $d -le -150 ]; then r=falling
     else r=flat; fi
   fi
-  echo "$cc $now" > "$cf" 2>/dev/null
+  # KEEP THE ANCHOR UNTIL THE COUNTER ACTUALLY MOVES.
+  #
+  # This used to re-stamp on EVERY call. With the daemon publishing every few seconds that pinned
+  # the window at ~4s, and a fuel gauge whose charge_counter updates in coarse steps shows d=0
+  # across 4s -- so the answer was "flat" forever and this arbiter could never rule. Fairphone 5,
+  # 17:42 bundle: ccDir "flat" while the pack drained at 0.3-0.8 A with the cable in, polarity
+  # latched "unstable", and _se_class was left with only the status word this kernel lies with.
+  # That is what published "charging" and a wattage on a draining phone.
+  #
+  # Re-stamp when the value CHANGED (a gauge that steps every call is unaffected, so nothing
+  # changes on a phone with a fine counter), or when the window has gone stale past its own 90s
+  # ceiling so a dead anchor cannot persist. Otherwise hold it, and let a coarse gauge accumulate
+  # a real delta over 10-90s and get its verdict.
+  if [ ".$p" = .null ] || [ "$cc" != "$p" ] || [ "$age" -gt 90 ] || [ "$age" -lt 0 ]; then
+    echo "$cc $now" > "$cf" 2>/dev/null
+  fi
   echo $r
 }
 
@@ -422,8 +524,11 @@ _se_ccdir() {
 # signal that stays correct on mode-dependent-sign hardware (see _se_ccdir).
 _se_class() {
   local cur="$1" plugged="$2" units="$3" polarity="$4" ccdir="${5:-unknown}" status="${6:-}" a thr
+  _se_int "$cur"; cur=$_senum
   case "$cur" in null|'') echo unknown; return;; esac
+  case "$units" in mA|uA) :;; *) echo unknown; return;; esac
   a="${cur#-}"
+  case "$units" in mA) [ "$a" -le 100000 ];; uA) [ "$a" -le 100000000 ];; esac || { echo unknown; return; }
   [ "$units" = uA ] && thr=30000 || thr=30
   # coulomb arbitration: a moving counter IS the verdict, no sign involved
   if [ "$a" -ge "$thr" ] 2>/dev/null; then
@@ -433,6 +538,7 @@ _se_class() {
     esac
   fi
   # sign is meaningless on proven mode-flippers: fall back to the kernel status word
+  case "$polarity" in normal|inverted|unstable) :;; *) echo unknown; return;; esac
   if [ "$polarity" = unstable ]; then
     if [ "$a" -lt "$thr" ] 2>/dev/null; then
       [ "$plugged" = true ] && echo bypass || echo standby; return
@@ -440,7 +546,7 @@ _se_class() {
     case "$status" in
       Charging) echo charging;;
       Discharging) [ "$plugged" = true ] && echo drain || echo discharging;;
-      *) [ "$plugged" = true ] && echo charging || echo discharging;;
+      *) [ "$plugged" = true ] && echo unknown || echo discharging;;
     esac
     return
   fi
@@ -489,39 +595,97 @@ _se_trust() {
 # input volts/amps lets the front-end show the measured relationship instead of guessing.
 # Values normalized to mV/mA by magnitude (uV/uA kernels are >=100000); unreadable -> null
 # (rule S1). Probes usb first, then dc/wireless; absent nodes -> nulls, never an error.
-_se_input() {
-  local vf cf v c va ca
-  vf=; cf=; v=; c=
-  for vf in /sys/class/power_supply/usb/voltage_now \
-            /sys/class/power_supply/dc/voltage_now \
-            /sys/class/power_supply/wireless/voltage_now; do
-    # rc23c: builtin read, not $(cat|head -1). Each of those was a subshell plus two execs, three
-    # processes for one number, on a path that runs every daemon pass. Profiled unplugged on a
-    # Pixel 6a: one loop pass executed `head -1` 22 times and cost ~0.9s of forked-child CPU while
-    # the daemon's own shell work was a fraction of that. Same idiom online()/present() already use.
-    [ -r "$vf" ] && { { read -r v < "$vf"; } 2>/dev/null || :; break; }
+_se_bus_mv() {   # $1 = this supply's own mV, $2 = pack mV -> $_sebus (mV, or null)
+  local v="${1-}" b="${2-}" n=
+  _sebus=$v
+  case "$v" in ''|null) _sebus=null; return 0;; esac
+  case "$b" in ''|null) return 0;; esac
+  # A supply that reports the BATTERY-side voltage under its own voltage_now (a Pixel 6a at 9V PD
+  # reads main-charger/voltage_now = 4.03V while the bus is at 8.95V) turns an input current into a
+  # charger wattage below what the pack is taking, and consumed_watts goes negative. Anything no
+  # higher than the pack is not a bus reading; take one from an online supply that has it.
+  [ "$v" -le $(( b + 300 )) ] 2>/dev/null || return 0
+  for n in $(online_f 2>/dev/null); do
+    [ -f "$n" ] && [ "$(cat "$n" 2>/dev/null)" = 1 ] || continue
+    _se_voltage_mv "$(cat "${n%/*}/voltage_now" 2>/dev/null)"
+    [ "$_semv" != null ] && [ "$_semv" -gt $(( b + 300 )) ] 2>/dev/null && { _sebus=$_semv; return 0; }
   done
-  for cf in /sys/class/power_supply/usb/input_current_now \
-            /sys/class/power_supply/usb/current_now \
-            /sys/class/power_supply/dc/current_now \
-            /sys/class/power_supply/wireless/current_now; do
-    [ -r "$cf" ] && { { read -r c < "$cf"; } 2>/dev/null || :; break; }
-  done
-  case "$v" in
-    ''|*[!0-9-]*|-*) v=null;;
-    *) va="$v"; [ "$va" -ge 100000 ] 2>/dev/null && v=$(( v / 1000 ));;
+}
+
+_se_input_ma() {
+  local raw a node="${2:-}" factor="${inputAmpFactor:-}" cache="${TMPDIR:-/dev}/.iinmicro"
+  _sema=null
+  _se_int "${1:-}"
+  raw=$_senum
+  [ "$raw" != null ] || return 0
+  a=${raw#-}; node=${node#/sys/class/power_supply/}
+  if [ -z "$factor" ]; then
+    if [ "$a" -gt 20000 ]; then
+      factor=1000000
+      [ -z "$node" ] || grep -qxF "$node" "$cache" 2>/dev/null || echo "$node" >> "$cache" 2>/dev/null || :
+    elif [ -n "$node" ] && grep -qxF "$node" "$cache" 2>/dev/null; then
+      factor=1000000
+    elif [ "$a" = 0 ]; then _sema=0; return 0
+    else return 0; fi
+  fi
+  case "$factor" in
+    1000) [ "$a" -le 100000 ] || return 0; _sema=$raw;;
+    1000000) [ "$a" -le 100000000 ] || return 0; _sema=$((raw / 1000));;
   esac
-  _se_ma "$c"; c=$_sema
-  # A current reading only means something while that supply is actually online. Measured on a Mi
-  # A3 with input_suspend=1: usb/input_current_now still read 2084 mA while usb/online,
-  # usb/current_max and usb/input_current_settled were all 0 -- a value left over from before the
-  # cut, which the kernel never clears. Taken at face value it turns a suspended input into "2.1 A,
-  # 18 W" from a charger delivering nothing. The voltage stays as read: the cable really is sitting
-  # at 8.4 V, and that is worth showing.
-  ca=1
-  [ -n "$cf" ] && [ -r "${cf%/*}/online" ] && { { read -r ca < "${cf%/*}/online"; } 2>/dev/null || ca=1; }
-  _se_gate_ma "$ca" "$c"; c=$_segma
-  printf '"input":{"voltageMv":%s,"currentMa":%s}' "$(_se_num "$v")" "$(_se_num "$c")"
+  _se_icl_guard "$node"
+}
+
+# A supply cannot draw more than the limit it negotiated for itself.
+#
+# Fairphone 5, 2026-09-08 diagnostic: usb/current_now reads 9375000 at 8.98 V - 84 W into a phone
+# whose own usb/input_current_limit says 5000000, and whose pack is taking 444 mA. wireless/current_now
+# carries the IDENTICAL 9375000 while wireless/online is 0, so the register is mirrored, not measured.
+# acc -i printed "power_supply_amps 9.38 / power_supply_watts 84.23 / consumed_watts 82.46".
+#
+# The limit node is the supply's own statement of what it agreed to carry, so it bounds any reading
+# from that supply. 25% of headroom covers a real overshoot during a transient; 187% is not one.
+# Rejecting here rather than in each caller covers all three readers at once: acc -i, the exported
+# state and the re-kick guard's _iin_ma all convert through this function.
+#
+# Silent no-op wherever the limit node is absent or does not itself convert (most devices).
+_se_icl_guard() {
+  local lim raw sup="${1:-}" root="${ACC_PSY:-/sys/class/power_supply}" keep=$_sema
+  [ "$_sema" != null ] || return 0
+  case "$sup" in ''|*input_current_limit) return 0;; esac
+  sup=${sup%/*}
+  [ -n "$sup" ] || return 0
+  raw=; { read -r raw < "$root/$sup/input_current_limit"; } 2>/dev/null || return 0
+  [ -n "$raw" ] || return 0
+  _se_input_ma "$raw" "$sup/input_current_limit"; lim=$_sema
+  _sema=$keep
+  case "$lim" in null|0|-*) return 0;; esac
+  [ "${keep#-}" -le $(( lim + lim / 4 )) ] 2>/dev/null || _sema=null
+}
+
+_se_input() {
+  local supply cf v=null c=null ca raw root="${ACC_PSY:-/sys/class/power_supply}"
+  for supply in usb dc wireless main-charger main; do
+    # An unreadable or missing online node used to pass this test ("" != 0), so a supply that
+    # never reported being online could still supply the exported input voltage and current.
+    ca=; { read -r ca < "$root/$supply/online"; } 2>/dev/null || ca=
+    [ "$ca" = 1 ] || continue
+    for cf in "$root/$supply/input_current_now" "$root/$supply/current_now"; do
+      raw=; { read -r raw < "$cf"; } 2>/dev/null || continue
+      _se_input_ma "$raw" "$supply/${cf##*/}"; c=$_sema
+      [ "$c" != null ] || continue
+      break
+    done
+    # An online supply's bus voltage is worth reporting even when none of its current nodes
+    # produced a usable reading - a Fairphone 5 whose usb/current_now is a mirrored register still
+    # publishes a real 8.98 V. Dropping the whole supply here would have replaced one wrong number
+    # with two missing ones.
+    raw=; { read -r raw < "$root/$supply/voltage_now"; } 2>/dev/null || raw=
+    _se_voltage_mv "$raw" "" bus; v=$_semv
+    [ "$v" != null ] || [ "$c" != null ] || continue
+    printf '"input":{"voltageMv":%s,"currentMa":%s}' "$v" "$c"
+    return
+  done
+  printf '"input":{"voltageMv":null,"currentMa":null}'
 }
 
 # Zero a current reading whose supply is offline. Split out so it can be exercised without a
@@ -544,10 +708,25 @@ _se_gate_ma() {
 #   thermal (battery at/above 42.0 C), taper (charge_type says Taper/Trickle, or SOC >= 95).
 # Read-only; approx=true marks the battery-side V x A fallback (always <= input watts, so the
 # class can only UNDER-state, never inflate). Args: $1=inMv $2=inMa $3=battCurRaw $4=battVoltRaw
-# $5=status $6=tempDeciC $7=capacityPct
+# $5=status $6=tempDeciC $7=capacityPct $8=measuredClass
+_se_watts() {
+  local v a q
+  _sew=null
+  _se_int "$1"; v=$_senum
+  _se_int "$2"; a=${_senum#-}
+  case "$v:$a" in *null*|-*) return 0;; esac
+  [ "$v" -ge 1000 ] && [ "$v" -le 50000 ] && [ "$a" -le 100000 ] || return 0
+  q=$((v * (a / 1000) + v * (a % 1000) / 1000))
+  _sew=$((q / 1000))
+  if [ $((q % 1000)) -ne 0 ]; then
+    q=00$((q % 1000)); q=${q#"${q%???}"}
+    _sew=$_sew.$q
+  fi
+}
+
 _se_charge() {
-  local inmv="$1" inma="$2" bcur="$3" bvolt="$4" st="$5" tdc="$6" cap="$7"
-  local w=null cls=null why=null approx=false bma bmv ct
+  local inmv="$1" inma="$2" bcur="$3" bvolt="$4" st="$5" tdc="$6" cap="$7" mcls="${8:-}"
+  local w=null cls=null why=null approx=false bma bmv ct filling=false
   # Input power is MEASURED, and it is real whether or not the battery is taking it. While ACC
   # holds an input-cut switch the charger still runs the phone -- a Mi A3 held at its pause level
   # was drawing 1797 mA from the wall with the battery at -170 mA -- but the whole block used to
@@ -558,21 +737,39 @@ _se_charge() {
   # battery. The battery-side fallback below stays inside the charging branch -- it is a proxy for
   # input power, and during a hold the battery current is flowing the wrong way to stand in for it.
   if [ "$inmv" != null ] && [ "$inma" != null ] && [ "$inmv" -gt 1000 ] 2>/dev/null && [ "${inma#-}" -gt 50 ] 2>/dev/null; then
-    w=$(( inmv * ${inma#-} / 1000000 ))
+    _se_watts "$inmv" "$inma"; w=$_sew
   fi
-  if [ "$st" = "Charging" ]; then
+  # WHICH WAY THE CHARGE IS GOING IS ALREADY DECIDED, and not by this node.
+  #
+  # Fairphone 5, 2026-09-09: the kernel held status=Charging with no pause anywhere while the pack
+  # left at -1329669 uA and the SoC walked 23 -> 21%. usb/current_now is a mirrored register there
+  # and the ICL guard rightly drops it, so there was no input reading to beat the fallback to it --
+  # and the fallback took ${bcur#-}, threw the minus away, and published
+  # "charge":{"watts":4.708,"class":"slow"} for a phone that was emptying. AccA printed "From
+  # charger: ~0.87 W or more (Slow charge)" beside its own "Draining" row, which is the flapping
+  # the owner reported.
+  #
+  # The sign alone is not the answer either: on an inverted-polarity phone a charging pack reads
+  # negative, which is what the strip was there for. _se_class has already arbitrated all of it --
+  # coulomb slope first, then polarity, then the status word as the last resort -- so the fallback
+  # takes that verdict instead of re-deriving a worse one from the single signal known to lie.
+  case "$mcls" in
+    charging) filling=true;;
+    '') [ "$st" = "Charging" ] && filling=true;;
+  esac
+  if $filling; then
     if [ "$w" = null ] && [ "$bcur" != null ] && [ "$bvolt" != null ]; then
       _se_ma "${bcur#-}"; bma=$_sema
-      bmv="$bvolt";    [ "$bmv" -ge 100000 ] 2>/dev/null && bmv=$(( bmv / 1000 ))
+      _se_voltage_mv "$bvolt"; bmv=$_semv
       if [ "$bma" -gt 50 ] 2>/dev/null && [ "$bmv" -gt 1000 ] 2>/dev/null; then
-        w=$(( bmv * bma / 1000000 )); approx=true
+        _se_watts "$bmv" "$bma"; w=$_sew; approx=true
       fi
     fi
     if [ "$w" != null ]; then
-      if   [ "$w" -lt 7 ];  then cls='"slow"'
-      elif [ "$w" -lt 18 ]; then cls='"standard"'
-      elif [ "$w" -lt 45 ]; then cls='"fast"'
-      elif [ "$w" -lt 90 ]; then cls='"superfast"'
+      if   [ "${w%.*}" -lt 7 ];  then cls='"slow"'
+      elif [ "${w%.*}" -lt 18 ]; then cls='"standard"'
+      elif [ "${w%.*}" -lt 45 ]; then cls='"fast"'
+      elif [ "${w%.*}" -lt 90 ]; then cls='"superfast"'
       else cls='"hyper"'; fi
       if [ -n "${maxChargingCurrent[0]-}" ]; then why='"user_limit"'
       elif [ "$tdc" != null ] && [ "$tdc" -ge 420 ] 2>/dev/null; then why='"thermal"'
@@ -625,7 +822,7 @@ write_state() {
     # publish all-or-nothing.
     local t="$TMPDIR/.state.json.$$.tmp"
     local lvl volt cur tmp status ts userLocked
-    local ue ue_st ue_cur ue_cap ue_volt ue_temp _cok _cv
+    local ue ue_st ue_cur ue_cap ue_volt ue_temp _cok _cv _uefile="${currFile%/*}/uevent"
 
     # ONE atomic read of battery/uevent so status+current+... are coherent (separate cats can
     # straddle a state change -- the root reason statusTrust was perpetually "unknown"). Fall
@@ -633,14 +830,14 @@ write_state() {
     # 6.5.1 (D3): three atomic uevent samples, classify on the MEDIAN-current sample kept
     # WHOLE (status+current stay a coherent pair) -- one transient spike (resume pulse,
     # screen toggle) no longer flaps the measured class between ticks.
-    _ue1=$(cat /sys/class/power_supply/battery/uevent 2>/dev/null)
+    _ue1=$(cat "$_uefile" 2>/dev/null)
     sleep 0.15 2>/dev/null || :
-    _ue2=$(cat /sys/class/power_supply/battery/uevent 2>/dev/null)
+    _ue2=$(cat "$_uefile" 2>/dev/null)
     sleep 0.15 2>/dev/null || :
-    _ue3=$(cat /sys/class/power_supply/battery/uevent 2>/dev/null)
-    _ue_get POWER_SUPPLY_CURRENT_NOW "$_ue1"; _c1=$_ueval
-    _ue_get POWER_SUPPLY_CURRENT_NOW "$_ue2"; _c2=$_ueval
-    _ue_get POWER_SUPPLY_CURRENT_NOW "$_ue3"; _c3=$_ueval
+    _ue3=$(cat "$_uefile" 2>/dev/null)
+    _ue_get POWER_SUPPLY_CURRENT_NOW "$_ue1"; _se_int "$_ueval"; _c1=$_senum
+    _ue_get POWER_SUPPLY_CURRENT_NOW "$_ue2"; _se_int "$_ueval"; _c2=$_senum
+    _ue_get POWER_SUPPLY_CURRENT_NOW "$_ue3"; _se_int "$_ueval"; _c3=$_senum
     ue=$_ue2
     # A non-numeric CURRENT_NOW must leave sample 2 selected WHOLE. `[ a -ge b ]` looks like it
     # errors out on garbage and the 2>/dev/null suffix looks like it handles that, but ksh/mksh
@@ -670,10 +867,14 @@ write_state() {
     _ue_get POWER_SUPPLY_CHARGE_COUNTER "$ue"; ue_cc=$_ueval
     [ -n "$ue_cc" ] || ue_cc=$(cat "${battCapacity%capacity}charge_counter" 2>/dev/null)
 
-    lvl=$(_se_num "${ue_cap:-$(batt_cap 2>/dev/null)}")
-    volt=$(_se_num "${ue_volt:-$(volt_now 2>/dev/null)}")
-    cur=$(_se_num "${ue_cur:-$(cat "$currFile" 2>/dev/null)}")
-    tmp=$(_se_num "${ue_temp:-$(cat "$temp" 2>/dev/null)}")
+    lvl=$(batt_cap 2>/dev/null)
+    _se_int "$lvl"; lvl=$_senum
+    { [ "$lvl" != null ] && [ "$lvl" -ge 0 ] && [ "$lvl" -le 100 ]; } || lvl=null
+    ue_volt=; { read -r ue_volt < "$voltNow"; } 2>/dev/null || ue_volt=
+    _se_voltage_mv "$ue_volt" "${voltFactor:-}"; volt=$_semv
+    case "$currFile" in */current_now) [ -n "$ue_cur" ] || ue_cur=$(current_now);; *) ue_cur=$(current_now);; esac
+    _se_int "$ue_cur"; cur=$_senum
+    tmp=$(temperature_now)
     status=$(_se_status "$cur" "$ue_st")
     ts=$(_se_num "$(date +%s 2>/dev/null)")
     # The " --" suffix is written by TWO different actors: the user (set-prop.sh, via the
@@ -716,7 +917,7 @@ write_state() {
       invm=${inj#*voltageMv\":}; invm=${invm%%,*}
       inim=${inj#*currentMa\":}; inim=${inim%%\}*}
       printf ',%s' "$inj"
-      printf ',%s' "$(_se_charge "$invm" "$inim" "$cur" "$volt" "$status" "$tmp" "$lvl")"
+      printf ',%s' "$(_se_charge "$invm" "$inim" "$cur" "$volt" "$status" "$tmp" "$lvl" "$mclass")"
       printf ',%s' "$(_se_native)"
       printf ',"sensing":{"currentUnits":"%s","polarity":"%s","polaritySource":"%s","statusTrust":"%s","confidence":"%s","ccDir":"%s"}' \
         "$units" "$polarity" "$psrc" "$trust" "$conf" "$ccdir"
