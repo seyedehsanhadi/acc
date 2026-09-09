@@ -52,7 +52,7 @@ j=$(say 9000 2000 2500000 4000000 Charging 300 50)
 # The A3's own reading: input 7.5 V at 1797 mA, battery flowing OUT at -170 mA.
 j=$(say 7500 1797 -170000 3750000 Discharging 270 19)
 w=$(_f "$j" watts)
-[ "$w" != null ] && [ "$w" -ge 12 ] 2>/dev/null && [ "$w" -le 15 ] 2>/dev/null \
+[ "$w" != null ] && [ "${w%.*}" -ge 12 ] 2>/dev/null && [ "${w%.*}" -le 15 ] 2>/dev/null \
   && ok "held: measured input still reported ($w W)" \
   || no "held: watts was $w - a charger delivering 13 W read as no charger"
 [ "$(_f "$j" class)" = null ] && ok "held: no class, because the battery is not filling" \
@@ -103,5 +103,27 @@ j=$(say null null 2000000 4000000 Charging 300 50)
 j=$(say null null -2000000 4000000 Discharging 300 50)
 [ "$(_f "$j" watts)" = null ] && ok "held with no input nodes: no fabricated wattage" \
                               || no "held: invented $(_f "$j" watts) W from a DRAINING battery"
+
+# --- 6. THE LYING STATUS. Fairphone 5, 2026-09-09 diagnostic -----------------
+# usb/current_now is a mirrored register on this phone and the ICL guard rejects it, so there is
+# no input reading at all. The kernel reports status=Charging, with no pause anywhere, while the
+# pack is leaving at -1329669 uA and the SoC walks 23 -> 21%. The fallback stripped the sign with
+# ${bcur#-}, so a drain became "charge":{"watts":4.708,"class":"slow"} and AccA printed
+# "From charger: ~0.87 W or more (Slow charge)" on a phone that was emptying. Status alone cannot
+# gate this branch: only the sign of the pack current says which way the charge is going.
+j=$(say null null -1329669 3543000 Charging 290 21 drain)
+[ "$(_f "$j" watts)" = null ] && ok "lying status: a draining pack yields no charge wattage" || no "lying status: invented $(_f "$j" watts) W while the pack drained"
+[ "$(_f "$j" class)" = null ] && ok "lying status: no charge class either" || no "lying status: class was $(_f "$j" class) while the pack drained"
+
+# ...and the sign strip this replaces was load-bearing for the OPPOSITE phone. An inverted-polarity
+# pack reads negative WHILE FILLING, and _se_class says so. The fallback must still fire there, or
+# the fix for the Fairphone trades one silent phone for another.
+j=$(say null null -2000000 4000000 Charging 300 50 charging)
+[ "$(_f "$j" watts)" != null ] && ok "inverted polarity: a filling pack still reports wattage" || no "inverted polarity: watts went null on a charging phone"
+[ "$(_f "$j" class)" != null ] && ok "inverted polarity: class still reported" || no "inverted polarity: class went null on a charging phone"
+
+# A 7-argument caller has no verdict to offer and keeps the old status gate.
+j=$(say null null 2000000 4000000 Charging 300 50)
+[ "$(_f "$j" watts)" != null ] && ok "no verdict passed: falls back to the status word" || no "no verdict passed: watts went null"
 
 fin

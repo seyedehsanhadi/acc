@@ -107,20 +107,41 @@ ok "every reference uses the same \$TMPDIR path"
 
 # ---- 5: LIVE - a cap must actually release, which is what guards 1 and 2 exist for ---------------
 # The source checks above say the guard reads the disk. This says the user-visible behaviour is
+# A fixed sleep is the wrong instrument here. `acc -s` hands the write to the daemon, and on the
+# FIRST use of a cap the setter also has to DISCOVER its control nodes - on a Mi A3 fresh off a
+# 125-suite run at 43.5 C that took longer than 3s, so the clear was graded before it landed and
+# the same assertion passed on the very next invocation with the nodes already resolved. Wait for
+# the config to say what it is going to say, up to 15s, instead of guessing how long that takes.
+_await() { # $1 = config key, $2 = the value that ends the wait
+  _aw=$(( $(date +%s) + 15 ))
+  while :; do
+    _awv=$(grep -m1 "^$1=" "$CFG")
+    case "$_awv" in *"$2"*) break;; esac
+    [ "$(date +%s)" -lt "$_aw" ] || break
+    sleep 1
+  done
+  printf '%s' "$_awv"
+}
+
 # right: set a cap, clear it, and both the config AND the nodes must come back.
+# The live round trip needs a DAEMON, not just a writable config: `acc -s` writes the value and the
+# daemon is what applies it and republishes the file. In the full suite run this fixture follows
+# t136, which deliberately stops and restarts daemons and can leave none behind - so this block was
+# graded against a phone with nothing running and reported a product failure for a missing
+# precondition. It passes standalone on the same phone seconds later. Say so instead of failing.
 if [ ! -w "$CFG" ]; then
   sk "config not writable; skipping the live round trip"
+elif ! pgrep -f "[a]ccd" >/dev/null 2>&1; then
+  sk "no daemon running; the live round trip has nothing to apply the value"
 else
   _origC=$(grep -m1 '^maxChargingCurrent=' "$CFG")
   _origV=$(grep -m1 '^maxChargingVoltage=' "$CFG")
   $TMPDIR/acc -s maxChargingCurrent=900 >/dev/null 2>&1 || :
-  sleep 3
-  _now=$(grep -m1 '^maxChargingCurrent=' "$CFG")
+  _now=$(_await maxChargingCurrent 900)
   case "$_now" in
     *900*) ok "a current cap was accepted ($_now)"
       $TMPDIR/acc -s maxChargingCurrent= >/dev/null 2>&1 || :
-      sleep 3
-      _cl=$(grep -m1 '^maxChargingCurrent=' "$CFG")
+      _cl=$(_await maxChargingCurrent '()')
       [ "$_cl" = "maxChargingCurrent=()" ] \
         && ok "and cleared back to ()" \
         || no "clear left the config as: $_cl"
@@ -130,13 +151,11 @@ else
   # voltage, same shape, only where the phone has a voltage node
   if grep -q / $TMPDIR/ch-volt-ctrl-files 2>/dev/null; then
     $TMPDIR/acc -s maxChargingVoltage=4100 >/dev/null 2>&1 || :
-    sleep 3
-    _nv=$(grep -m1 '^maxChargingVoltage=' "$CFG")
+    _nv=$(_await maxChargingVoltage 4100)
     case "$_nv" in
       *4100*) ok "a voltage cap was accepted"
         $TMPDIR/acc -s maxChargingVoltage= >/dev/null 2>&1 || :
-        sleep 3
-        _cv=$(grep -m1 '^maxChargingVoltage=' "$CFG")
+        _cv=$(_await maxChargingVoltage '()')
         [ "$_cv" = "maxChargingVoltage=()" ] \
           && ok "and cleared back to ()" \
           || no "voltage clear left the config as: $_cv" ;;
@@ -145,10 +164,25 @@ else
   else
     sk "no voltage control node on this phone"
   fi
-  # put the originals back whatever happened
-  [ -n "$_origC" ] && sed -i "s|^maxChargingCurrent=.*|$_origC|" "$CFG" 2>/dev/null || :
-  [ -n "$_origV" ] && sed -i "s|^maxChargingVoltage=.*|$_origV|" "$CFG" 2>/dev/null || :
-  ok "config restored"
+  # Put the originals back, and PROVE it. `sed -i` on the config is a write behind the daemon's
+  # back: it holds the cap in memory and republishes the file, so an edit made underneath it is
+  # undone within seconds. A Mi A3 was left carrying this suite's own maxChargingVoltage=4100 -
+  # a 4.1 V hardware clamp - while this line printed PASS, because the line asserted nothing at all.
+  # Restore through acc, wait for the config to agree, then say so only if it does.
+  # mksh will not parse a literal ( inside ${...#pat} or ${...:-word}, and this suite runs under
+  # /system/bin/sh: both spellings died with "no closing quote" on the device while bash -n was
+  # happy. Strip the brackets with sed instead.
+  _restore() { # $1 = key, $2 = the original config line
+    [ -n "$2" ] || return 0
+    _rv=$(printf '%s' "$2" | sed "s/^$1=//; s/^.//; s/.$//")
+    _rwant=$2
+    $TMPDIR/acc -s "$1=$_rv" >/dev/null 2>&1 || :
+    _await "$1" "$_rv" >/dev/null
+    _rn=$(grep -m1 "^$1=" "$CFG")
+    [ "$_rn" = "$_rwant" ] && ok "$1 restored to $_rwant" || no "$1 left as $_rn, wanted $_rwant"
+  }
+  _restore maxChargingCurrent "$_origC"
+  _restore maxChargingVoltage "$_origV"
 fi
 
 fin

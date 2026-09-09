@@ -654,7 +654,7 @@ _se_icl_guard() {
   case "$sup" in ''|*input_current_limit) return 0;; esac
   sup=${sup%/*}
   [ -n "$sup" ] || return 0
-  raw=; { read -r raw < "$root/$sup/input_current_limit"; } 2>/dev/null || return 0
+  _se_rd "$root/$sup/input_current_limit"; raw=$_seraw
   [ -n "$raw" ] || return 0
   _se_input_ma "$raw" "$sup/input_current_limit"; lim=$_sema
   _sema=$keep
@@ -667,10 +667,13 @@ _se_input() {
   for supply in usb dc wireless main-charger main; do
     # An unreadable or missing online node used to pass this test ("" != 0), so a supply that
     # never reported being online could still supply the exported input voltage and current.
-    ca=; { read -r ca < "$root/$supply/online"; } 2>/dev/null || ca=
+    # _se_rd, not a bare read: a node with no trailing newline hands read a non-zero status WITH
+    # the value already in the variable, and "|| ca=" then threw a valid 1 away.
+    _se_rd "$root/$supply/online"; ca=$_seraw
     [ "$ca" = 1 ] || continue
     for cf in "$root/$supply/input_current_now" "$root/$supply/current_now"; do
-      raw=; { read -r raw < "$cf"; } 2>/dev/null || continue
+      _se_rd "$cf"; raw=$_seraw
+      [ -n "$raw" ] || continue
       _se_input_ma "$raw" "$supply/${cf##*/}"; c=$_sema
       [ "$c" != null ] || continue
       break
@@ -679,7 +682,7 @@ _se_input() {
     # produced a usable reading - a Fairphone 5 whose usb/current_now is a mirrored register still
     # publishes a real 8.98 V. Dropping the whole supply here would have replaced one wrong number
     # with two missing ones.
-    raw=; { read -r raw < "$root/$supply/voltage_now"; } 2>/dev/null || raw=
+    _se_rd "$root/$supply/voltage_now"; raw=$_seraw
     _se_voltage_mv "$raw" "" bus; v=$_semv
     [ "$v" != null ] || [ "$c" != null ] || continue
     printf '"input":{"voltageMv":%s,"currentMa":%s}' "$v" "$c"
@@ -870,7 +873,7 @@ write_state() {
     lvl=$(batt_cap 2>/dev/null)
     _se_int "$lvl"; lvl=$_senum
     { [ "$lvl" != null ] && [ "$lvl" -ge 0 ] && [ "$lvl" -le 100 ]; } || lvl=null
-    ue_volt=; { read -r ue_volt < "$voltNow"; } 2>/dev/null || ue_volt=
+    _se_rd "$voltNow"; ue_volt=$_seraw
     _se_voltage_mv "$ue_volt" "${voltFactor:-}"; volt=$_semv
     case "$currFile" in */current_now) [ -n "$ue_cur" ] || ue_cur=$(current_now);; *) ue_cur=$(current_now);; esac
     _se_int "$ue_cur"; cur=$_senum

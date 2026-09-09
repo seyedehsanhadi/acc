@@ -2,7 +2,7 @@ batt_info() {
 
   local i=
   local info=
-  local voltNow_=
+  local voltNow_= _battmv=
   local currNow=
   local powerNow=
   local factor=
@@ -31,11 +31,13 @@ batt_info() {
 
 
   # raw battery info from the kernel's battery interface
+  local tempValue=$(temperature_now)
+  [ "$tempValue" = null ] && tempValue=NaN || tempValue=$(calc2 "$tempValue" / 10)
   info="$(
     { grep . $battCapacity $battStatus $currFile $temp $voltNow 2>/dev/null || :; } \
       | sed "s|.*/||; s/:/ /; s/^batt_vol/voltage_now/; s/^batt_temp/temp/;
         s/^status .*/status $_status/; s/batteryaveragecurrent/current_now/;
-        s/^capacity .*/level $(capacity[4]=false batt_cap)%/; s/^temp .*/temp $(($(cat $temp) / 10))℃/" | sort
+        s/^capacity .*/level $(capacity[4]=false batt_cap)%/; s/^temp .*/temp ${tempValue}℃/" | sort
   )"
 
 
@@ -43,9 +45,9 @@ batt_info() {
   # latched stickily from a charging current by amp_recheck); the per-value 16000 guess is only a
   # last resort. (No charge_full_design/voltage anchor: it mis-detects mixed-unit phones like the
   # OnePlus 8 Pro -- uV/uAh but mA current.)
-  currNow=$(echo "$info" | sed -n "s/^current_now //p")
-  dtr_conv_factor ${currNow#-} ${ampFactor:-$ampFactor_}
-  currNow=$(calc2 ${currNow:-0} / $factor)
+  _se_ma "$(current_now)"
+  currNow=NaN
+  [ "$_sema" = null ] || currNow=$(calc2 "$_sema" / 1000)
 
 
   # NORMALIZE THE SIGN. The kernel's raw sign is not a convention, it is a per-device accident:
@@ -65,7 +67,7 @@ batt_info() {
       currNow=${currNow#-} ;;
     Discharging)
       case "$currNow" in
-        -*|0|0.00|0.0) : ;;
+        -*|0|0.00|0.0|NaN) : ;;
         *) currNow=-$currNow ;;
       esac ;;
   esac
@@ -73,12 +75,14 @@ batt_info() {
 
   # parse VOLTAGE_NOW & convert to Volts
   voltNow_=$(echo "$info" | sed -n "s/^voltage_now //p")
-  dtr_conv_factor $voltNow_ ${voltFactor-}
-  voltNow_=$(calc2 ${voltNow_:-0} / $factor)
+  _se_voltage_mv "$voltNow_" "${voltFactor:-}"
+  voltNow_=NaN; _battmv=$_semv
+  [ "$_semv" = null ] || voltNow_=$(calc2 "$_semv" / 1000)
 
 
   # calculate POWER_NOW (Watts)
-  powerNow=$(calc2 $currNow \* $voltNow_)
+  powerNow=NaN
+  case "$currNow:$voltNow_" in *NaN*) :;; *) powerNow=$(calc2 "$currNow" \* "$voltNow_");; esac
 
 
   {
@@ -101,9 +105,13 @@ power_now ${powerNow}W"
       echo "
 charge_type $power_supply_type"
 
-      psaRaw=$(cat $i/*current_now 2>/dev/null | tail -n 1)
-      dtr_conv_factor ${psaRaw#-} ${ampFactor:-$ampFactor_}
-      power_supply_amps=$(calc2 ${psaRaw:-0} / $factor)
+      psaRaw=
+      for psaNode in "$i/input_current_now" "$i/current_now"; do
+        { read -r psaRaw < "$psaNode"; } 2>/dev/null && break
+      done
+      _se_input_ma "$psaRaw" "$psaNode"
+      power_supply_amps=0.00
+      [ "$_sema" = null ] || power_supply_amps=$(calc2 "$_sema" / 1000)
 
       # Absolute value, and a string test rather than arithmetic. The old form was
       # [ 0${power_supply_amps%.*} -gt 0 ], which on a supply reporting a negative current builds
@@ -113,10 +121,16 @@ charge_type $power_supply_type"
       # literal string 0.00 and anything else is a real reading.
       if [ "${power_supply_amps#-}" != 0.00 ]; then
         psvRaw=$(cat $i/voltage_now 2>/dev/null)
-        dtr_conv_factor ${psvRaw:-0} ${voltFactor-}
-        power_supply_volts=$(calc2 ${psvRaw:-0} / $factor)
+        _se_voltage_mv "$psvRaw"
+        [ "$_semv" != null ] || continue
+        _se_bus_mv "$_semv" "$_battmv"
+        power_supply_volts=$(calc2 "$_sebus" / 1000)
         power_supply_watts=$(calc2 $power_supply_amps \* $power_supply_volts)
-        consumed_watts=$(calc2 $power_supply_watts - $powerNow)
+        consumed_watts=NaN
+        [ "$powerNow" = NaN ] || consumed_watts=$(calc2 "$power_supply_watts" - "$powerNow")
+        # The charger cannot deliver less than the pack is taking. A negative figure means the
+        # input reading and the battery reading are not measuring the same thing; say so.
+        case "$consumed_watts" in -*) consumed_watts=NaN;; esac
 
         echo "power_supply_amps $power_supply_amps
 power_supply_volts $power_supply_volts

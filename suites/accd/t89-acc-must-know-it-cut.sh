@@ -104,11 +104,31 @@ else
       chDisabledByAcc=true
       _r=$1
       not_charging(){ [ "$_r" = no ]; }
+      # rc25 also asks whether a charger is attached. Stub it true: this case is about a phone WITH
+      # the cable in, which is the only situation where keeping the flag buys a retry. The unplugged
+      # half of that guard is asserted separately below.
+      present(){ return 0; }
       set_temp_level(){ :; }
       eval "$_tail" >/dev/null 2>&1
       printf '%s' "${chDisabledByAcc:-unset}" ) 2>/dev/null
   }
   _took=$(_try yes); _didnt=$(_try no)
+  # rc25: with no charger attached there is never a later pass carrying real charging current, so the
+  # flag has to clear regardless of what the observer says. A Fairphone 5 sat unplugged with it stuck
+  # true for 174 consecutive flight records and ACC then believed it already owned a cut on the next
+  # plug-in. This is only asserted when the guard is present, so the check still means something on
+  # a build that does not have it.
+  if grep -q 'if not_charging && present; then' "$MF"; then
+    _unplugged=$( set +u
+      chDisabledByAcc=true
+      not_charging(){ return 0; }
+      present(){ return 1; }
+      switch_release_observed(){ return 1; }
+      set_temp_level(){ :; }
+      eval "$_tail" >/dev/null 2>&1
+      printf '%s' "${chDisabledByAcc:-unset}" )
+    [ "$_unplugged" = false ]       && ok "with no charger attached the flag clears whatever the observer says"       || no "unplugged, the cut flag stayed [${_unplugged}] - ACC would believe it owns a cut at the next plug-in"
+  fi
   if [ "$_took" = false ] && [ "$_didnt" = true ]; then
     ok "the flag clears only when the release is OBSERVED (took->${_took}, did not->${_didnt}), so a failed resume is retried"
   else

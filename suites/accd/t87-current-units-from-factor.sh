@@ -29,6 +29,7 @@ fin(){ echo "$ID: $P passed, $F failed"; [ "$F" -eq 0 ] && exit 0 || exit 1; }
 execDir=${execDir:-/data/adb/vr25/acc}
 SE=$execDir/state-export.sh
 [ -f "$SE" ] || { no "state-export.sh not found"; fin; }
+. "$SE"
 _src=$(sed 's/^[[:space:]]*#.*//' "$SE")
 
 # ---- 1: the existing precedent still holds --------------------------------------------------------
@@ -77,7 +78,7 @@ else
   [ "$(_shipped_ma 2756218 1000000)" = 2756 ]     && ok "(shipped) a real 2.76A input still normalises"     || no "(shipped) 2756218 uA gave [$(_shipped_ma 2756218 1000000)]mA"
   [ "$(_shipped_ma 1212 1000)" = 1212 ]     && ok "(shipped) a genuine mA kernel is left alone"     || no "(shipped) 1212 with an mA factor gave [$(_shipped_ma 1212 1000)]"
   [ "$(_shipped_ma 250000 '')" = 250 ]     && ok "(shipped) no factor set: the magnitude fallback still works above the cutoff"     || no "(shipped) the unknown-units fallback gave [$(_shipped_ma 250000 '')]"
-  [ "$(_shipped_ma 6163 '')" = 6163 ]     && ok "(shipped) no factor and below the cutoff: magnitude cannot tell, and it says so rather than guessing high"     || no "(shipped) the no-factor small-value case changed behaviour unexpectedly"
+  [ "$(_shipped_ma 6163 '')" = null ]     && ok "(shipped) no factor and below the cutoff: magnitude cannot tell, and it says so rather than guessing high"     || no "(shipped) the no-factor small-value case changed behaviour unexpectedly"
 fi
 
 # ---- 8: the SHIPPED code must route both CURRENTS through the units-aware helper --------------------
@@ -107,8 +108,8 @@ case "${_forks:-0}" in ''|*[!0-9]*) _forks=0;; esac
   || no "${_forks} call site(s) still use \$(_se_ma ...) - that is a fork per call, every pass"
 
 _body_in=$(awk '/^_se_input\(\) \{/,/^\}/' "$SE")
-printf '%s\n' "$_body_in" | grep -q '_se_ma' \
-  && ok "_se_input normalises its current through _se_ma" \
+printf '%s\n' "$_body_in" | grep -q '_se_input_ma' \
+  && ok "_se_input uses its own sensor scale" \
   || no "_se_input still decides its current by magnitude alone - a 6mA input publishes as 6A"
 
 _body_ch=$(awk '/^_se_charge\(\) \{/,/^\}/' "$SE")

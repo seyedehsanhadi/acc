@@ -74,7 +74,7 @@ apply_on_boot() {
     # for a cap.
     if [ -z "${exitCode_-}" ]; then
       eval "_tv=\$$arg"
-      _lv=; { read -r _lv < "$file"; } 2>/dev/null || _lv=
+      _lv=; { read -r _lv < "$file"; } 2>/dev/null || :
       if [ -n "${_lv:-}" ] && [ "$_lv" = "${_tv:-}" ]; then
         continue
       fi
@@ -300,7 +300,7 @@ apply_on_plug() {
           # snapshot, and the back-off guard above is deliberately APPLY-only, so nothing bounded a
           # restore at all. An unreadable live value or a non-numeric default still writes -- leaving
           # a node capped is the failure this path exists to prevent, so it fails toward writing.
-          _lv=; { read -r _lv < "$file"; } 2>/dev/null || _lv=
+          _lv=; { read -r _lv < "$file"; } 2>/dev/null || :
           case "${_lv:-x}" in
             ''|*[!0-9]*) : ;;
             *) case "${default:-x}" in
@@ -546,7 +546,7 @@ cycle_switches() {
       if [ "$1" = on ]; then
         flip_sw $1 || :
       else
-        _cbase=$(cat "$currFile" 2>/dev/null)   # charging-direction baseline (signed) before pausing
+        _cbase=$(current_now)   # charging-direction baseline (signed) before pausing
         journal_arm "${chargingSwitch[*]}"
         # rc21: the journal is the ONLY thing that makes this write recoverable, so verify it
         # actually landed before taking the risk. If dataDir is read-only, full, or not yet
@@ -602,7 +602,7 @@ cycle_switches() {
               *)
                 for _s in 1 2 3; do
                   sleep ${loopDelay[0]}
-                  _cc=$(cat "$currFile" 2>/dev/null)
+                  _cc=$(current_now)
                   _this=1
                   case "${_cc:-x}" in
                     ''|x|*[!0-9-]*) _this=1 ;;
@@ -1007,21 +1007,31 @@ _rekick_due() {
 # 20000 it is already millivolts. The same shape holds for current. Everything downstream now works
 # in mV and mA, which are the units the comments were always written in.
 _mv() {
-  case "${1:-x}" in ''|x|*[!0-9]*) return 1;; esac
-  [ "$1" -gt 20000 ] 2>/dev/null && echo $(( $1 / 1000 )) || echo "$1"
+  _se_int "${1:-}"
+  [ "$_senum" != 0 ] || { echo 0; return; }
+  _se_voltage_mv "${1:-}"
+  [ "$_semv" != null ] || return 1
+  echo "$_semv"
 }
 
 _ma() {
-  local _a=${1#-}
-  case "${_a:-x}" in ''|x|*[!0-9]*) return 1;; esac
-  [ "$_a" -gt 20000 ] 2>/dev/null && echo $(( _a / 1000 )) || echo "$_a"
+  _se_input_ma "${1:-}"
+  [ "$_sema" != null ] || return 1
+  echo "${_sema#-}"
 }
 
 # The bus voltage in mV, empty when unreadable.
 _vbus_mv() {
   local _v=
-  { read -r _v < usb/voltage_now; } 2>/dev/null || :
-  _mv "${_v:-}"
+  _se_rd usb/voltage_now; _v=$_seraw
+  # "bus": this is a SUPPLY voltage, so microvolts, and anything under 1V is noise rather than a
+  # contract. Without it a Fairphone 5 with nothing plugged in reported 9-19 V here, which is above
+  # the 6.5 V high-voltage latch the re-kick guard consults.
+  _se_int "${_v:-}"
+  [ "$_senum" != 0 ] || { echo 0; return; }
+  _se_voltage_mv "${_v:-}" "" bus
+  [ "$_semv" != null ] || return 1
+  echo "$_semv"
 }
 
 # Input current in mA from whichever node this kernel provides. usb/input_current_now does not exist
@@ -1029,27 +1039,12 @@ _vbus_mv() {
 # disables every check that depends on it - which is how a gate can end up permanently answering
 # "no" on half the fleet.
 _iin_ma() {
-  local _n= _v= _a= _f=$TMPDIR/.iinmicro
-  for _n in usb/input_current_now usb/current_now usb/input_current_settled \
-            main-charger/current_now main/current_now; do
-    [ -f "$_n" ] || continue
-    _v=
-    { read -r _v < "$_n"; } 2>/dev/null || :
-    case "${_v:-x}" in ''|x|*[!0-9-]*) continue;; esac
-    _a=${_v#-}
-    # The scale rule is INLINE on purpose. Written as a second function it became a dependency of
-    # this one, and every fixture that extracts helpers by name - t111, t112 and the scenario
-    # replays - pulls _iin_ma without knowing to pull its new helper too. They then got an
-    # undefined command, an empty reading, and reported "the supply is not dead" for seven cases
-    # that were about a dead supply. A reader with no dependencies cannot be half-extracted.
-    if [ "$_a" -gt 20000 ] 2>/dev/null; then
-      grep -qxF "$_n" "$_f" 2>/dev/null || echo "$_n" >> "$_f" 2>/dev/null || :
-      echo $(( _a / 1000 ))
-    elif grep -qxF "$_n" "$_f" 2>/dev/null; then
-      echo $(( _a / 1000 ))
-    else
-      echo "$_a"
-    fi
+  local _n _v
+  for _n in usb/input_current_now usb/current_now usb/input_current_settled main-charger/current_now main/current_now; do
+    _se_rd "$_n"; _v=$_seraw; [ -n "$_v" ] || continue
+    _se_input_ma "$_v" "$_n"
+    [ "$_sema" != null ] || continue
+    echo "${_sema#-}"
     return 0
   done
   return 1
@@ -1447,7 +1442,17 @@ enable_charging() {
     #
     # Leaving it true costs nothing when the resume did work - the next pass sees real charging current
     # and clears it there - and buys a retry when it did not.
-    if not_charging; then
+    # `present` is the rc25 half of this condition. Keeping the flag buys a retry only while a
+    # charger is attached: with the cable out there is never going to be "real charging current" on a
+    # later pass to clear it, and switch_release_observed answers false outright for every switch
+    # that is not an input cut. A Fairphone 5 on charging_enabled sat unplugged with cutByAcc=true
+    # for 174 consecutive flight records, and ACC then believed it already owned a cut at the next
+    # plug-in -- "Charging" with the level standing still until the daemon was restarted.
+    #
+    # Keep this comment ABOVE the branch: t89 lifts a fixed window of lines around the else-branch
+    # assignment and executes it, so comment lines inside the branch push the `if` out of the window
+    # and the fixture stops testing anything.
+    if not_charging && present; then
       # Some input cuts leave stale current/status telemetry after their node is released. Direct
       # readback plus online is stronger evidence that ACC no longer owns a cut than that telemetry.
       switch_release_observed && chDisabledByAcc=false || :

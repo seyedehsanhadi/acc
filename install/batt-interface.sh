@@ -1,9 +1,31 @@
+# The readers below (current_now, current_factor, temperature_now, volt_now, cc_now) validate
+# through state-export.sh's _se_* helpers. accd sources THIS file during init, several hundred
+# lines before it sources misc-functions.sh (which is what pulls state-export.sh in), so on a cold
+# start every one of those helpers was an undefined command: the installed rc25-test logged
+# "batt-interface.sh[607]: _se_int: inaccessible or not found" on the first boot after install, and
+# the cache was built from readings that had silently failed. Pull the dependency in here, guarded,
+# so the file is usable wherever it is sourced from.
+command -v _se_int >/dev/null 2>&1 || . "${execDir:-/data/adb/vr25/acc}/state-export.sh"
+
 idle_discharging() {
+  # A current at or below the idle threshold used to RETURN here, before the coulomb arbitration
+  # below could see it. That is correct for a real idle hold and wrong for a stub sensor: the
+  # OnePlus 8 Pro (kona, oplus) publishes current_now pinned at 0 while the kernel says Charging and
+  # the pack is filling, so ACC answered Idle on every pass. not_charging was then true whatever the
+  # phone was doing, every switch candidate "held" on the first try, and the daemon pinned
+  # wireless/op_disable_charge -- a WIRELESS node -- as the charging switch on a wired charger. AMPS
+  # tested that same node against the firmware and reported "no effect": the limit was never
+  # enforced and nothing said so.
+  #
+  # Idle stays the provisional verdict, but the fuel gauge gets to overrule it. A bypass hold keeps
+  # the counter flat and stays Idle; a stub sensor over a real charge shows the counter climbing.
+  # The >=150uAh gate below means a genuine sub-threshold trickle cannot trip this.
+  local _idleprov=0
   if [ ${curNow#-} -le $idleThreshold ]; then
     _status=Idle
-    return 0
+    _idleprov=1
   fi
-  case "${_DPOL-}" in
+  [ "$_idleprov" = 1 ] || case "${_DPOL-}" in
     +) [ $curNow -ge 0 ] && _status=Discharging || _status=Charging;;
     -) [ $curNow -lt 0 ] && _status=Discharging || _status=Charging;;
     *) [ "${curThen:-null}" = null ] || {
@@ -151,7 +173,7 @@ not_charging() {
   [[ "$chargingSwitch" = *\ -- ]] && chargingSwitch="${chargingSwitch% --}" || battStatusOverride=
 
   case "$currFile" in
-    */current_now|*/?attery?verage?urrent) [ ${ampFactor:-$ampFactor_} -eq 1000 ] || idleThreshold=${idleThreshold}000;;
+    */current_now|*/?attery?verage?urrent) [ "${ampFactor:-${ampFactor_:-}}" != 1000000 ] || idleThreshold=${idleThreshold}000;;
     *) battStatusWorkaround=false;;
   esac
 
@@ -338,17 +360,109 @@ set_temp_level() {
 }
 
 
+current_now() {
+  local v=
+  _se_rd "$currFile"; v=$_seraw
+  _se_int "$v"
+  if [ "$_senum" != null ]; then
+    [ "${_senum#-}" -le 100000000 ] || _senum=null
+    if [ "${ampFactor:-}" = 1000 ] && [ "$_senum" != null ]; then
+      [ "${_senum#-}" -le 100000 ] || _senum=null
+    fi
+  fi
+  echo "$_senum"
+}
+
+current_factor() {
+  local v p pv
+  case "${ampFactor:-}" in
+    1000|1000000) echo "$ampFactor"; return;;
+    '') :;;
+    *) return 0;;
+  esac
+  v=$(current_now); v=${v#-}
+  [ "$v" != null ] || return 0
+  if [ "$v" -ge 16000 ]; then echo 1000000; return; fi
+  [ "$v" -gt 0 ] || return 0
+  case "$currFile" in */battery/current_now|battery/current_now)
+    for p in bms/current_now "${ACC_PSY:-/sys/class/power_supply}/bms/current_now"; do
+      _se_rd "$p"; pv=$_seraw; [ -n "$pv" ] || continue
+      _se_int "$pv"; pv=${_senum#-}
+      [ "$pv" != null ] || continue
+      if [ "$pv" -ge 16000 ] && [ "$pv" -ge $((v * 750)) ] && [ "$pv" -le $((v * 1250)) ]; then echo 1000; return; fi
+    done
+    # No bms to compare against (OnePlus 8 Pro, kona). Any other measurement node settles it, but
+    # only at the same ~1000x ratio: input and battery current differ physically by at most about
+    # 3x, so a factor that close to 1000 is a unit difference and nothing else.
+    for p in "${ACC_PSY:-/sys/class/power_supply}"/*/current_now "${ACC_PSY:-/sys/class/power_supply}"/*/input_current_now; do
+      [ -e "$p" ] || continue
+      case "$p" in */battery/current_now|"$currFile") continue;; esac
+      _se_rd "$p"; _se_int "$_seraw"; pv=${_senum#-}
+      [ "$pv" != null ] || continue
+      [ "$pv" -ge 16000 ] || continue
+      if [ "$pv" -ge $((v * 750)) ] && [ "$pv" -le $((v * 1250)) ]; then echo 1000; return; fi
+    done;;
+  esac
+  # No proof either way. A microamp gauge that is CARRYING this current reads >= 16000 somewhere:
+  # if no measurement node on the phone does, mA is not a guess, it is the only reading consistent
+  # with the hardware. Returning nothing instead left status() answering Unknown forever, and the
+  # resume branch (accd: _le_resume_cap && not_charging) never fires on an Unknown status, so a
+  # phone paused at its limit would sit there until it hit shutdown_level.
+  for p in "${ACC_PSY:-/sys/class/power_supply}"/*/current_now "${ACC_PSY:-/sys/class/power_supply}"/*/current_avg            "${ACC_PSY:-/sys/class/power_supply}"/*/input_current_now; do
+    [ -e "$p" ] || continue
+    _se_rd "$p"; _se_int "$_seraw"; pv=${_senum#-}
+    [ "$pv" != null ] || continue
+    [ "$pv" -lt 16000 ] || return 0
+  done
+  echo 1000
+}
+
+temperature_now() {
+  local v=
+  _se_rd "$temp"; v=$_seraw
+  _se_temp_decic "$v"
+  echo "$_setemp"
+}
+
 status() {
 
   local i=0
   local return1=false
   local csw2=${chargingSwitch[2]-}
-  local curNow=$(cat $currFile)
+  local curNow=$(current_now)
   # N1 (coerce): a transient empty/garbage current_now read (common on some fuel gauges during a
   # mode switch) would make idle_discharging's "[ ${curNow#-} -le N ]" and the calc below a 2-arg
   # test / arithmetic error, aborting this hot loop under set -eu (charging limit lost). Same
   # hardening the sibling volt_now/batt_cap/temp_now reads already carry; curNow was the gap.
-  case ${curNow#-} in ''|*[!0-9]*) curNow=0;; esac
+  # ONLY THE INFERENCE PATH NEEDS THE CURRENT. Refusing here refused everything above it.
+  #
+  # rc24 coerced an unreadable current to 0 and read the kernel status word regardless. rc25
+  # replaced that with two early "_status=Unknown; return 1" exits placed ABOVE read_status, the
+  # battStatusOverride branch and the battStatusWorkaround gate. Both exits are correct for
+  # idle_discharging, which cannot infer a direction from a reading it does not have -- and wrong
+  # for a phone that turned that inference OFF and asked for the raw kernel verdict, which needs no
+  # current at all. That phone got Unknown/rc=1 instead of Discharging/rc=0, so not_charging() never
+  # answered "not charging" and the resume branch in accd, which fires only on that answer, never
+  # ran.
+  #
+  # Record whether the current is usable and let the branch that consumes it decide.
+  local _curbad=false _unitbad=false
+  case ${curNow#-} in ''|*[!0-9]*) _curbad=true; curNow=0;; esac
+  # A factor that was not knowable when the cache was built (the daemon started while the pack sat
+  # idle at the cap, so no current had a magnitude to read a unit from) must be resolved HERE, on
+  # the first reading that carries one.
+  case "${ampFactor:-${ampFactor_:-}}" in
+    1000|1000000) :;;
+    *) ampFactor_=$(current_factor)
+       case "${ampFactor_:-}" in
+         1000|1000000) :;;
+         # A current of exactly zero is zero in either unit, so it needs no factor at all. Demanding
+         # one here is what made a daemon that started while the pack sat idle at the cap answer
+         # Unknown on every pass: no current ever carried a magnitude to read a unit from, and the
+         # resume branch in accd never fires on Unknown.
+         *) [ "${curNow#-}" = 0 ] || _unitbad=true;;
+       esac;;
+  esac
 
   _status=$(read_status)
   # Keep the kernel's own verdict. idle_discharging() below replaces _status with a verdict
@@ -370,10 +484,17 @@ status() {
   # An empty value (not_charging's `local battStatusWorkaround=${battStatusWorkaround-}` can
   # produce one) was an empty command word for the same reason. :-false covers both.
   elif ${battStatusWorkaround:-false}; then
+    # This is the consumer. With no usable current there is nothing to infer a direction from, and
+    # inferring from a coerced 0 would report Idle on a phone that is not idle.
+    if $_curbad || $_unitbad; then
+      _status=Unknown
+      return 1
+    fi
     idle_discharging
   fi
 
-  [ -z "${exitCode_-}" ] || echo -e "  ${switch:--} (${swValue:-N/A})\t$(calc $curNow \* 1000 / ${ampFactor:-$ampFactor_} | xargs printf %.f)mA\t$_status"
+  # ampFactor_ can be empty when the unit was never resolvable, and this line divides by it.
+  [ -z "${exitCode_-}" ] || echo -e "  ${switch:--} (${swValue:-N/A})\t$(calc $curNow \* 1000 / ${ampFactor:-${ampFactor_:-1000000}} | xargs printf %.f)mA\t$_status"
 
   for i in Discharging DischargingDischarging Idle IdleIdle; do
     [ $i != ${1-}$_status ] || return 0
@@ -390,10 +511,10 @@ volt_now() {
   # rc19 (standby): builtin read + prefix trim replace the per-call grep spawn (same first-4
   # digits: uV -> mV). A short/garbage read still coerces to the fail-safe 9999.
   local v=
-  { read -r v < $voltNow; } 2>/dev/null || :
-  v=${v%"${v#????}"}
-  case $v in ''|*[!0-9]*) v=9999;; esac
-  echo $v
+  _se_rd "$voltNow"; v=$_seraw
+  _se_voltage_mv "$v" "${voltFactor:-}"
+  [ "$_semv" != null ] || _semv=9999
+  echo "$_semv"
 }
 
 
@@ -485,7 +606,7 @@ if ${_INIT:-false} || ! _cache_usable; then
 
   echo 0 > $TMPDIR/.dummy-mcc
 
-  for currFile in rt*-charger/current_now battery/current_now $batt/current_now bms/current_now battery/?attery?verage?urrent \
+  for currFile in battery/current_now $batt/current_now bms/current_now battery/?attery?verage?urrent \
     /sys/devices/platform/battery/power_supply/battery/?attery?verage?urrent \
     ${battStatus%/*}/current_now $TMPDIR/.dummy-mcc
   do
@@ -502,7 +623,8 @@ if ${_INIT:-false} || ! _cache_usable; then
 
 
   ampFactor=$(sed -n 's/^ampFactor=//p' $dataDir/config.txt 2>/dev/null || :)
-  ampFactor_=${ampFactor:-1000}
+  case "$ampFactor" in ''|1000|1000000) :;; *) ampFactor=;; esac
+  ampFactor_=$(current_factor)
 
   # uA-vs-mA: a current >= 16000 (raw) means a microamp sensor (no cell charges at 16+ amps).
   # This is read from whatever the live current is now; amp_recheck (accd) re-latches it the
@@ -511,9 +633,6 @@ if ${_INIT:-false} || ! _cache_usable; then
   # charge -- a MIXED-unit phone) stays under 16000 even when charging, so it stays mA. (An
   # earlier charge_full_design/voltage anchor mis-detected those mixed-unit phones and is removed:
   # only the current_now magnitude reflects the current_now unit.)
-  if [ $ampFactor_ -eq 1000000 ] || [ $(sed s/-// $currFile) -ge 16000 ]; then
-    ampFactor_=1000000
-  fi
 
   curThen=$TMPDIR/.mcc
   # Only on a genuine init. A self-heal rebuild is repairing the cache, not restarting the daemon,
@@ -599,11 +718,72 @@ batt_cap() {
 }
 
 
+# Pull the counter out of battery/uevent without forking. rc19 removed the per-loop stat calls
+# because they cost 26% of a core at idle, so this stays a builtin read loop, not a sed.
+# Sets $_ccue; empty when the file or the key is absent.
+_cc_uevent() {
+  local _k= _v=
+  _ccue=
+  while IFS='=' read -r _k _v; do
+    [ "$_k" = POWER_SUPPLY_CHARGE_COUNTER ] && { _ccue=$_v; return 0; }
+  done < "${1}uevent" 2>/dev/null || :
+}
+
 cc_now() {
-  # charge_counter (uAh remaining) -- a POLARITY-INDEPENDENT "is the cell actually gaining charge?" signal.
-  # The resume watchdog uses it to tell a real stall apart from a status node that lies under a bypass/idle
-  # switch (OnePlus/OPLUS) or a mis-latched polarity. 0 = node absent or non-numeric (signed coulomb-counter
-  # devices) -> callers fall back to the status-only path, so this never regresses a phone without it.
-  local _c=$(cat ${battCapacity%capacity}charge_counter 2>/dev/null)
-  case "$_c" in ''|*[!0-9]*) echo 0;; *) echo "$_c";; esac
+  # charge_counter (uAh remaining) -- a POLARITY-INDEPENDENT "is the cell actually gaining charge?"
+  # signal. The resume watchdog uses it to tell a real stall apart from a status node that lies
+  # under a bypass/idle switch (OnePlus/OPLUS) or a mis-latched polarity. 0 = no usable source ->
+  # callers fall back to the status-only path, so this never regresses a phone without one.
+  #
+  # THE SOURCE MUST TRACK THE BATTERY, NOT MERELY BE READABLE.
+  #
+  # Fairphone 5, two field bundles seven hours apart: battery/charge_counter read 2667961 in BOTH,
+  # across a 32-point capacity swing. It is a frozen register. The uevent copy tracked the pack:
+  #   cap 21%, charge_full 3542000 -> expected 743820,  uevent 749841,  attribute 2667961
+  #   cap 53%, charge_full 3546000 -> expected 1879380, uevent 1868032, attribute 2667961
+  #
+  # An earlier fix here fell back to the uevent only when the attribute read FAILED. On this phone
+  # it succeeds and returns a wrong constant, so the fallback never engaged, the counter looked flat
+  # forever, ccDir stuck at "flat", polarity stayed latched "unstable", and _se_class was left with
+  # only the status word -- which this kernel lies with. That is what put "charging" and a wattage
+  # on a phone draining at 0.3-0.8 A with the cable in.
+  #
+  # So validate against the gauge's own arithmetic: capacity% of charge_full. Whichever source sits
+  # closer to that wins. Where the two agree -- every other phone tested -- the attribute still wins
+  # and nothing changes. Where neither capacity nor charge_full is readable there is nothing to
+  # check against, so the attribute wins exactly as before.
+  #
+  # The verdict is a per-device fact, so it is decided once and cached in tmpfs, the same way
+  # .iinmicro caches the input-current scale. After the first pass this costs one read.
+  local _cache=$TMPDIR/.cc-src _src= _base=${battCapacity%capacity} _a=null _u=null _cap= _full= _exp= _ea= _eu=
+  _se_rd "${_base}charge_counter"; _se_int "$_seraw"
+  case "$_senum" in null|-*) :;; *) _a=$_senum;; esac
+  [ ! -f "$_cache" ] || { read -r _src < "$_cache" 2>/dev/null || _src=; }
+  # Cached and still readable: answer immediately.
+  case "$_src" in
+    attr)   [ "$_a" = null ] || { echo "$_a"; return 0; };;
+    uevent) _cc_uevent "$_base"; _se_int "${_ccue:-}"
+            case "$_senum" in null|-*) :;; *) echo "$_senum"; return 0;; esac;;
+  esac
+  _cc_uevent "$_base"; _se_int "${_ccue:-}"
+  case "$_senum" in null|-*) :;; *) _u=$_senum;; esac
+  # Only one source available: take it, no decision to make and nothing to cache.
+  [ "$_a" != null ] || { [ "$_u" = null ] && { echo 0; return 0; }; echo "$_u"; return 0; }
+  [ "$_u" != null ] || { echo "$_a"; return 0; }
+  # Both present. Validate, if the arithmetic is available.
+  _se_rd "${_base}capacity";    _se_int "$_seraw"; _cap=$_senum
+  _se_rd "${_base}charge_full"; _se_int "$_seraw"; _full=$_senum
+  case "$_cap:$_full" in
+    null:*|*:null|*:0) echo "$_a"; return 0;;
+  esac
+  _exp=$(( _full / 100 * _cap ))
+  _ea=$(( _a - _exp )); [ "$_ea" -ge 0 ] || _ea=$(( - _ea ))
+  _eu=$(( _u - _exp )); [ "$_eu" -ge 0 ] || _eu=$(( - _eu ))
+  if [ "$_eu" -lt "$_ea" ]; then
+    echo uevent > "$_cache" 2>/dev/null || :
+    echo "$_u"
+  else
+    echo attr > "$_cache" 2>/dev/null || :
+    echo "$_a"
+  fi
 }

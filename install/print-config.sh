@@ -4,6 +4,8 @@ echo "acc_version=$(sed -n s/versionCode=//p $execDir/module.prop)
 
 allow_idle_above_pcap=$allowIdleAbovePcap
 amp_factor=$ampFactor
+input_amp_factor=${inputAmpFactor:-}
+temp_factor=${tempFactor:-}
 batt_status_workaround=$battStatusWorkaround
 capacity_mask=${capacity[4]}
 

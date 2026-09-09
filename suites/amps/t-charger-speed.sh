@@ -35,10 +35,12 @@ AMPS=$(_amps_find)
 [ -f "$AMPS" ] || { no "amps not found (set AMPS=)"; fin; }
 
 PSY=/sys/class/power_supply
+CORE="$(sed -n '/^node_unit(){/,/^}/p' "$AMPS"; grep -E '^(rd|read1|san|abs|rd_current|rd_ma|voltage_mv|voltage_uv|power_mw)\(\)' "$AMPS")"
 BLOCK=$(sed -n '/^_csr()/,/^log "+===/p' "$AMPS" | sed '$d')
 [ -n "$BLOCK" ] || { no "could not lift the CHARGER/SPEED block"; fin; }
 
-OUT=$( ( PSY=$PSY
+OUT=$( ( PSY=$PSY; BATT="$PSY/battery"; CURF="$BATT/current_now"; HAVE_TO=0
+         eval "$CORE"; CUR_UNIT="$(node_unit "$CURF")"
          log(){ printf '%s\n' "$*"; }
          eval "$BLOCK"
          printf 'VARS imax=%s iin=%s ib=%s iinbad=%s ibbad=%s ccc=%s src=%s\n' "$_imax" "$_iin" "$_ib" "${_iinbad:-0}" "${_ibbad:-0}" "${_ccc:-0}" "$_src" ) 2>&1 )
@@ -200,5 +202,15 @@ case "$OUT" in *'ibbad=1'*)
 grep -q 'dc|wireless) \[ "$_src" = "$_u" \] || continue' "$AMPS" \
   && ok "dc/wireless are only consulted when the charge is actually arriving that way" \
   || no "the wireless ceiling is counted on a wired charge"
+
+_rccond=$(printf '%s\n' "$BLOCK" | sed -n '/^elif \[ -n "${STUCKS:-}" /{ s/^elif //; s/; then$//; p; }')
+[ -n "$_rccond" ] || { no "recovery condition missing"; fin; }
+for _case in history:1:no history:0:yes empty:0:no; do
+ _got=$( ( STUCKS=old; REC_NOW=${_case#*:}; REC_NOW=${REC_NOW%%:*}
+            case "$_case" in empty:*) STUCKS=;; esac
+            chg_now(){ echo "$REC_NOW"; }
+            if eval "$_rccond"; then echo yes; else echo no; fi ) )
+ [ "$_got" = "${_case##*:}" ] && ok "recovery warning $_case" || no "recovery warning $_case got $_got"
+done
 
 fin

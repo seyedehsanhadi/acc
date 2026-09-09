@@ -88,7 +88,12 @@ rm -rf "$T91W" 2>/dev/null; mkdir -p "$T91W" 2>/dev/null
 RD=$T91W/readers.sh
 { sed -n '/^_ma() {/,/^}/p' "$MF"
   sed -n '/^_iin_scale() {/,/^}/p' "$MF"
-  sed -n '/^_iin_ma() {/,/^}/p' "$MF"; } > "$RD" 2>/dev/null
+  sed -n '/^_iin_ma() {/,/^}/p' "$MF"
+  # The readers validate through state-export's _se_* helpers. Without them every reader here calls
+  # an undefined command, the detector never sees an input reading, and the collapse it is meant to
+  # catch is reported as undetected.
+  printf '. "%s/state-export.sh"
+' "$execDir"; } > "$RD" 2>/dev/null
 _blk=$(sed -n '/! -f \$TMPDIR\/\.hvrecover/,/^        fi$/p' "$AD")
 if [ -z "$_blk" ]; then
   no "could not lift the collapse detector out of accd.sh - this suite would otherwise pass on prose"

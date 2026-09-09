@@ -443,8 +443,28 @@ for _f in $DD/logs/*; do
   [ -f "$_f" ] || continue; _bn=${_f##*/}
   case "$_bn" in init.log|install.log) continue ;; esac
   [ -e "$STAGE/acc-logs/$_bn" ] && continue
-  if [ "$(wc -c <"$_f" 2>/dev/null || echo 0)" -gt 50000 ]; then tail -c 50000 "$_f" > "$STAGE/acc-logs/$_bn" 2>/dev/null; else cp -f "$_f" "$STAGE/acc-logs/$_bn" 2>/dev/null; fi
-  [ -s "$STAGE/acc-logs/$_bn" ] && man "OK     acc log (swept, unenumerated) -> acc-logs/$_bn"
+  # A TAIL OF AN ARCHIVE IS NOT AN ARCHIVE. This sweep takes whatever is in acc-data/logs, and that
+  # directory is not all text: the 2026-09-09 Fairphone 5 bundle carried acc-logs-FP5.tgz at
+  # EXACTLY 50000 bytes, headerless, `file` calling it "data" and tar refusing it -- while the
+  # manifest recorded "OK". The one file in the bundle nobody could open was the one the collector
+  # itself had truncated, and it said so nowhere.
+  #
+  # Text is tailed as before, because the last 50 kB of a log is the useful part. A compressed or
+  # otherwise binary blob is only useful whole: take it if it fits, and say plainly that it was
+  # skipped if it does not, rather than shipping a fragment that reads as a corrupt file.
+  _oversize=0; [ "$(wc -c <"$_f" 2>/dev/null || echo 0)" -gt 50000 ] && _oversize=1
+  case "$_bn" in
+    *.gz|*.tgz|*.bz2|*.tbz2|*.xz|*.zip|*.zst|*.png|*.jpg|*.pb|*.bin|*.db|*.dump)
+      if [ "$_oversize" = 1 ]; then
+        man "SKIP   binary, ${_bn} is $(wc -c <"$_f" 2>/dev/null) bytes - a tail of it would not open"
+        continue
+      fi
+      cp -f "$_f" "$STAGE/acc-logs/$_bn" 2>/dev/null ;;
+    *)
+      if [ "$_oversize" = 1 ]; then tail -c 50000 "$_f" > "$STAGE/acc-logs/$_bn" 2>/dev/null
+      else cp -f "$_f" "$STAGE/acc-logs/$_bn" 2>/dev/null; fi ;;
+  esac
+  [ -s "$STAGE/acc-logs/$_bn" ] && man "OK     acc log (swept, unenumerated)$([ "$_oversize" = 1 ] && echo ', tailed to 50000b') -> acc-logs/$_bn"
 done
 
 # --- AccA app state (its own settings/profiles/schedules -- decisive for any app-side fault) ---
@@ -480,9 +500,30 @@ grab env/env.txt "environment (mount/applets/module dir/flags)" sh -c '
   echo "== module dir =="; ls -la /data/adb/modules/acc 2>/dev/null | head -20
   echo "== flags =="; for f in /data/adb/modules/acc/disable /data/adb/modules/acc/remove '"$E"'/disable '"$DD"'/disable '"$DD"'/.no-early-cap; do [ -e "$f" ] && echo "  $f PRESENT"; done'
 grab djs.txt "DJS scheduler (module + schedules + last run)" sh -c '
-  echo "== djs module =="; grep -h "^version" /data/adb/modules/djs/module.prop 2>/dev/null || echo "(not installed)"
-  echo "== running =="; pgrep -f djs.sh >/dev/null && echo yes || echo no
-  echo "== schedules/last-run =="; for s in $(find /data/adb/vr25 /data/adb/djs /data/data/'"$PKG"'/files -iname "*djs*" 2>/dev/null | head -6); do [ -f "$s" ] && { echo "-- ${s##*/} --"; tail -20 "$s" 2>/dev/null; }; done'
+  # AccA does NOT install DJS as a Magisk module: Djs.isDjsInstalled() tests
+  # <app filesDir>/djs/service.sh, so looking only under /data/adb/modules/djs reported
+  # "(not installed)" on phones that had it. Two bundles were collected that way while the user was
+  # asking why his schedules had not run, and neither could answer the question.
+  echo "== djs module =="
+  { grep -h "^version" /data/adb/modules/djs/module.prop 2>/dev/null     || grep -h "^version" /data/adb/vr25/djs/module.prop 2>/dev/null     || { [ -f /data/data/'"$PKG"'/files/djs/service.sh ] && echo "installed in app filesDir (no module.prop)"; }     || echo "(not installed)"; }
+  echo "== install paths =="
+  for _d in /data/adb/modules/djs /data/adb/vr25/djs /data/data/'"$PKG"'/files/djs; do
+    [ -e "$_d" ] && echo "  present: $_d" || echo "  absent:  $_d"
+  done
+  # pgrep -f matches THIS shell too: the pattern is in our own command line, so the answer was
+  # always "yes" whether or not anything was scheduled.
+  echo "== running =="; pgrep -f "[d]js.sh" >/dev/null && echo yes || echo no
+  # The runtime AccA actually drives is /dev/.vr25/djs/djsc, and its --list is the only thing that
+  # can answer "are my schedules there". Two bundles were collected while that was the question and
+  # neither said anything about it.
+  echo "== djsc runtime =="
+  if [ -x /dev/.vr25/djs/djsc ]; then
+    echo "  /dev/.vr25/djs/djsc present"
+    echo "== schedules (djsc --list) =="; /dev/.vr25/djs/djsc --list . 2>&1 | head -40
+  else
+    echo "  /dev/.vr25/djs/djsc ABSENT -- AccA schedules cannot run"
+  fi
+  echo "== schedules/last-run (files) =="; for s in $(find /data/adb/vr25 /data/adb/djs /data/data/'"$PKG"'/files -iname "*djs*" -type f 2>/dev/null | head -8); do echo "-- $s --"; tail -20 "$s" 2>/dev/null; done'
 grab env/daemon-detail.txt "daemon process state (all PIDs=concurrency, stat=D=hung, runtime UID, tmpfs+data listing)" sh -c '
   echo "== accd processes (pid + cmdline; more than one = concurrent-write risk) =="; pgrep -af accd.sh 2>/dev/null || pgrep -f accd.sh 2>/dev/null || echo "(none -- daemon down)"
   echo "== ps state (STAT D = stuck in kernel; USER must be root) =="; for _p in $(pgrep -f accd.sh 2>/dev/null); do ps -o pid,user,stat,wchan,cmd -p $_p 2>/dev/null | grep -v "^\s*PID"; done

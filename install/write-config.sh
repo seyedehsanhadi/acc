@@ -19,6 +19,8 @@ s0="${charging_switch-${s}}"
 
 ab="${apply_on_boot-${ab-${applyOnBoot[@]}}}"
 af=${amp_factor-${af-$ampFactor}}
+iaf=${input_amp_factor-${inputAmpFactor:-}}
+tf=${temp_factor-${tempFactor:-}}
 aiapc="${allow_idle_above_pcap-${aiapc-$allowIdleAbovePcap}}"
 ap="${apply_on_plug-${ap-${applyOnPlug[@]}}}"
 bso="${batt_status_override-${bso-$battStatusOverride}}"
@@ -252,8 +254,10 @@ case ${pbim-} in true|false|no) :;; *) pbim=true;; esac
 # batt-interface.sh '[ $ampFactor_ -eq 1000000 ]'; tempLevel in 'echo $((100 - $l))';
 # cooldownRatio[*] in 'sleep'; cooldownCurrent in set_ch_curr range checks). Keep
 # them clean so a corrupt config can never wedge those code paths.
-case $af in *[!0-9]*) af=;; esac                   # amp_factor: null or integer
-case $vf in *[!0-9]*) vf=;; esac                  # volt_factor: null or integer
+case $af in ''|1000|1000000) :;; *) af=;; esac
+case $vf in ''|1000|1000000) :;; *) vf=;; esac
+case $iaf in ''|1000|1000000) :;; *) iaf=;; esac
+case $tf in ''|1|10|1000) :;; *) tf=;; esac
 case ${tl-} in *[!0-9]*|'') tl=0;; esac           # temp_level: integer %, default 0
 # ui_refresh: seconds between idle state.json publishes, or 0 to publish on change only. Garbage
 # falls back to the 30s default rather than to 0, because 0 is a real setting here (heartbeat off)
@@ -372,6 +376,8 @@ printf '%s\n' "configVerCode=$_wcVer
 
 allowIdleAbovePcap=${aiapc:-false}
 ampFactor=$af
+inputAmpFactor=$iaf
+tempFactor=$tf
 battStatusWorkaround=${bsw:-true}
 capacity=(${sc:-5} ${cc:-101} $rc $pc ${cm:-false})
 cooldownCurrent=$cdc

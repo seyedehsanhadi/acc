@@ -22,7 +22,7 @@
 
 ID=t112
 E=${execDir:-/data/adb/vr25/acc}
-W=/data/local/tmp/t112
+W=${W:-/data/local/tmp/t112}
 REPEATS=${REPEATS:-5}
 P=0; F=0
 ok(){ P=$((P+1)); echo "  PASS  $*"; }
@@ -33,6 +33,7 @@ rm -rf $W 2>/dev/null; mkdir -p $W/ps/usb $W/ps/main 2>/dev/null
 # ---- cut the two decision sites out of the shipped files ---------------------------------------
 sed -n '/^_mv() {/,/^}/p;/^_ma() {/,/^}/p;/^_iin_ma() {/,/^}/p;/^_hv_may_kick() {/,/^}/p' \
   $E/misc-functions.sh > $W/gate.sh
+printf '\n. "%s/state-export.sh"\n' "$E" >> $W/gate.sh
 sed -n '/Normalise FIRST, store mV/,/^             done ;;/p' $E/accd.sh \
   | sed 's/ ;;$//' > $W/latch.sh
 grep -q '_hv_may_kick()' $W/gate.sh || { echo "$ID: could not extract the gate - no verdict"; exit 1; }

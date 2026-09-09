@@ -42,7 +42,9 @@ switch_release_observed \
   && no "a missing switch node was accepted as released" \
   || ok "a missing switch node keeps ownership"
 
-grep -A8 '^    if not_charging; then' "$MF" | grep -q 'switch_release_observed && chDisabledByAcc=false' \
+# rc25 guards the same branch with `&& present` (a cut cannot be owned with the cable out), so the
+# anchor is no longer the bare line. The assertion is unchanged: the observer must be consulted here.
+grep -A10 -E '^    if not_charging( && present)?; then' "$MF" | grep -q 'switch_release_observed && chDisabledByAcc=false' \
   && ok "enable_charging consumes the direct evidence" \
   || no "the observer is not wired into enable_charging"
 

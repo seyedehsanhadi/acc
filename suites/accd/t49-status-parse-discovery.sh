@@ -50,7 +50,6 @@ chk(){ [ "$3" = "$2" ] && ok "$1" || no "$1  (expected '$2', got '$3')"; }
 _s=$(xf read_status "$BI")
 [ -n "$_s" ] || { no "could not extract read_status"; fin; }
 eval "$_s"
-local(){ :; }
 battStatus=$W/status
 rs(){ printf '%s' "$1" > $battStatus; read_status; }
 

@@ -63,7 +63,12 @@ fi
 
 T93RD=${T93RD:-/data/local/tmp/t93-readers.sh}
 { sed -n '/^_mv() {/,/^}/p' "$MF"
-  sed -n '/^_ma() {/,/^}/p' "$MF"; } > "$T93RD" 2>/dev/null
+  sed -n '/^_ma() {/,/^}/p' "$MF"
+  # _mv/_ma validate through state-export's _se_* helpers, so a bundle that carries only the two
+  # readers defines functions that call commands that do not exist here. Extracting a reader
+  # without its dependency reads as "the guard refuses everything" and grades nothing.
+  printf '. "%s/state-export.sh"
+' "$execDir"; } > "$T93RD" 2>/dev/null
 
 _gate(){ # $1 hvaim  $2 hvcontract  $3 chDisabledByAcc  $4 ge_pause_cap  $5 present  $6 vbus  $7 count-so-far
   ( set +u

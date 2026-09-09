@@ -2,6 +2,8 @@ configVerCode=202505180
 
 allowIdleAbovePcap=false
 ampFactor=
+inputAmpFactor=
+tempFactor=
 battStatusWorkaround=true
 capacity=(5 101 70 75 false)
 cooldownCurrent=
@@ -528,4 +530,3 @@ runCmdOnPause=''
 # The Tensor gain is smaller because its state build is already cheaper (444ms vs 1216ms per call).
 # 0 disables the heartbeat entirely: state.json then updates only when level or status changes,
 # which suits a forever-plugged phone whose meter nobody watches.
-

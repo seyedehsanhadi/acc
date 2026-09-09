@@ -18,7 +18,8 @@ print_not_running() {
 
 print_restart_accd() {
   echo "This mode ends by itself once that level is reached."
-  echo "Unplug before then and it stays until accd restarts (pass -a to restart on unplug)."
+  echo "It also ends if the daemon restarts, which is what changing a setting does."
+  echo "End it early with: acc -f 0   (or pass -a to end it when you unplug)."
 }
 
 print_restarted() {
@@ -183,6 +184,11 @@ Options
       acc -f (charge to 100%)
       acc -f -s mcc=500 (charge to 100% with a 500 mA limit)
       acc -f 90 -a (the -a (auto) tries to restart accd automatically shortly after the charger is unplugged; not supported by all devices)
+      acc -f 0 (cancel a one-time charge and go back to your configured limits)
+
+    A one-time charge ends when the target is reached, when the firmware reports the battery full,
+    on reboot, or with acc -f 0. It ALSO ends if accd restarts -- and changing any setting restarts
+    accd -- so avoid touching settings mid-charge if you want the one-time target to hold.
 
   -F|--flash ["zip_file"]   Flash any zip files whose update-binary is a shell script
     e.g.,

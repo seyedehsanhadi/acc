@@ -48,14 +48,9 @@ grep -q '\[ "$WANT_UNPLUG" = 1 \] && MODE=complete' "$AMPS" \
 
 # ---- L3455: the micro-unit boundary, EXECUTED ------------------------------------------------------
 # Pre-fix `-gt 100000`: a node reading EXACTLY 100000 fell through unconverted.
-_csn=$(sed -n '/^_csn()/,/^}/p' "$AMPS")
-[ -n "$_csn" ] || { no "could not extract _csn"; fin; }
-printf '%s' "$_csn" | grep -q -- '-ge 100000' \
-  && ok "_csn converts at >= 100000, so exactly 100000 is converted" \
-  || no "_csn uses -gt 100000 - a node reading exactly 100000 stays in micro-units"
-printf '%s' "$_csn" | grep -q -- '-gt 100000' \
-  && no "  the -gt form is still present in _csn" \
-  || ok "  and the -gt form is gone"
+grep '^_csn()' "$AMPS" | grep -q 'rd_ma' \
+  && ok "charger current uses the shared per-node conversion (boundaries executed in t-units)" \
+  || no "charger current bypasses the shared per-node conversion"
 
 # ---- L3484: the input ceiling takes the HIGHEST vote, not the first ---------------------------------
 grep -q '"${_uc:-0}" -gt "${_imax:-0}" \] 2>/dev/null && _imax=$_uc' "$AMPS" \

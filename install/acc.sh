@@ -638,6 +638,15 @@ case "${1-}" in
     while [ -n "${1-}" ]; do
       case "$1" in
         -a) auto=true; shift;;
+        # A NEGATIVE NUMBER IS A MISTYPED CAPACITY, NOT AN OPTION. `-*` sends everything with a
+        # leading dash through to acca as a pass-through option, so `acc -f -5` came back as
+        # "Unknown command: -5" followed by the entire help text -- a wall of output for a typo the
+        # sibling guard below answers in one line. Options never start with a digit, so this cannot
+        # shadow a real one.
+        -[0-9]*)
+          echo "Capacity out of range for -f: ${1#-} (expected 1-100)" >&2
+          exit 2
+        ;;
         -*) break;;
         *[!0-9]*)
           echo "Invalid argument for -f: $1" >&2
@@ -648,6 +657,24 @@ case "${1-}" in
       esac
     done
     case ${cap:-100} in ''|*[!0-9]*) cap=100;; esac
+
+    # A CANCEL, because a restart is no longer one.
+    #
+    # Until accd learned to re-adopt the throwaway, restarting the daemon was the de-facto way out
+    # of a one-time charge -- by accident, and silently, which is the bug that made this necessary.
+    # Now that the mode survives a restart, taking that away without replacing it would leave a
+    # mistyped `acc -f 100` undoable short of a reboot or actually reaching 100%.
+    #
+    # 0 is the natural spelling: it is the one value the range check below already refuses, so no
+    # existing usage changes meaning. Removing the marker is the whole of it -- the daemon reloads
+    # the real config on the next line, exactly as the restore hook does when the target is met.
+    if [ "$cap" = 0 ]; then
+      rm -f $TMPDIR/.acc-f-config 2>/dev/null || :
+      echo "One-time charge cancelled; your configured limits apply again."
+      ensure_tmpdir_links
+      exec $TMPDIR/accd $config
+    fi
+
     { [ "$cap" -ge 1 ] && [ "$cap" -le 100 ]; } 2>/dev/null || {
       echo "Capacity out of range for -f: $cap (expected 1-100)" >&2
       exit 2
@@ -703,13 +730,20 @@ case "${1-}" in
     #
     # Unplugging early still keeps the override unless -a was given, which is -a's documented job.
     # That case now self-heals on the next charge: the target is reached, this fires, real config.
-    printf '\n%s\n' ':; command -v _reexec >/dev/null 2>&1 && _ge_pause_cap && _reexec || :' >> $config
+    # rc25: _ge_pause_cap alone cannot end a one-time charge. It asks "is the level at or above the
+    # target", and with `acc -f 100` that is only true if the gauge actually reports 100. A
+    # Fairphone 5 whose charge_full has aged to 3567000 of 4260000 design stopped short, the hook
+    # never fired, and the daemon stayed on the throwaway config at pause=100 while config.txt still
+    # read 88 - twice, on two separate one-time charges, reported as "it ignores the charging limit
+    # afterwards". The firmware's own termination is the second, independent end-of-charge signal:
+    # status=Full means this charge is over whatever the percentage says.
+    printf '\n%s\n' ':; command -v _reexec >/dev/null 2>&1 && { { command -v _ge_pause_cap_raw >/dev/null 2>&1 && _ge_pause_cap_raw; } || _ge_pause_cap || { command -v read_status >/dev/null 2>&1 && case "$(read_status 2>/dev/null)" in Full|full) true;; *) false;; esac; }; } && { rm -f $TMPDIR/.acc-f-config 2>/dev/null; _reexec; } || :' >> $config
 
     # Same _reexec routing as the hook above, and for the same reason: this fires INSIDE the daemon,
     # so a bare `exec $TMPDIR/accd` makes the daemon kill itself through release-lock. Guarding on
     # _reexec (defined only in accd.sh) also replaces the older reliance on acca.sh stubbing online()
     # to a no-op, so the hook is inert in a front-end whether or not that stub is present.
-    ! $auto || printf '\n%s\n' ':; command -v _reexec >/dev/null 2>&1 && ! online && _reexec || :' >> $config
+    ! $auto || printf '\n%s\n' ':; command -v _reexec >/dev/null 2>&1 && ! online && { rm -f $TMPDIR/.acc-f-config 2>/dev/null; _reexec; } || :' >> $config
     # rc21 SECURITY: was `eval $TMPDIR/acca $config "$@"`. The pass-through options of
     # `acc -f 90 -s mcc=500` are already separate words by the time they reach here, so eval
     # bought nothing and handed the caller's argument to the shell: `acc -f '$(cmd)'` ran cmd
@@ -942,7 +976,7 @@ case "${1-}" in
       for _pf in /sys/class/power_supply/*/online /sys/class/power_supply/*/present; do
         [ -f "$_pf" ] || continue
         case "$_pf" in */battery/*|*/bms/*|*maxfg*|*fuelgauge*) continue;; esac
-        _pv=; { read -r _pv < "$_pf"; } 2>/dev/null || continue
+        _pv=; { read -r _pv < "$_pf"; } 2>/dev/null || :
         [ "$_pv" = 1 ] && return 0
       done
       return 1

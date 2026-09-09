@@ -87,6 +87,53 @@ if ! $_INIT; then
   }
 
 
+  # THE SAME QUESTION, ASKED OF THE FUEL GAUGE RATHER THAN OF ANDROID.
+  #
+  # _ge_pause_cap answers "should charging be paused", and for that it is right to prefer the level
+  # Android shows the user. The end of a one-time charge is a different question: "did this charge
+  # ever reach its target". batt_cap prefers dsys_batt, and Android's level FALLS BACK a point as
+  # soon as charging stops, so the moment the cap is reached the answer flips to false and stays
+  # false - the level cannot rise again, because the pause that answer caused is what stops it.
+  #
+  # Device-proven on a Pixel 6a, charge-once to 49%: the daemon paused correctly at the target and
+  # then sat on the throwaway config indefinitely, with battery/capacity reading 49, batt_cap
+  # reading 48, and capacity[3]=49. That is the Fairphone 5 report ("it ignores the charging limit
+  # after a one-time charge") with no aged pack needed - a one-point disagreement is enough.
+  #
+  # The kernel percent is the gauge's own number and does not step back when the charger stops, so
+  # it is the honest source for "is this charge over". Unreadable or garbage reads as reached: the
+  # consequence is restoring the user's real config, which is the safe direction.
+  _ge_pause_cap_raw() {
+    local _rc= _n= _best=-1
+    case ${capacity[3]-} in ''|*[!0-9]*) return 0;; esac
+    [ ${capacity[3]} -le 100 ] || return 0
+    # EVERY level source, and the HIGHEST of them wins.
+    #
+    # One node is not enough, because the sources disagree and the disagreement outlives the charge.
+    # Measured on a Pixel 6a stuck at a one-time target of 44%: $battCapacity is maxfg/capacity and
+    # read 43 while battery/capacity read 44 and Android's own level read 44 - and batt_cap returned
+    # 43 as well, because its cache is KEYED on the kernel percent, so a stale Android reading is
+    # pinned there for as long as that kernel node does not move. Once the pause lands, nothing
+    # moves again: the level cannot rise, so whichever source is low stays low for ever and the
+    # mode never ends. Asking one node just moves the deadlock to a different phone.
+    #
+    # Reaching the target once is enough, and ending the mode only restores the user's own config,
+    # so the high reading is the safe one to believe. An unreadable set reads as reached for the
+    # same reason.
+    for _n in "${battCapacity:-}" "${ACC_PSY:-/sys/class/power_supply}"/battery/capacity; do
+      [ -n "$_n" ] || continue
+      # KEEP THE VALUE READ AT EOF. A node with no trailing newline hands read a non-zero status
+      # with the data already in _rc, and "|| _rc=" wiped it -- both sources then looked
+      # unreadable, _best stayed -1, and the helper answered "reached" on an unfinished charge.
+      _rc=; { read -r _rc < "$_n"; } 2>/dev/null || :
+      case ${_rc:-x} in ''|*[!0-9]*) continue;; esac
+      [ "$_rc" -gt "$_best" ] && _best=$_rc
+    done
+    [ "$_best" -lt 0 ] && return 0
+    [ "$_best" -ge ${capacity[3]} ]
+  }
+
+
   system_charge_policy_active() {
     local _p _v
     for _p in "${ACC_PSY:-/sys/class/power_supply}"/*/charging_policy; do
@@ -131,7 +178,7 @@ if ! $_INIT; then
     # written straight to the flight log rather than through flight_rec() to keep temp_now free of
     # any call that could lead back into it.
     local _t=
-    { read -r _t < "$temp"; } 2>/dev/null || :
+    _t=$(temperature_now)
     case "$_t" in
       ''|*[!0-9-]*)
         _t=250
@@ -177,7 +224,7 @@ if ! $_INIT; then
     # letting a replug clear it is the documented, safer trade-off.
     local _th=
     case ${temperature[1]-} in ''|*[!0-9]*) return 1;; esac
-    { read -r _th < "${temp:-/nonexistent}"; } 2>/dev/null || return 1
+    _th=$(temperature_now)
     case ${_th:-x} in ''|*[!0-9-]*) return 1;; esac
     [ "$_th" -ge $(( ${temperature[1]} * 10 )) ] 2>/dev/null
   }
@@ -227,7 +274,7 @@ if ! $_INIT; then
     # Now: read once, demand a plain number, and only compare a value we have. No reading means
     # no shutdown -- max_temp still pauses charging, so nothing is left unprotected. A thermal
     # cutoff that cannot read the thermometer must do nothing, never fire.
-    _tn=$(temp_now 2>/dev/null) || _tn=
+    _tn=$(temperature_now 2>/dev/null) || _tn=
     case "${_tn:-x}" in ''|*[!0-9-]*) _tn=;; esac
     [ -z "$_tn" ] || [ "$_tn" -lt $(( _st * 10 )) ] || shutdown
   }
@@ -672,6 +719,11 @@ if ! $_INIT; then
             sed -i "\|^${chargingSwitch[*]}$|d" $TMPDIR/ch-switches
             echo "${chargingSwitch[*]}" >> $TMPDIR/ch-switches
           fi
+          # A cleared switch is what a user sees as "the charge switch is not detected any more",
+          # and until now this path left no record at all: no notification, nothing in warnings.log,
+          # and the tmpfs blacklist is gone at the next boot. A bundle collected afterwards showed an
+          # empty chargingSwitch with nothing to explain it. Say which switch was dropped and why.
+          command -v warn_once_per >/dev/null 2>&1 && warn_once_per swclear-unsolicited 3600             "ACC dropped the charging switch '${chargingSwitch[*]% --}': charging carried on 3 times in a row while ACC had it disabled, so it is not holding. ACC will select another one the next time it needs to pause."
           $TMPDIR/acca $config --set charging_switch=
           chargingSwitch=()
           unsolicitedResumes=0
@@ -967,26 +1019,26 @@ if ! $_INIT; then
   }
 
   amp_recheck() {
-    # 6.4.1-rc5: STICKY-UP uA latch. The current_now unit is only knowable from a CHARGING
-    # current: a microamp sensor reads >= 16000 raw when charging (no cell charges at 16+ amps),
-    # a milliamp sensor stays under it (OnePlus 8 Pro tops out ~5000 mA). Latch + PERSIST uA the
-    # moment a big current appears, so a daemon init while idling at the cap can self-heal on the
-    # next charge instead of mis-defaulting to mA. Bumps UP only; a true mA device is never touched.
-    [ "${ampFactor_:-1000}" = 1000000 ] && return 0
-    local _c=$(cat $currFile 2>/dev/null); _c=${_c#-}
-    [ "$_c" -ge 16000 ] 2>/dev/null || return 0
-    ampFactor_=1000000
-    echo ampFactor_=1000000 >> $TMPDIR/.batt-interface.sh 2>/dev/null || :
-    # A substitution-only sed reports success while changing nothing when the key is absent, and a
-    # hand-minimised or older config legitimately omits ampFactor. The learned unit was then correct
-    # in the tmpfs cache for this boot and GONE after a reboot, so current limits and the exported
-    # state got scaled by the wrong factor. Substitute if the key is there, append if it is not.
-    if grep -q '^ampFactor=' $dataDir/config.txt 2>/dev/null; then
-      grep -q '^ampFactor=1000000$' $dataDir/config.txt 2>/dev/null || sed -i 's/^ampFactor=.*/ampFactor=1000000/' $dataDir/config.txt 2>/dev/null || :
-    else
-      echo ampFactor=1000000 >> $dataDir/config.txt 2>/dev/null || :
-    fi
+    local f i
+    # An EXPLICIT ampFactor is the user's, and rc25 stopped rewriting it -- rc24 used to overwrite
+    # config.txt from a live reading. Keep it that way, but do not stay silent when the hardware
+    # contradicts it by a factor of 1000: every current-based decision is then off by that much.
+    case "${ampFactor:-}" in
+      1000|1000000)
+        f=$(ampFactor= ampFactor_= current_factor)
+        [ -n "$f" ] && [ "$f" != "$ampFactor" ] || return 0
+        for i in 1 2; do [ "$(ampFactor= ampFactor_= current_factor)" = "$f" ] || return 0; done
+        command -v warn_once_per >/dev/null 2>&1 && warn_once_per ampfactor 86400           "config has ampFactor=$ampFactor but this phone's sensors read $f. ACC is honouring your setting; clear it with 'acc -s amp_factor=' to let ACC detect the unit."
+        return 0;;
+    esac
+    [ "${ampFactor_:-}" != 1000000 ] || return 0
+    f=$(current_factor)
+    [ -n "$f" ] && [ "$f" != "${ampFactor_:-}" ] || return 0
+    for i in 1 2; do [ "$(current_factor)" = "$f" ] || return 0; done
+    ampFactor_=$f
+    _cache_write || :
   }
+
 
   ctrl_charging() {
 
@@ -1274,22 +1326,28 @@ if ! $_INIT; then
         # the precise fault the latch exists to prevent.
         #
         # So require that nothing is actually flowing. That is what "lost" means, and it is the same
-        # signal the collapse detector below already trusts. The node list mirrors it, because
-        # usb/input_current_now does not exist on every phone - a Pixel 6a charged at 1.67A while
-        # that path read nothing at all.
-        _lin=
-        for _lnode in usb/input_current_now usb/current_now main-charger/current_now usb/input_current_settled; do
-          { read -r _lin < "$_lnode"; } 2>/dev/null || continue
-          case "${_lin:-x}" in ''|x|*[!0-9-]*) _lin=; continue;; esac
-          break
-        done
+        # signal the collapse detector below already trusts -- so read it through the SAME function,
+        # rather than through a second copy of the node list that only claimed to mirror it.
+        #
+        # The copy did not mirror it. _iin_ma converts through _se_input_ma and _se_icl_guard; this
+        # loop took the first node that held digits, raw. On a Fairphone 5 that is usb/current_now
+        # reading a mirrored 9375000 - 9.375 A into a phone whose own input_current_limit says
+        # 5000000, and wireless/current_now carries the identical figure while wireless/online is 0.
+        # The guard rejects it at 187% of the negotiated ceiling; this loop accepted it, cleared
+        # .hvlost on every pass, and suppressed the one log line that would have named the collapse
+        # on the single device where a collapse was actually happening.
+        #
+        # _iin_ma returns MILLIAMPS and already strips the sign, so the threshold below is 500, not
+        # 500000. It answers rc=1 when nothing readable converts, which is the empty case handled
+        # immediately after.
+        _lin=$(_iin_ma) || _lin=
         # UNREADABLE INPUT IS NOT EVIDENCE OF A COLLAPSE. The comment said so and the code did the
         # opposite: an empty reading failed the first test and fell straight through to the release,
         # so a phone with no readable input node would drop the latch on voltage alone and re-detect
         # a working contract. Absence of a measurement has to fail toward leaving things alone.
         if [ -z "$_lin" ]; then
           rm -f $TMPDIR/.hvlost 2>/dev/null || :
-        elif [ "${_lin#-}" -ge 500000 ] 2>/dev/null; then
+        elif [ "$_lin" -ge 500 ] 2>/dev/null; then
           rm -f $TMPDIR/.hvlost 2>/dev/null || :
         elif [ -n "$_lvb" ] && [ "$(_mv "$_lvb")" -lt "${hvLostMv:-6000}" ] 2>/dev/null; then
           _lvc=$(cat $TMPDIR/.hvlost 2>/dev/null || echo 0)
@@ -1803,6 +1861,9 @@ if ! $_INIT; then
                 else
                   echo "${chargingSwitch[*]% --}" >> $TMPDIR/.sw-blacklist
                   notif "⚠️ ACC: the auto-selected charging switch stopped holding your ${capacity[3]:-?}% limit - selecting another."
+                  # notif alone is a popup: it leaves nothing behind for the diagnostic bundle, and
+                  # this is one of the three places a switch can silently disappear.
+                  command -v warn_once_per >/dev/null 2>&1 && warn_once_per swclear-lockfail 3600                     "ACC dropped the charging switch '${chargingSwitch[*]% --}': it stopped holding the ${capacity[3]:-?}% limit for 3 confirmed loops. Blacklisted for this boot; another will be selected."
                   $TMPDIR/acca $config --set charging_switch= 2>/dev/null || :
                   chargingSwitch=()
                   rm $TMPDIR/.lockfail-count 2>/dev/null || :
@@ -2179,7 +2240,7 @@ if ! $_INIT; then
                 [ -f $TMPDIR/.resumewarned ] || { touch $TMPDIR/.resumewarned 2>/dev/null || :; warn_once_per resume-locked 1800 "⚠️ ACC: charging isn't resuming at your ${capacity[2]:-?}% limit with your locked switch. Pick another in AccA - ACC will NOT change a locked switch."; }
               else
                 echo "${chargingSwitch[*]% --}" >> $TMPDIR/.sw-blacklist
-                warn_once_per resume-reselect 1800 "⚠️ ACC: charging is not resuming at your ${capacity[2]:-?}% limit - selecting another switch."
+                warn_once_per resume-reselect 1800 "⚠️ ACC: charging is not resuming at your ${capacity[2]:-?}% limit with '${chargingSwitch[*]% --}' - selecting another switch."
                 $TMPDIR/acca $config --set charging_switch= 2>/dev/null || :; chargingSwitch=()
                 rm $TMPDIR/.resumefail 2>/dev/null || :
               fi
@@ -2403,7 +2464,7 @@ if ! $_INIT; then
     # temp_now(), whose fallback is 250 (fail-safe HIGH, forces a pause, never a false release).
     # Here the safe direction is to change NOTHING: hold the latch and wait for a trusted reading.
     t=
-    { read -r t < "${temp:-/nonexistent}"; } 2>/dev/null || t=
+    t=$(temperature_now)
     case "${t:-x}" in ''|*[!0-9-]*) t=;; esac
     # rc23: HYSTERESIS. Engage at max_temp, then HOLD until the pack has cooled to resume_temp.
     #
@@ -3100,8 +3161,9 @@ if ! $_INIT; then
   }
 
   set_dp() {
-    local curr= i= pos=0 neg=0 _force_relatch=0 _c0= _c1=
+    local curr= i= pos=0 neg=0 _force_relatch=0 _c0= _c1= _dpmin=16000
     _srccfg
+    [ "${ampFactor:-${ampFactor_:-}}" != 1000 ] || _dpmin=16
     # _srccfg just re-sourced the config, so a chargingSwitch blocked since the last pass (AMPS
     # writes the list mid-run) is back in scope here. Re-check, or the daemon keeps a node the
     # write choke point refuses and holds nothing while reporting nothing.
@@ -3123,9 +3185,9 @@ if ! $_INIT; then
     # per-loop overhead and no flip-flop on noise -- a small current is ignored, so the rc6
     # silent-overcharge guard is preserved.
     if [ -n "${_DPOL-}" ]; then
-      curr=$(cat $currFile 2>/dev/null)
+      curr=$(current_now)
       case ${curr:-x} in ''|x|*[!0-9-]*) return 0;; esac
-      [ ${curr#-} -ge 16000 ] 2>/dev/null || return 0
+      [ ${curr#-} -ge "$_dpmin" ] 2>/dev/null || return 0
       if [ "$(cat $battStatus 2>/dev/null)" != Charging ]; then
         # D9: the status node may LIE (the very reason battStatusWorkaround exists). Don't blindly return:
         # only when a large current is present while PLUGGED and the fuel gauge is genuinely RISING
@@ -3136,8 +3198,8 @@ if ! $_INIT; then
         { online 2>/dev/null || present 2>/dev/null; } || return 0
         _c0=$(batt_cap); sleep 3; _c1=$(batt_cap)
         [ "${_c1:-0}" -gt "${_c0:-0}" ] 2>/dev/null || return 0
-        curr=$(cat $currFile 2>/dev/null); case ${curr:-x} in ''|x|*[!0-9-]*) return 0;; esac
-        [ ${curr#-} -ge 16000 ] 2>/dev/null || return 0
+        curr=$(current_now); case ${curr:-x} in ''|x|*[!0-9-]*) return 0;; esac
+        [ ${curr#-} -ge "$_dpmin" ] 2>/dev/null || return 0
       fi
       case "$curr" in
         -*) [ "$_DPOL" = + ] && return 0;;   # negative current, _DPOL=+ (charging is -) -> agrees
@@ -3157,20 +3219,15 @@ if ! $_INIT; then
     if [ "$(cat $battStatus 2>/dev/null)" = Charging ] || [ "$_force_relatch" = 1 ]; then
       # sample the (noisy) current a few times; require a consistent sign before committing
       for i in 1 2 3 4 5; do
-        curr=$(cat $currFile 2>/dev/null)
-        case ${curr:-x} in
-          -*) neg=$((neg + 1));;
-          ''|x|*[!0-9-]*|0) ;;
-          *) pos=$((pos + 1));;
-        esac
+        curr=$(current_now)
+        if [ "$curr" != null ] && [ "${curr#-}" -ge "$_dpmin" ]; then
+          case "$curr" in -*) neg=$((neg + 1));; *) pos=$((pos + 1));; esac
+        fi
         sleep 1
       done
       if   [ $pos -ge 3 ]; then sdp -
       elif [ $neg -ge 3 ]; then sdp +
-      elif [ -z "${_DPOL-}" ] && [ $((pos + neg)) -eq 0 ]; then
-        # charging but current reads zero/unreadable = no usable current sensor; fall back to
-        # the raw battery status (same intent as the old curr==0 path).
-        /dev/acca --set batt_status_workaround=false
+
       fi
     fi
     set -x
@@ -3234,7 +3291,7 @@ if ! $_INIT; then
       present 2>/dev/null && plug=1 || plug=0
       t=$(temp_now)
       { read -r lastPlug lastCap lastT < $TMPDIR/.mask-last; } 2>/dev/null || :
-      { read -r n < $TMPDIR/.mask-n; } 2>/dev/null || n=0
+      n=; { read -r n < $TMPDIR/.mask-n; } 2>/dev/null || :
       case ${n:-0} in ''|*[!0-9]*) n=0;; esac
       n=$((n + 1))
       if [ $n -ge 20 ] || [ ! -f $TMPDIR/.mask-on ]; then
@@ -3288,6 +3345,7 @@ if ! $_INIT; then
   # load generic functions
   . $execDir/misc-functions.sh
 
+
   # ENSURE THE LOG DIRECTORY HERE - the first point where $dataDir exists and nothing has had a
   # chance to branch away yet.
   #
@@ -3306,6 +3364,7 @@ if ! $_INIT; then
   # for the whole selection. dataDir is defined by misc-functions.sh, so this is the earliest
   # point that can work.
   [ -d "$dataDir/logs" ] || mkdir -p "$dataDir/logs" 2>/dev/null || :
+
 
   # rc21: a CONFIGURED switch bypasses the candidate list entirely, so blocking the node you
   # are currently using had no effect: the daemon kept flipping it. Drop it back to automatic

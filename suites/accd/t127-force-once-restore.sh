@@ -40,7 +40,10 @@ for _f in "$AC" "$AD"; do [ -f "$_f" ] || { no "missing $_f"; fin; }; done
 _ac=$(sed 's/^[[:space:]]*#.*//' "$AC")
 
 # ---- 1: the hook is there, and is NOT conditional on -a -----------------------------------------
-_hook=$(printf '%s' "$_ac" | grep -F '_ge_pause_cap && _reexec')
+# rc25 added a second end-of-charge condition (the firmware's own status=Full) for packs that stop
+# short of the target, so the hook is no longer the one literal string. Match the two things the
+# assertion is actually about: the level test and the re-exec, on the same appended line.
+_hook=$(printf '%s' "$_ac" | grep -E '_ge_pause_cap.*_reexec')
 if [ -n "$_hook" ]; then
   ok "the -f branch appends a restore hook"
 else
@@ -234,5 +237,59 @@ fi
 
 # The path -f actually uses must be under $TMPDIR, or the guard matches nothing.
 printf '%s' "$_ac" | grep -qF 'config=$TMPDIR/.acc-f-config'   && ok "-f's throwaway is under \$TMPDIR, which is what the guard keys on"   || no "-f's throwaway is no longer under \$TMPDIR - the tmpfs guard no longer covers it"
+
+# ---- 8: the restore hooks clear the marker when the mode ends -----------------------------------
+# Not for adoption -- that was tried and removed -- but because AccA's charge-once detector reads
+# .acc-f-config and its age to decide whether a session is live. A marker left behind after the
+# mode ended would have the app report a one-time charge that is no longer running.
+_nhook=$(printf '%s' "$_ac" | grep -c "printf.*_reexec")
+_nclear=$(printf '%s' "$_ac" | grep "printf.*_reexec" | grep -c 'rm -f $TMPDIR/.acc-f-config')
+_norder=$(printf '%s' "$_ac" | grep -c 'rm -f $TMPDIR/.acc-f-config 2>/dev/null; _reexec; }')
+[ "${_nhook:-0}" -ge 2 ] && ok "found $_nhook appended restore hooks" || no "expected >=2 appended hooks, found ${_nhook:-0}"
+[ "${_nhook:-0}" = "${_nclear:-0}" ] && ok "all $_nhook hooks remove .acc-f-config when the mode ends" || no "$_nclear of $_nhook hooks clear the marker - a stale one makes AccA report a dead session as live"
+[ "${_nhook:-0}" = "${_norder:-0}" ] && ok "every hook removes the marker BEFORE _reexec, which never returns" || no "$_norder of $_nhook remove it before _reexec - after an exec the removal is dead code"
+
+# ---- 9: adoption is NOT present ------------------------------------------------------------------
+# A daemon that re-adopted the throwaway on start was built and withdrawn. Two shapes were tried and
+# both failed on hardware: re-execing onto the marker caused a restart storm on a plugged Pixel 6a
+# (a new PID every second, flight recorder stopped), and assigning $config had no observable effect
+# on either phone -- the exit trap still published the normal config. Pinned so it cannot come back
+# without a deliberate decision and a fresh plugged A/B.
+grep -qF '_adopt_force_once' "$AD" && no "accd.sh defines _adopt_force_once - adoption was withdrawn; re-add it only with a plugged A/B" || ok "accd.sh carries no adoption path (withdrawn after two failed hardware trials)"
+
+# ---- 10: there is a way to cancel a one-time charge ----------------------------------------------
+# Before this change a daemon restart was the de-facto cancel. Making the mode survive a restart
+# removes that, so it has to be replaced by something deliberate rather than by nothing.
+printf '%s' "$_ac" | grep -qF 'rm -f $TMPDIR/.acc-f-config'   && ok "acc.sh can clear the marker itself (a cancel path exists)"   || no "nothing in acc.sh clears the marker - a mistaken 'acc -f 100' cannot be undone"
+
+# 0 is the spelling, and it has to be handled BEFORE the range check that would refuse it.
+_zline=$(printf '%s' "$_ac" | grep -n 'cap" = 0' | head -1 | cut -d: -f1)
+_rline=$(printf '%s' "$_ac" | grep -n 'cap" -ge 1' | head -1 | cut -d: -f1)
+{ [ -n "$_zline" ] && [ -n "$_rline" ] && [ "$_zline" -lt "$_rline" ]; } && ok "acc -f 0 is handled before the 1-100 range check that would reject it" || no "the cancel is not above the range check (cancel=${_zline:-none} range=${_rline:-none})"
+
+# A cancel nobody can find is not a cancel.
+grep -qF 'acc -f 0' $execDir/strings.sh 2>/dev/null && ok "the help documents acc -f 0" || no "acc -f 0 is undocumented - the only way out of a one-time charge is invisible"
+
+# Adoption must go through _reexec, not a bare assignment: a variable-only switch leaves argv
+# naming config.txt, and argv is what ps, the diag collector, this suite and AccA's own detector
+# all read to decide whether a one-time charge is running.
+# ADOPTION MUST NOT RE-EXEC. _reexec routes through service.sh, which sources release-lock.sh and
+# pkills every accd.sh before starting one. Adopting that way turned into a restart storm on a
+# plugged Pixel 6a: a new PID every second and a flight recorder that stopped, because the daemon
+# never survived long enough to loop. Adoption picks which file this daemon reads; it needs no
+# new process.
+printf '%s' "$_adopt" | sed 's/^[[:space:]]*#.*//' | grep -qF '_reexec' && no "_adopt_force_once re-execs - measured as a restart storm on a plugged Pixel 6a" || ok "_adopt_force_once assigns \$config without spawning a daemon" 
+
+
+# THE MESSAGE MUST NOT PROMISE THE OLD BEHAVIOUR. Before adoption, `acc -f` told the user the mode
+# "stays until accd restarts" -- true then, and the exact thing that changed. Leaving that line in
+# would have the tool describe a restart as the way out, on a build where a restart keeps the mode.
+grep -qF 'It also ends if the daemon restarts' $execDir/strings.sh 2>/dev/null && ok "the -f message warns that a restart ends the mode, which is what a settings change does" || no "the -f message does not warn that a daemon restart ends the mode"
+grep -qF 'acc -f 0' $execDir/strings.sh 2>/dev/null && ok "the -f message points at the real way out" || no "the -f message does not mention acc -f 0"
+
+# A NEGATIVE CAPACITY IS A TYPO, AND MUST READ LIKE ONE. `acc -f -5` matched the pass-through arm
+# and came back as "Unknown command: -5" plus the whole help text; the sibling typo guard answers
+# `acc -f 8O` in one line. Options never begin with a digit, so the guard cannot shadow one.
+printf '%s' "$_ac" | grep -qF -- '-[0-9]*)' && ok "acc -f rejects a negative capacity as a capacity" || no "acc -f -5 still falls through to the pass-through arm and dumps the help text"
 
 fin
