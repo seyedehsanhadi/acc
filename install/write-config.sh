@@ -14,6 +14,39 @@
 # come from the user. Skip the persist entirely until a real config parses again, which clears the
 # flag. Enforcement is unaffected -- only the write is suppressed.
 [ "${_cfgFallback:-0}" != 1 ] || exit 0
+
+# A WRITER THAT OWNS ONE KEY MUST NOT REPUBLISH ITS SNAPSHOT OF ALL THE OTHERS.
+#
+# Every key below is serialised out of the CALLER's memory. The daemon loads the config once a
+# pass and can persist a key minutes later -- its own switch, or the expansion of a current or
+# voltage cap -- and everything it did not touch goes back to disk as it stood at load time. A
+# setting the user saved in between is silently reverted: observed on laurus, where a saved
+# temperature band came back as the daemon's older one, and reproducible in isolation.
+#
+# A caller that owns exactly one key says so: `. write-config.sh own:mcc`. That key is pinned to
+# the caller's value here, then the config is re-read from disk so every other key is published
+# as it stands now rather than as this writer last saw it. Callers that name no owner are the
+# user-initiated writes, which carry the whole intended config already and are left alone.
+#
+# The re-read drops ':' lines: those are user scripts and sourcing one would RUN it.
+case ${1-} in
+  own:*)
+    for _wcK in $(echo "${1#own:}" | tr ',' ' '); do
+      case $_wcK in
+        mcc) mcc="${mcc-${maxChargingCurrent[*]}}" ;;
+        mcv) mcv="${mcv-${maxChargingVoltage[*]}}" ;;
+        s) s="${s-${chargingSwitch[*]}}" ;;
+      esac
+    done
+    if [ -f "$config" ]; then
+      _wcD=$TMPDIR/.wc-disk.$$
+      grep -Ev '^[[:space:]]*:' "$config" > $_wcD 2>/dev/null || :
+      if /system/bin/sh -n $_wcD 2>/dev/null; then . $_wcD 2>/dev/null || :; fi
+      rm -f $_wcD 2>/dev/null || :
+    fi
+  ;;
+esac
+
 s0="${charging_switch-${s}}"
 
 

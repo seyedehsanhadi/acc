@@ -692,7 +692,7 @@ cycle_switches() {
           # flip_sw on re-arms charging briefly -> battery rises during cycling).
           _swAdopted=1
           printf '%s\n' "${chargingSwitch[*]}" > $dataDir/.last-good-switch 2>/dev/null || :
-          . $execDir/write-config.sh
+          . $execDir/write-config.sh own:s
           break
         else
           # reset switch/group that fails to comply, and move it to the end of the list.
@@ -1822,7 +1822,7 @@ sdp() {
 
 unset_switch() {
   charging_switch=
-  . $execDir/write-config.sh
+  . $execDir/write-config.sh own:s
 }
 
 

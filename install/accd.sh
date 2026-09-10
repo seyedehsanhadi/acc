@@ -830,7 +830,7 @@ if ! $_INIT; then
           && grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null
         then
           set_ch_curr ${maxChargingCurrent[0]} || :
-          . $execDir/write-config.sh
+          . $execDir/write-config.sh own:mcc
         fi
       else
         # parse charging current ctrl files
@@ -843,7 +843,7 @@ if ! $_INIT; then
         && [ -f $TMPDIR/.mcv-read ]
       then
         set_ch_volt ${maxChargingVoltage[0]} || :
-        . $execDir/write-config.sh
+        . $execDir/write-config.sh own:mcv
       fi
 
       $cooldown || {
@@ -1617,7 +1617,7 @@ if ! $_INIT; then
             if [ -n "${maxChargingCurrent[0]-}" ]               && { [ -z "${maxChargingCurrent[1]-}" ] || [[ "${maxChargingCurrent[1]-}" = -* ]]; }               && grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null
             then
               set_ch_curr ${maxChargingCurrent[0]} || :
-              . $execDir/write-config.sh
+              . $execDir/write-config.sh own:mcc
             fi
           else
             . $execDir/read-ch-curr-ctrl-files-p2.sh
@@ -1651,7 +1651,7 @@ if ! $_INIT; then
           if [ -n "${maxChargingVoltage[0]-}" ]             && { [ -z "${maxChargingVoltage[1]-}" ] || [[ "${maxChargingVoltage[1]-}" = -* ]]; }             && [ -f $TMPDIR/.mcv-read ]
           then
             set_ch_volt ${maxChargingVoltage[0]} || :
-            . $execDir/write-config.sh
+            . $execDir/write-config.sh own:mcv
           fi
         fi
         # ...and the RELEASE, which the apply above is useless without. is_charging() carries both
@@ -2087,7 +2087,7 @@ if ! $_INIT; then
           { [ -z "${maxChargingVoltage[1]-}" ] || [[ "${maxChargingVoltage[1]-}" = -* ]]; } && _mcvBare=true
           if ! $_mcvBare || [ -f $TMPDIR/.mcv-read ]; then
             set_ch_volt ${maxChargingVoltage[0]} || :
-            ! $_mcvBare || . $execDir/write-config.sh
+            ! $_mcvBare || . $execDir/write-config.sh own:mcv
           fi
         else
           _accdRelease=true; set_ch_volt - || :
@@ -3641,7 +3641,7 @@ if ! $_INIT; then
           maxChargingCurrent=($_mcm)
           # Persist during init. Otherwise the first loop re-sources the old expanded mirror list
           # from disk before it can reach the ordinary expansion branch, undoing the migration.
-          set_ch_curr "$_mcm" && . $execDir/write-config.sh || :
+          set_ch_curr "$_mcm" && . $execDir/write-config.sh own:mcc || :
           unset _mcm
         fi
         ;;
