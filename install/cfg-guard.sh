@@ -43,6 +43,21 @@ cfg_srcsafe() {
   esac
 }
 
+# Call inside a subshell: fd 0 holds the lock until that transaction exits.
+# Android mksh closes higher descriptors when it executes flock; fd 0 is inherited.
+cfg_lock() {
+  local _cfl=
+  _cfl=$(readlink -f "$1") && [ -n "$_cfl" ] || return 1
+  exec 0>>"$_cfl.lock" || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 10 flock -x 0 && return 0
+  else
+    flock -xn 0 && return 0
+  fi
+  echo "Config is busy or locking is unavailable; no settings were saved." >&2
+  return 1
+}
+
 # Parse-and-validate one key=value before it can reach write-config.sh. Returns 2 and explains on
 # stderr when the value must not be written; 0 when it may.
 #

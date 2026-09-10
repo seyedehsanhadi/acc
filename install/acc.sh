@@ -87,8 +87,8 @@ edit() {
   local file="$1"
   shift
   case "${1-}" in
-    a) echo >> $file
-       shift
+    a) shift
+       ( cfg_lock "$file" || exit 1
        two=($*)
        # The scratch file MUST NOT be able to be the file being edited. It was
        # $TMPDIR/.tmp, and set-prop.sh's config-import path builds the incoming
@@ -112,14 +112,20 @@ edit() {
        # Staging beside the target also keeps this correct when $file is itself
        # the import staging file in tmpfs, since that is one filesystem too.
        _et=$file.edit.$$.tmp
-       if grep -iv "^: ${two[1]%?};" $file > $_et; then
-         mv -f $_et $file 2>/dev/null || cat $_et > $file
-       fi
-       rm -f $_et
+       _erc=0
+       grep -iv "^: ${two[1]%?};" "$file" > "$_et" || _erc=$?
+       [ "$_erc" -le 1 ] || { rm -f "$_et"; exit "$_erc"; }
+       printf '\n%s\n' "$*" | sed 's/,/;/g' >> "$_et" \
+         && mv -f "$_et" "$file" || { rm -f "$_et"; exit 1; }
        unset two _et
-       echo "$@" | sed 's/,/;/g' >> $file;;
+       );;
 
-    d) shift; sed -Ei "\#$*#d" $file;;
+    d) shift
+       ( cfg_lock "$file" || exit 1
+         _et=$file.edit.$$.tmp
+         sed -E "\#$*#d" "$file" > "$_et" && mv -f "$_et" "$file" \
+           || { rm -f "$_et"; exit 1; }
+       );;
 
     g) [ "$file" = "$config" ] || {
          install -m 666 $file /data/local/tmp/
@@ -488,7 +494,7 @@ case "${1-}" in
     done
     pause_capacity=$1
     resume_capacity=${2:-5000}
-    . $execDir/write-config.sh
+    . $execDir/write-config.sh set:pause_capacity,resume_capacity
     echo "✅"
   ;;
 

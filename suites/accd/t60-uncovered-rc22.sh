@@ -81,7 +81,7 @@ if [ -n "$_db" ]; then
     || no "no release marker - the blacklist would refuse the very write that un-strands the phone"
   # A silently failed persist means every restart resurrects the blocked switch while the daemon
   # refuses to use it: a limit that is not enforced and never says so.
-  printf '%s' "$_db" | grep -qE 'sed -i|--set charging_switch=' \
+  printf '%s' "$_db" | grep -qE 'sed -i|--set charging_switch=|write-config.sh.*drop:s' \
     && ok "it persists the change" \
     || no "the blocked switch is never persisted - it returns on every restart"
 else
@@ -167,7 +167,7 @@ if [ -f "$SP" ]; then
   _sp=$(body set_prop "$SP")
   if [ -n "$_sp" ]; then
     printf '%s' "$_sp" | grep -q 'defaultConfig' \
-      && ok "set_prop loads defaults first, so a malformed config is repaired rather than fatal" \
+      && ok "set_prop loads defaults before reading configuration" \
       || no "set_prop does not preload defaults - a bad config line would kill the whole command"
   else
     no "could not extract set_prop"

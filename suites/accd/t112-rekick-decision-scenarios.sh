@@ -31,10 +31,10 @@ no(){ F=$((F+1)); echo "  FAIL  $*"; }
 rm -rf $W 2>/dev/null; mkdir -p $W/ps/usb $W/ps/main 2>/dev/null
 
 # ---- cut the two decision sites out of the shipped files ---------------------------------------
-sed -n '/^_mv() {/,/^}/p;/^_ma() {/,/^}/p;/^_iin_ma() {/,/^}/p;/^_hv_may_kick() {/,/^}/p' \
+sed -n '/^_mv() {/,/^}/p;/^_ma() {/,/^}/p;/^_iin_ma() {/,/^}/p;/^_usb_type() {/,/^}/p;/^_hv_may_kick() {/,/^}/p' \
   $E/misc-functions.sh > $W/gate.sh
 printf '\n. "%s/state-export.sh"\n' "$E" >> $W/gate.sh
-sed -n '/Normalise FIRST, store mV/,/^             done ;;/p' $E/accd.sh \
+sed -n '/Normalise FIRST, store mV/,/^             \(done\|esac\) ;;/p' $E/accd.sh \
   | sed 's/ ;;$//' > $W/latch.sh
 grep -q '_hv_may_kick()' $W/gate.sh || { echo "$ID: could not extract the gate - no verdict"; exit 1; }
 grep -q 'hvLatchMv' $W/latch.sh    || { echo "$ID: could not extract the latch block - no verdict"; exit 1; }

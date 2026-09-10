@@ -210,13 +210,6 @@ case "$@" in
     # front-ends (AccA) a real exit code.
     shift
 
-    # Best-effort serialization of concurrent writers; never fatal. Locks a
-    # tmpfs file (always writable, never $0), and is skipped cleanly when flock
-    # is unavailable.
-    if command -v flock >/dev/null 2>&1; then
-      exec 9>"$TMPDIR/.acca-set.lock" && flock -w 5 9 2>/dev/null || :
-    fi
-
     . $defaultConfig
     # Parse-safe. A truncated config is a PARSE error in mksh: it aborts the process before any
     # `||` can act, so `acca -s` died on exactly the file a user runs it to repair. The defaults
@@ -284,16 +277,18 @@ case "$@" in
         ;;
       esac
     done
+    _cfgKeys=
     for _as; do
       case "$_as" in
         *=*) _ak=${_as%%=*}; _av=${_as#*=}
           case "$_ak" in *[!a-zA-Z0-9_]*) continue;; esac
-          eval "$_ak=\$_av" ;;
+          eval "$_ak=\$_av"
+          _cfgKeys=${_cfgKeys:+$_cfgKeys,}$_ak ;;
       esac
     done
     unset _as _ak _av
 
-    . $execDir/write-config.sh
+    . $execDir/write-config.sh "set:$_cfgKeys"
     exit 0
   ;;
 

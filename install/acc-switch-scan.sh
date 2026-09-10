@@ -162,6 +162,7 @@ _write() {  # _write <on|off> <switch line>
     f=$1; onv=$2; offv=$3; shift 3
     [ "$f" = "--" ] && continue
     [ -f "$f" ] || continue
+    case "$f:$offv:$dir" in */pmic-votable/FV/*:3600mV:off) continue;; esac
     # Never probe a node that has already crashed this phone.
     if _sw_blacklisted "$f"; then
       echo "  skipping blacklisted node: $f" >&2

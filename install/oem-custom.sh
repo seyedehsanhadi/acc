@@ -18,7 +18,11 @@ if cfg_parses $config; then
   defaultConfVer=0$(cat $TMPDIR/.config-ver 2>/dev/null || sed -n '/^configVerCode=/s/.*=//p' $execDir/default-config.txt 2>/dev/null)
   [ $configVer -eq $defaultConfVer ] || $TMPDIR/acca $config --set dummy=
 else
-  cat $execDir/default-config.txt > $config
+  # Preserve the broken file. _srccfg can enforce .config-good; defaults cover a first boot.
+  . "$execDir/default-config.txt"
+  _cfgFallback=1
+  warn_once_per badconfig 3600 "ACC: config.txt is unreadable; using fallback settings without replacing it." || :
+  return 0
 fi
 
 # battery idle mode for OnePlus devices

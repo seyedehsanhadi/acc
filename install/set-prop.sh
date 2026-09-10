@@ -16,6 +16,9 @@ set_prop() {
   local setRc=0
   local line=
   local two=
+  local _cfgKeys=
+  local _spArgs
+  _spArgs=()
 
   case ${1-} in
 
@@ -23,8 +26,8 @@ set_prop() {
     *=*)
       . $defaultConfig
       # rc21: parse-safe, same reason as acc.sh. The defaults are already loaded above, so a
-      # malformed config leaves those in place and the write below REPAIRS the file rather than
-      # the whole command dying on it.
+      # malformed config leaves those in memory. The writer refuses to replace an unreadable
+      # existing file; defaults are used for a missing file.
       #
       # MUST stay guarded. set-prop.sh is shared by two front-ends: acc.sh, which sources
       # misc-functions.sh (where srccfg_try lives), and acca.sh, the minimal front-end used by
@@ -50,7 +53,15 @@ set_prop() {
         if command -v cfg_check_kv >/dev/null 2>&1; then
           cfg_check_kv "$_spk" || return $?
         fi
+        # All accepted spellings must reach the hardware setter, including config-style keys.
+        case $_spk in
+          maxChargingCurrent=*|max_charging_current=*) _spk=mcc=${_spk#*=};;
+          maxChargingVoltage=*|max_charging_voltage=*) _spk=mcv=${_spk#*=};;
+          tempLevel=*|temp_level=*) _spk=tl=${_spk#*=};;
+        esac
+        _spArgs[${#_spArgs[*]}]=$_spk
       done
+      set -- "${_spArgs[@]}"
 
       # mksh ARRAY SEMANTICS. `name=value` assigns to name[0] and leaves name[1..n] alone, so
       # `export maxChargingCurrent=` clears the user's value and keeps every derived node entry:
@@ -70,6 +81,7 @@ set_prop() {
       # A cleared array key must be cleared WHOLE. Only the two derived-entry keys need this -- they
       # are the only ones where [1..n] are generated rather than typed by the user.
       export "$@"
+      for _spk in "$@"; do _cfgKeys=${_cfgKeys:+$_cfgKeys,}${_spk%%=*}; done
 
       for _spa in "$@"; do
         case "$_spa" in
@@ -89,7 +101,7 @@ set_prop() {
       # the daemon to re-apply, and a failed apply (1) is unchanged.
       [ .${mcc-${max_charging_current-x}} = .x ] \
         || { echo $$ > $TMPDIR/.mcc-settling 2>/dev/null; set_ch_curr ${mcc:-${max_charging_current:--}}; } \
-        || { [ $? -ne 11 ] || unset mcc max_charging_current; }
+        || { setRc=$?; [ "$setRc" -ne 11 ] || unset mcc max_charging_current; }
 
       [ ".${mcv-${max_charging_voltage-x}}" = .x ] || {
         echo $$ > $TMPDIR/.mcv-settling 2>/dev/null
@@ -115,7 +127,16 @@ set_prop() {
     # reset config
     r|--reset)
       ! daemon_ctrl stop > /dev/null || restartDaemon=true
-      cat $defaultConfig > $config
+      _resetRc=0
+      ( cfg_lock "$config" || exit 1
+        _reset=$config.reset.$$.tmp
+        cat "$defaultConfig" > "$_reset" && mv -f "$_reset" "$config" \
+          || { rm -f "$_reset"; exit 1; }
+      ) || _resetRc=$?
+      if [ "$_resetRc" != 0 ]; then
+        ! $restartDaemon || $TMPDIR/accd "$config"
+        return "$_resetRc"
+      fi
       [ .${2-} = .a ] && rm $dataDir/logs/write.log $dataDir/logs/ps-blacklist.log 2>/dev/null || :
       print_config_reset
       ! $restartDaemon || $TMPDIR/accd --init $config
@@ -144,6 +165,7 @@ set_prop() {
 
     # set charging switch
     s|--charging*witch)
+      _cfgKeys=charging_switch
       IFS=$'\n'
       PS3="$(print_choice_prompt)"
       print_ss_
@@ -176,6 +198,7 @@ set_prop() {
 
     # set charging current
     c|--current)
+      _cfgKeys=mcc
       # Reject a non-numeric milliamp value BEFORE it reaches the config. `acc -sc abc` stored
       # cooldownCurrent=(abc) verbatim: the setter's own range check only guards numbers, and
       # nothing downstream re-validates, so a typo became a live setting that the daemon then
@@ -189,6 +212,7 @@ set_prop() {
 
     # set charging voltage
     v|--voltage)
+      _cfgKeys=mcv
       shift
       # Same guard for voltage. `acc -sv abc` stored maxChargingVoltage=(3700 abc...) and a
       # typo'd voltage becomes a value ACC writes to a real charge node. The accepted forms are
@@ -204,6 +228,7 @@ set_prop() {
 
     # set language
     l|--lang)
+      _cfgKeys=lang
       IFS=$'\n'
       PS3="$(print_choice_prompt)"
       . $execDir/select.sh
@@ -226,25 +251,27 @@ set_prop() {
         # to edit() - so the import destroyed the config it was building. Keeping
         # a distinct name here means the two can never be the same file even if
         # one of them is changed again later.
-        _imp=$TMPDIR/.import.$$.tmp
-        cat $config > $_imp
-        dos2unix < "$1" | grep -Ev '^:|=""$' >> $_imp || :
+        ( cfg_lock "$config" || exit 1
+        # Keep the stage beside the destination so publishing is one atomic rename.
+        _imp=$config.import.$$.tmp
+        cat "$config" > "$_imp" || exit 1
+        dos2unix < "$1" | grep -Ev '^:|=""$' >> "$_imp" || :
         dos2unix < "$1" | grep '^:' | while IFS= read -r line; do
-          $TMPDIR/acca $_imp --config a "$line"
-        done
-        $TMPDIR/acca $_imp --set dummy=
+          $TMPDIR/acca "$_imp" --config a "$line" || exit 1
+        done || { rm -f "$_imp"; exit 1; }
+        $TMPDIR/acca "$_imp" --set dummy= || { rm -f "$_imp"; exit 1; }
         # only overwrite the live config if the staged one actually has content;
         # an empty staging file must never be allowed to become the config
-        if [ -s "$_imp" ]; then
-          cat $_imp > $config
-          rm -f $_imp
+        if [ -s "$_imp" ] && cfg_parses "$_imp"; then
+          mv -f "$_imp" "$config" || { rm -f "$_imp"; exit 1; }
           echo "✅"
         else
           rm -f $_imp
           echo "Import produced an empty config - your existing settings were left alone."
-          return 1
+          exit 1
         fi
-        return 0
+        )
+        return $?
       else
         # A path that does not exist is a typo, not a request to print the
         # config. rc20 and earlier dumped the config and returned 0, so a
@@ -272,7 +299,7 @@ set_prop() {
   fi > /dev/null
 
   # update config.txt
-  . $execDir/write-config.sh || setRc=$?
+  . $execDir/write-config.sh "set:$_cfgKeys" || setRc=$?
   # The set is now COMPLETE: nodes written and the config published. Until this point a daemon tick
   # could see the marker already up while still holding the pre-set config, conclude the user had
   # cleared a cap, and run the release path - deleting the marker mid-apply and restoring every node

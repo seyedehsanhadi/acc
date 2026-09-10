@@ -55,7 +55,7 @@ _helpers=$(
   # every one of them calling an undefined command, which takes the withhold branch in all 23 cases
   # and reports the guard as broken when it is the extraction that is incomplete.
   cat "$execDir/state-export.sh" 2>/dev/null
-  for _fn in _mv _ma _vbus_mv _iin_scale _iin_ma _hv_may_kick _hv_lift; do
+  for _fn in _mv _ma _vbus_mv _iin_scale _iin_ma _usb_type _hv_may_kick _hv_lift; do
     sed -n "/^${_fn}() {/,/^}/p" "$MF"
   done
   sed -n '/^: \${hvLatchMv/,/^: \${hvDeadMa/p' "$MF"

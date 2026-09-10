@@ -68,7 +68,7 @@ esac
 echo "--- 2. the same holds for a current cap the daemon expands"
 rm -rf $W; mkdir -p $W/data
 write '' 'temperature=(29 34 24 55)'
-write '' 'ct=41; mt=46; rt=21'
+write '' 'ct=41; mt=46; rt=21; mcc=900'
 _b=$(tempOf)
 [ ".$_b" = ".(41 46 21 55)" ] && ok "the user's second write landed: $_b" || no "the user's second write did not land: $_b"
 write 'own:mcc' 'temperature=(29 34 24 55); maxChargingCurrent=(900)'

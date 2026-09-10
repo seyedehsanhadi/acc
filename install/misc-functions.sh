@@ -692,7 +692,7 @@ cycle_switches() {
           # flip_sw on re-arms charging briefly -> battery rises during cycling).
           _swAdopted=1
           printf '%s\n' "${chargingSwitch[*]}" > $dataDir/.last-good-switch 2>/dev/null || :
-          . $execDir/write-config.sh own:s
+          . $execDir/write-config.sh own:s || :
           break
         else
           # reset switch/group that fails to comply, and move it to the end of the list.
@@ -1114,17 +1114,26 @@ _iin_ma() {
 #   - it has not already been kicked this plug
 #   - the user has not set `acc -sk off`
 # Anything short of all six gets a LIFT instead.
+_usb_type() {
+  local _ut= _uf=
+  for _uf in real_type usb_type type; do
+    _se_rd "usb/$_uf"; _ut=$_seraw
+    [ -n "$_ut" ] || continue
+    # usb_type lists all supported types; only the bracketed entry is active.
+    case $_ut in *\[*\]*) _ut=${_ut#*\[}; _ut=${_ut%%\]*};; esac
+    printf '%s\n' "$_ut"
+    return 0
+  done
+  return 1
+}
+
 _hv_may_kick() {
   [ ! -f "$TMPDIR/.hvcontract" ] || return 1
   [ ! -f "$TMPDIR/.hvkicked" ] || return 1
   [ ! -f "$dataDir/.rekick-off" ] || return 1
   present 2>/dev/null || return 1
-  local _t= _tn= _pk= _in=
-  for _tn in real_type usb_type type; do
-    [ -f "usb/$_tn" ] || continue
-    _t=$(cat "usb/$_tn" 2>/dev/null) || :
-    break
-  done
+  local _t= _pk= _in=
+  _t=$(_usb_type) || _t=
   case "${_t:-}" in *HVDCP*|*PD*|*QC*|*hvdcp*|*pd*) return 1;; esac
   # .hvpeak is stored in mV (the writer normalises), so this compares like with like.
   _pk=$(cat "$TMPDIR/.hvpeak" 2>/dev/null || echo 0)
@@ -1352,7 +1361,10 @@ enable_charging() {
     # chargingSwitch is actually updated (the old subshell discarded it), and re-arm input-cut /
     # current-cap switches even while online=0 (same name exception as the resume gate below).
     if [ -f $TMPDIR/.sw ]; then
+      local _resumeSwitch; _resumeSwitch=("${chargingSwitch[@]}")
       . $TMPDIR/.sw 2>/dev/null || :; rm -f $TMPDIR/.sw 2>/dev/null || :
+      # An exhausted idle-avoidance scan has no selection; keep the switch we must release.
+      [ -n "${chargingSwitch[0]-}" ] || chargingSwitch=("${_resumeSwitch[@]}")
       # rc22: NOT gated on present -- see the release below for why. A switch latched off while the
       # cable is out must still be returned to its resume value, or nothing electrically undoes it.
       flip_sw on 2>/dev/null || :
@@ -1553,6 +1565,8 @@ flip_sw() {
   while [ -f ${1:-//} ]; do
 
     [ $# -ge 3 ] || return 2   # rc5 (#10): a 2-field / malformed switch has no OFF value -> $3 empty -> "[ = 3600mV ]" abort
+    # Reject invalid standalone FV candidates cached by older versions; ON still releases them.
+    case "$1:$3:$flip" in */pmic-votable/FV/*:3600mV:off) return 2;; esac
     on="$(parse_value "$2")"
     # "pcap" resolves to pause_capacity -- used as the OFF (stop) value so charging
     # stops AT your limit. Numeric-safe: empty/garbage pause_capacity -> a safe low
@@ -1822,7 +1836,7 @@ sdp() {
 
 unset_switch() {
   charging_switch=
-  . $execDir/write-config.sh own:s
+  . $execDir/write-config.sh own:s || :
 }
 
 

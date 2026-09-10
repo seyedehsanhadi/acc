@@ -142,7 +142,8 @@ elif [ ! -f $TMPDIR/.mcc-read ]; then
     grep -v '_now::' $TMPDIR/.ctrl > $TMPDIR/.ctrl-sw 2>/dev/null || :
     sed -e 's/::.*::/ /' -e 's/$/ 0/' $TMPDIR/.ctrl-sw >> $TMPDIR/ch-switches
     sed -E 's/(.*)(::v.*::)(.*)/\1 \3 \2/; s/::v/10/; s/:://' $TMPDIR/.ctrl-sw >> $TMPDIR/ch-switches
-    sed -Ee 's/::.*::/ /' -e 's/([0-9])$/\1 3600mV/' $TMPDIR/ch-volt-ctrl-files >> $TMPDIR/ch-switches
+    # FV is a paired voltage vote, not two independent on/off switches.
+    sed -Ee '\|/pmic-votable/FV/|d' -e 's/::.*::/ /' -e 's/([0-9])$/\1 3600mV/' $TMPDIR/ch-volt-ctrl-files >> $TMPDIR/ch-switches
 
     cat $TMPDIR/ch-switches > $TMPDIR/.ctrl
     grep / $TMPDIR/.ctrl | awk '!seen[$0]++' > $TMPDIR/ch-switches

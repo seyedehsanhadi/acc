@@ -830,7 +830,7 @@ if ! $_INIT; then
           && grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null
         then
           set_ch_curr ${maxChargingCurrent[0]} || :
-          . $execDir/write-config.sh own:mcc
+          . $execDir/write-config.sh own:mcc || :
         fi
       else
         # parse charging current ctrl files
@@ -843,7 +843,7 @@ if ! $_INIT; then
         && [ -f $TMPDIR/.mcv-read ]
       then
         set_ch_volt ${maxChargingVoltage[0]} || :
-        . $execDir/write-config.sh own:mcv
+        . $execDir/write-config.sh own:mcv || :
       fi
 
       $cooldown || {
@@ -1213,14 +1213,10 @@ if ! $_INIT; then
              # A high-voltage charger TYPE is a contract too, whatever this millisecond reads. A
              # labelled HVDCP_3 sitting at 4.5-5.5V with current flowing is a working supply in a
              # low-voltage phase, not a dead one: latch it and leave it alone.
-             for _tn in real_type usb_type type; do
-               [ -f "usb/$_tn" ] || continue
-               _hvt=$(cat "usb/$_tn" 2>/dev/null) || continue
-               case "$_hvt" in
-                 *HVDCP*|*PD*|*QC*|*hvdcp*|*pd*) [ -f $TMPDIR/.hvcontract ] || : > $TMPDIR/.hvcontract 2>/dev/null || :;;
-               esac
-               break
-             done ;;
+             _hvt=$(_usb_type) || _hvt=
+             case "$_hvt" in
+               *HVDCP*|*PD*|*QC*|*hvdcp*|*pd*) [ -f $TMPDIR/.hvcontract ] || : > $TMPDIR/.hvcontract 2>/dev/null || :;;
+             esac ;;
         esac
 
         # rc23e: ONE way back from a contract that has actually COLLAPSED, without unplugging.
@@ -1617,7 +1613,7 @@ if ! $_INIT; then
             if [ -n "${maxChargingCurrent[0]-}" ]               && { [ -z "${maxChargingCurrent[1]-}" ] || [[ "${maxChargingCurrent[1]-}" = -* ]]; }               && grep -q / $TMPDIR/ch-curr-ctrl-files 2>/dev/null
             then
               set_ch_curr ${maxChargingCurrent[0]} || :
-              . $execDir/write-config.sh own:mcc
+              . $execDir/write-config.sh own:mcc || :
             fi
           else
             . $execDir/read-ch-curr-ctrl-files-p2.sh
@@ -1651,7 +1647,7 @@ if ! $_INIT; then
           if [ -n "${maxChargingVoltage[0]-}" ]             && { [ -z "${maxChargingVoltage[1]-}" ] || [[ "${maxChargingVoltage[1]-}" = -* ]]; }             && [ -f $TMPDIR/.mcv-read ]
           then
             set_ch_volt ${maxChargingVoltage[0]} || :
-            . $execDir/write-config.sh own:mcv
+            . $execDir/write-config.sh own:mcv || :
           fi
         fi
         # ...and the RELEASE, which the apply above is useless without. is_charging() carries both
@@ -1773,7 +1769,9 @@ if ! $_INIT; then
         continue
       fi
 
-      if is_charging; then
+      # A wrong current polarity can report Charging while our switch still holds the input off.
+      # At/below resume, route our hold through the temperature-checked release below.
+      if is_charging && { ! $chDisabledByAcc || ! _le_resume_cap; }; then
 
         xIdle=false
         mtReached=false
@@ -1789,7 +1787,7 @@ if ! $_INIT; then
 
         # disable charging under <conditions>
         if mt_reached || _ge_pause_cap; then
-          if ! $allowIdleAbovePcap && [ $xIdleCount -lt 2 ] \
+          if ! $allowIdleAbovePcap && [ $xIdleCount -lt 2 ] && [ ! -f $dataDir/.user-locked ] \
             && { cap_idle_threshold || ${_nativeIdleAvoid:-false}; }; then
             # if possible, avoid idle mode when capacity > pause_capacity
             (cat $config > $TMPDIR/.cfg
@@ -2087,7 +2085,7 @@ if ! $_INIT; then
           { [ -z "${maxChargingVoltage[1]-}" ] || [[ "${maxChargingVoltage[1]-}" = -* ]]; } && _mcvBare=true
           if ! $_mcvBare || [ -f $TMPDIR/.mcv-read ]; then
             set_ch_volt ${maxChargingVoltage[0]} || :
-            ! $_mcvBare || . $execDir/write-config.sh own:mcv
+            ! $_mcvBare || . $execDir/write-config.sh own:mcv || :
           fi
         else
           _accdRelease=true; set_ch_volt - || :
@@ -3118,6 +3116,7 @@ if ! $_INIT; then
     # caller's positional params are untouched.
     if cfg_parses $config; then
       _srcsafe $config
+      _cfgSwitchLoaded="${chargingSwitch[*]-}"
       _cfgFallback=0   # the real config is loaded again; persisting is safe
       # The config just replaced capacity[], so any pause_now override from the previous pass is
       # gone and the names that shadow it for write-config.sh must go with it -- otherwise the
@@ -3395,24 +3394,13 @@ if ! $_INIT; then
     # leave the phone unable to charge. After this the node is never written again.
     _BLRELEASE=1 flip_sw on >/dev/null 2>&1 || :
     unset _BLRELEASE
-    # Persist, then CHECK. The write was fully error-suppressed before, so a failure left the
-    # blocked node in config.txt and every restart resurrected it while the daemon silently
-    # refused to use it -- a limit that is not enforced and never says so. Fall back to editing
-    # the line directly (per-process temp, atomic rename) and warn if even that does not land.
-    if [ -x $TMPDIR/acca ]; then
-      $TMPDIR/acca $config --set charging_switch= >/dev/null 2>&1 || :
-    else
-      $execDir/acc.sh $config --set charging_switch= >/dev/null 2>&1 || :
+    # Recheck the disk switch under the writer lock; a newer user choice may no longer be blocked.
+    ( charging_switch=; . "$execDir/write-config.sh" drop:s ) || :
+    _srccfg
+    if [ -n "${chargingSwitch[0]-}" ] && sw_blacklisted "${chargingSwitch[0]}"; then
+      warn_once_per swblockedcfg 21600 "ACC: could not clear the blocked charging switch from the config. The limit is NOT being held. Remove it from Blocked settings, or run: acc -s charging_switch=" || :
+      chargingSwitch=()
     fi
-    if grep -q '^chargingSwitch=([^)]' $config 2>/dev/null; then
-      _dbt=$config.$$.blsw
-      sed 's/^chargingSwitch=(.*/chargingSwitch=()/' $config > $_dbt 2>/dev/null \
-        && [ -s $_dbt ] && mv -f $_dbt $config 2>/dev/null || rm -f $_dbt 2>/dev/null
-    fi
-    grep -q '^chargingSwitch=([^)]' $config 2>/dev/null \
-      && warn_once_per swblockedcfg 21600 "ACC: could not clear the blocked charging switch from the config. The limit is NOT being held. Remove it from Blocked settings, or run: acc -s charging_switch=" \
-      || :
-    chargingSwitch=()
   }
 
   xIdle=false
@@ -3784,7 +3772,9 @@ if ! $_INIT; then
       # stopped holding would only warn instead of self-healing onto another switch; and
       # write-config's pbim arm skips its deliberate auto-mode switch reset for a marked switch.
       # A non-empty value alone satisfies the cosmetic goal, so write it bare.
-      sed -i "s|^chargingSwitch=.*|chargingSwitch=($gcsl 100 pcap)|" $config 2>/dev/null || :
+      ( chargingSwitch=("$gcsl" 100 pcap)
+        . "$execDir/write-config.sh" own:s
+      ) || :
       _srccfg
     fi
     sync_native_limit 2>/dev/null || :   # set the firmware limit at once (no toggle/overshoot)

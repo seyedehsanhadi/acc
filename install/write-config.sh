@@ -15,34 +15,62 @@
 # flag. Enforcement is unaffected -- only the write is suppressed.
 [ "${_cfgFallback:-0}" != 1 ] || exit 0
 
-# A WRITER THAT OWNS ONE KEY MUST NOT REPUBLISH ITS SNAPSHOT OF ALL THE OTHERS.
-#
-# Every key below is serialised out of the CALLER's memory. The daemon loads the config once a
-# pass and can persist a key minutes later -- its own switch, or the expansion of a current or
-# voltage cap -- and everything it did not touch goes back to disk as it stood at load time. A
-# setting the user saved in between is silently reverted: observed on laurus, where a saved
-# temperature band came back as the daemon's older one, and reproducible in isolation.
-#
-# A caller that owns exactly one key says so: `. write-config.sh own:mcc`. That key is pinned to
-# the caller's value here, then the config is re-read from disk so every other key is published
-# as it stands now rather than as this writer last saw it. Callers that name no owner are the
-# user-initiated writes, which carry the whole intended config already and are left alone.
-#
-# The re-read drops ':' lines: those are user scripts and sourcing one would RUN it.
+command -v cfg_lock >/dev/null 2>&1 || . "$execDir/cfg-guard.sh"
+cfg_lock "$config" || exit 1
+
+# The lock covers reading, merging and publishing. Atomic rename alone loses updates.
+# set: carries explicit user keys; own: carries a daemon's derived switch/current/voltage.
+# drop:s clears a switch only if the current disk choice is still blacklisted.
+# No key list means an intentional whole-config replacement (e.g. the one-time config).
+_wcMode=${1%%:*}
+_wcKeys=${1#*:}
+_wcSaved=
 case ${1-} in
-  own:*)
-    for _wcK in $(echo "${1#own:}" | tr ',' ' '); do
+  own:*|set:*|drop:s)
+    for _wcK in $(echo "$_wcKeys" | tr ',' ' '); do
+      case $_wcK in ''|[0-9]*|*[!a-zA-Z0-9_]*) exit 2;; esac
       case $_wcK in
         mcc) mcc="${mcc-${maxChargingCurrent[*]}}" ;;
         mcv) mcv="${mcv-${maxChargingVoltage[*]}}" ;;
-        s) s="${s-${chargingSwitch[*]}}" ;;
+        s) s="${charging_switch-${s-${chargingSwitch[*]}}}" ;;
       esac
+      # mksh serializes arrays and quotes as executable assignments without re-expanding values.
+      _wcSaved="$_wcSaved
+$(typeset -p "$_wcK" 2>/dev/null || :)"
     done
+    # Daemon-only pause overrides and the switch-clear alias belong to its old snapshot.
+    # Their intended owned value was captured above; the disk owns every other key.
+    if [ "$_wcMode" != set ]; then
+      unset pause_capacity resume_capacity pc rc charging_switch
+    fi
     if [ -f "$config" ]; then
       _wcD=$TMPDIR/.wc-disk.$$
-      grep -Ev '^[[:space:]]*:' "$config" > $_wcD 2>/dev/null || :
-      if /system/bin/sh -n $_wcD 2>/dev/null; then . $_wcD 2>/dev/null || :; fi
-      rm -f $_wcD 2>/dev/null || :
+      # Never execute scheduled commands while saving settings. Refuse an unreadable snapshot.
+      sed '/^[[:space:]]*:/d' "$config" > "$_wcD" \
+        && [ -s "$_wcD" ] && cfg_parses "$_wcD" \
+        || { rm -f "$_wcD"; echo "Config is unreadable; refusing to overwrite it." >&2; exit 1; }
+      cfg_srcsafe "$_wcD"
+      rm -f "$_wcD" 2>/dev/null || :
+    fi
+    eval "$_wcSaved"
+    if [ "$_wcMode" = drop ]; then
+      sw_blacklisted "${chargingSwitch[0]-}" || exit 0
+      s=
+    fi
+    if [ "$_wcMode" = own ] && ${isAccd:-false}; then
+      # An expansion cannot undo a newer user cap/clear; a selected switch cannot undo a user edit.
+      case ,$_wcKeys, in
+        *,mcc,*) [ "${mcc%% *}" = "${maxChargingCurrent[0]-}" ] || mcc="${maxChargingCurrent[*]}";;
+      esac
+      case ,$_wcKeys, in
+        *,mcv,*) [ "${mcv%% *}" = "${maxChargingVoltage[0]-}" ] || mcv="${maxChargingVoltage[*]}";;
+      esac
+      case ,$_wcKeys, in
+        *,s,*)
+          if { [ "${_cfgSwitchLoaded+x}" = x ] && [ "$_cfgSwitchLoaded" != "${chargingSwitch[*]}" ]; } \
+            || [ -f "$dataDir/.user-locked" ]; then s="${chargingSwitch[*]}"; fi
+        ;;
+      esac
     fi
   ;;
 esac
@@ -351,25 +379,6 @@ case "$mcc" in ''|*[!0-9]*) ;; *) [ $mcc -le 9999 ] || mcc=9999;; esac
 case "$mcv" in ''|*[!0-9]*) ;; *) [ $mcv -ge 3700 ] || mcv=3700; [ $mcv -le 4300 ] || mcv=4300;; esac
 case "${tl:-0}" in ''|*[!0-9]*) ;; *) [ ${tl:-0} -le 100 ] || tl=100;; esac
 
-# rc8: remember whether the charging switch was LOCKED by the USER (a manual lock to RESPECT --
-# never auto-replace it) vs by the daemon's own auto-locker (which may self-heal/replace it).
-# isAccd=true means the running daemon wrote this config; a user `acc/acca -s` runs with
-# isAccd=false. The 3 auto-replace sites (disable_charging fallback, breach monitor, resume
-# watchdog) read this marker and only ever auto-change an AUTO-locked switch, never a user lock.
-case "$s" in
-  # rc14: a USER `--` lock must SURVIVE the daemon re-persisting config. Previously the daemon
-  # (isAccd) cleared .user-locked whenever it rewrote a `--` switch -- including re-saving the
-  # user's OWN locked switch on boot/verify -- which intermittently dropped the lock across reboots
-  # (device-observed: 1 of 3 reboots). The daemon never auto-replaces a user-locked switch (it warns
-  # instead, see disable_charging), so it has NO reason to clear the marker; only a USER writing the
-  # switch (isAccd=false) should ever touch it. Daemon writes now leave an existing lock intact, and
-  # auto mode is unaffected because the marker is already absent there (it is only ever set by a user).
-  *\ --) ${isAccd:-false} || touch $dataDir/.user-locked 2>/dev/null || :;;
-  '') ${isAccd:-false} || { rm -f $dataDir/.user-locked 2>/dev/null; touch $dataDir/.rediscover 2>/dev/null; } || :;;  # D7: the rm was UNCONDITIONAL -- only a USER going automatic (isAccd=false) clears the lock; a daemon blank must not
-  *) ${isAccd:-false} || rm -f $dataDir/.user-locked 2>/dev/null || :;;
-esac
-
-
 # runCmdOnPause / battStatusOverride are emitted inside single quotes below; a user value
 # containing a single quote (run_cmd_on_pause="don't ...") produced an unbalanced line and the
 # daemon could no longer source the config at all (charging control dead until a manual edit).
@@ -483,6 +492,27 @@ cat $_sf $TMPDIR/.config-help >> $_ct
 # config that never reached disk - a lost permission, a full filesystem, a read-only remount - was
 # reported to the user as a successful settings change, with the old values still in place.
 mv -f $_ct $config 2>/dev/null || { rm -f $_ct 2>/dev/null; set -u; exit 1; }
+# rc8: remember whether the charging switch was LOCKED by the USER (a manual lock to RESPECT --
+# never auto-replace it) vs by the daemon's own auto-locker (which may self-heal/replace it).
+# isAccd=true means the running daemon wrote this config; a user `acc/acca -s` runs with
+# isAccd=false. The 3 auto-replace sites (disable_charging fallback, breach monitor, resume
+# watchdog) read this marker and only ever auto-change an AUTO-locked switch, never a user lock.
+case "$s" in
+  # rc14: a USER `--` lock must SURVIVE the daemon re-persisting config. Previously the daemon
+  # (isAccd) cleared .user-locked whenever it rewrote a `--` switch -- including re-saving the
+  # user's OWN locked switch on boot/verify -- which intermittently dropped the lock across reboots
+  # (device-observed: 1 of 3 reboots). The daemon never auto-replaces a user-locked switch (it warns
+  # instead, see disable_charging), so it has NO reason to clear the marker; only a USER writing the
+  # switch (isAccd=false) should ever touch it. Daemon writes now leave an existing lock intact, and
+  # auto mode is unaffected because the marker is already absent there (it is only ever set by a user).
+  *\ --) ${isAccd:-false} || touch $dataDir/.user-locked 2>/dev/null || :;;
+  '') ${isAccd:-false} || { rm -f $dataDir/.user-locked 2>/dev/null; touch $dataDir/.rediscover 2>/dev/null; } || :;;  # D7: the rm was UNCONDITIONAL -- only a USER going automatic (isAccd=false) clears the lock; a daemon blank must not
+  *) ${isAccd:-false} || rm -f $dataDir/.user-locked 2>/dev/null || :;;
+esac
+
+
+# The config and its lock marker are committed; release the writer lock before waking the daemon.
+exec 0<&-
 # Guarded, unlike the bare `rm` this replaces: that one printed
 # "rm: .../.scripts: No such file or directory" to stderr on every writer that lost the race.
 rm -f $_sf 2>/dev/null || :
@@ -492,5 +522,5 @@ rm -f $_sf 2>/dev/null || :
 # that a visible lag. CLI writes only (the daemon's own config persists skip it via isAccd);
 # gated on a LIVE daemon because opening a reader-less fifo for write would block forever.
 ${isAccd:-false} || [ ! -p ${TMPDIR:-/dev/.vr25/acc}/.wake ] || ! pgrep -f accd.sh >/dev/null 2>&1 \
-  || echo w > ${TMPDIR:-/dev/.vr25/acc}/.wake 2>/dev/null || :
+  || timeout 1 /system/bin/sh -c 'echo w > "$1"' sh "${TMPDIR:-/dev/.vr25/acc}/.wake" 2>/dev/null || :
 set -u)
