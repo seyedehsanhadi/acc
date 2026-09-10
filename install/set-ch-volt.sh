@@ -5,7 +5,14 @@ set_ch_volt() {
   local _scvOnDisk= _scvDisk=
 
   # Avoid CLI/daemon races.
-  $isAccd && [ -f $TMPDIR/.mcv-settling ] && return 0 || :
+# WHOSE settling marker is this? The marker exists so the DAEMON's loop does not fight a set that
+# is in flight; it was never meant to stop the process that created it. accd exports isAccd=true,
+# and at() sources a scheduled profile line inside the daemon, so `acc -s` launched from a schedule
+# inherits isAccd=true, meets the marker set-prop.sh wrote one line earlier, and returns success
+# without doing anything. Field report, OnePlus 8 Pro 2026-09-10: the 03:45 profile announced
+# itself and left the night profile's 500 mA and 3900 mV in place. Compare the owner PID.
+  $isAccd && [ -f $TMPDIR/.mcv-settling ] \
+    && [ ".$(cat $TMPDIR/.mcv-settling 2>/dev/null)" != ".$$" ] && return 0 || :
 
   if ${_accdRelease:-false}; then
     _scvDisk=$(sed -n 's/^maxChargingVoltage=(\([0-9][0-9]*\).*/\1/p' "${config:-$dataDir/config.txt}" 2>/dev/null)

@@ -662,15 +662,37 @@ _se_icl_guard() {
   [ "${keep#-}" -le $(( lim + lim / 4 )) ] 2>/dev/null || _sema=null
 }
 
+# Is ANY supply on this phone reporting itself online? On a OnePlus 8 Pro charging from the wall
+# the Mains node carries that flag while the USB node carries the measurement:
+#     ac/online=1   usb/present=1   usb/online=0   usb/voltage_now=4843728
+# rc24 read usb/voltage_now unconditionally and published 4843 mV. rc25 made online=1 a condition
+# of even looking at a supply, which is right for the mirrored register it was written for and
+# wrong here: it reports nothing at all on a phone that is plainly charging.
+_se_any_online() {
+  local _s _v root="${ACC_PSY:-/sys/class/power_supply}"
+  for _s in "$root"/*/online; do
+    [ -r "$_s" ] || continue
+    _se_rd "$_s"
+    [ ".$_seraw" = .1 ] && return 0
+  done
+  return 1
+}
+
 _se_input() {
-  local supply cf v=null c=null ca raw root="${ACC_PSY:-/sys/class/power_supply}"
+  local supply cf v=null c=null ca pres raw root="${ACC_PSY:-/sys/class/power_supply}"
   for supply in usb dc wireless main-charger main; do
     # An unreadable or missing online node used to pass this test ("" != 0), so a supply that
     # never reported being online could still supply the exported input voltage and current.
     # _se_rd, not a bare read: a node with no trailing newline hands read a non-zero status WITH
     # the value already in the variable, and "|| ca=" then threw a valid 1 away.
     _se_rd "$root/$supply/online"; ca=$_seraw
-    [ "$ca" = 1 ] || continue
+    # Its own online flag first. Failing that, a supply that says it is PRESENT while some other
+    # supply on the phone says it is online is the split-role arrangement above, not a stale
+    # register: the Fairphone 5 case this gate exists for reports neither.
+    if [ ".$ca" != .1 ]; then
+      _se_rd "$root/$supply/present"; pres=$_seraw
+      { [ ".$pres" = .1 ] && _se_any_online; } || continue
+    fi
     for cf in "$root/$supply/input_current_now" "$root/$supply/current_now"; do
       _se_rd "$cf"; raw=$_seraw
       [ -n "$raw" ] || continue

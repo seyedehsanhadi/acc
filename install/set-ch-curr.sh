@@ -84,7 +84,7 @@ set_ch_curr() {
           # The config file IS the authority on whether a cap exists. Reading it at the instant of the
           # decision cannot go stale, and it costs one sed on a path that runs at most once per loop.
           if ${_accdRelease:-false}; then
-            [ -f $TMPDIR/.mcc-settling ] && return 0
+            { [ -f $TMPDIR/.mcc-settling ] && [ ".$(cat $TMPDIR/.mcc-settling 2>/dev/null)" != ".$$" ]; } && return 0
             _dsk=$(sed -n 's/^maxChargingCurrent=(//p' ${config:-/data/adb/vr25/acc-data/config.txt} 2>/dev/null | cut -d' ' -f1 | tr -d ')')
             case "${_dsk:-}" in
               ''|-) : ;;
@@ -154,7 +154,7 @@ set_ch_curr() {
       # The config file IS the authority on whether a cap exists. Reading it at the instant of the
       # decision cannot go stale, and it costs one sed on a path that runs at most once per loop.
       if ${_accdRelease:-false}; then
-        [ -f $TMPDIR/.mcc-settling ] && return 0
+        { [ -f $TMPDIR/.mcc-settling ] && [ ".$(cat $TMPDIR/.mcc-settling 2>/dev/null)" != ".$$" ]; } && return 0
         _dsk=$(sed -n 's/^maxChargingCurrent=(//p' ${config:-/data/adb/vr25/acc-data/config.txt} 2>/dev/null | cut -d' ' -f1 | tr -d ')')
         case "${_dsk:-}" in
           ''|-) : ;;

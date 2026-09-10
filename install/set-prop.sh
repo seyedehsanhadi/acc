@@ -88,11 +88,11 @@ set_prop() {
       # treated this way; the documented no-control-file exit (0) still persists the intent for
       # the daemon to re-apply, and a failed apply (1) is unchanged.
       [ .${mcc-${max_charging_current-x}} = .x ] \
-        || { : > $TMPDIR/.mcc-settling 2>/dev/null; set_ch_curr ${mcc:-${max_charging_current:--}}; } \
+        || { echo $$ > $TMPDIR/.mcc-settling 2>/dev/null; set_ch_curr ${mcc:-${max_charging_current:--}}; } \
         || { [ $? -ne 11 ] || unset mcc max_charging_current; }
 
       [ ".${mcv-${max_charging_voltage-x}}" = .x ] || {
-        : > $TMPDIR/.mcv-settling 2>/dev/null
+        echo $$ > $TMPDIR/.mcv-settling 2>/dev/null
         set_ch_volt "${mcv:-${max_charging_voltage:--}}" || setRc=$?
         # A missing voltage cache is not self-healing on a warm restart: accd skips its init block
         # while .batt-interface.sh is valid. Force exactly one init when the setter queued bare
@@ -106,7 +106,10 @@ set_prop() {
       }
 
       [ -z "${tl-}${temp_level-}" ] || set_temp_level ${tl:-$temp_level}
-      [ "$setRc" -ne 0 ] || echo "✅"
+      # The tick used to print HERE, before write-config.sh had published anything, so a set whose
+      # config never reached disk still answered with a success mark. Defer it until after the
+      # publish below, which is the first point at which the change is real.
+      _spTick=true
     ;;
 
     # reset config
@@ -269,7 +272,7 @@ set_prop() {
   fi > /dev/null
 
   # update config.txt
-  . $execDir/write-config.sh
+  . $execDir/write-config.sh || setRc=$?
   # The set is now COMPLETE: nodes written and the config published. Until this point a daemon tick
   # could see the marker already up while still holding the pre-set config, conclude the user had
   # cleared a cap, and run the release path - deleting the marker mid-apply and restoring every node
@@ -292,6 +295,15 @@ set_prop() {
     touch $TMPDIR/.mcc-custom 2>/dev/null || :
   fi
   rm -f $TMPDIR/.mcc-settling $TMPDIR/.mcv-settling 2>/dev/null || :
+
+  # Now the answer is honest: the nodes were written and the config is on disk.
+  if ${_spTick:-false}; then
+    if [ "$setRc" -eq 0 ]; then
+      echo "✅"
+    else
+      echo "The settings were NOT saved - the configuration could not be written." >&2
+    fi
+  fi
 
   if $restartDaemon; then
     if $initDaemon || [ ".${cw-${current_workaround-x}}" != .x ]; then

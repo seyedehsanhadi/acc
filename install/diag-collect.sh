@@ -428,6 +428,12 @@ cpf acc-logs/early-cap.log  "acc early-cap (boot-time charge guard)" "$DD/logs/e
 tailcpf acc-logs/init-tail.log    "acc init (recent)"    "$DD/logs/init.log" 800
 tailcpf acc-logs/install-tail.log "acc install (recent)" "$DD/logs/install.log" 800
 _acd=$(ls -t $T/accd-*.log 2>/dev/null | head -1); [ -n "$_acd" ] && tailcpf acc-logs/accd-trace-tail.txt "accd loop trace (recent)" "$_acd" 1500
+# THE CLI TRACE, which is a different file from the daemon's. `acc -s` runs as its own process and
+# writes acc-<device>.log; a scheduled profile switch that failed is recorded THERE and nowhere
+# else. A OnePlus 8 Pro bundle carried a 141 KB CLI trace that no bundle ever collected, so the
+# one command under investigation was the one thing missing. Excludes accd-*.log, taken above.
+_acl=$(ls -t $T/acc-*.log 2>/dev/null | grep -v '/accd-' | head -1); [ -n "$_acl" ] && tailcpf acc-logs/acc-cli-trace-tail.txt "acc CLI trace (recent) - where a failed acc -s is recorded" "$_acl" 1500
+grab acc-logs/schedules.txt "scheduled profiles: what fired today, what it ran, and any failed attempts" sh -c 'echo "== now: $(date +%H:%M:%S) =="; if [ -d '"$T"'/schedules ]; then for s in '"$T"'/schedules/*; do [ -e "$s" ] || continue; echo "-- ${s##*/} --"; cat "$s" 2>/dev/null; done; else echo "(no schedules directory - nothing has fired since boot)"; fi; echo "== at lines in the config =="; grep -n "^:" "'"$DD"'/config.txt" 2>/dev/null || echo "(none)"' 
 cpf acc-logs/write-ledger.txt "write-ledger (tmpfs)" "$T/.write-ledger"
 cpf state.json  "daemon state snapshot" "$T/state.json"
 cpf config.txt  "full config" "$DD/config.txt"

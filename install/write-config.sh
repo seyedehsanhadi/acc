@@ -177,6 +177,9 @@ fi
 : ${rt:=40}
 : ${ct:=45}
 
+# What was actually asked for, so the repairs below can be reported rather than applied in silence.
+_reqCt=${ct:-} _reqMt=${mt:-} _reqRt=${rt:-}
+
 # resume_temp must sit below max_temp; an at/above value collapses the hysteresis
 # to a minimal 1 C swing that rapid-toggles, so force it down. This is a real
 # invariant (resume-above-pause makes no physical sense) and stays.
@@ -229,6 +232,23 @@ fi
 # mt-5 band shape to enforce an invariant nothing else in the file or the daemon states.
 [ $ct -ge $rt ] || ct=$rt
 [ $mt -gt $ct ] || mt=$((ct + 1))
+
+# THE REPAIRS ABOVE ARE CORRECT AND THEY WERE SILENT.
+#
+# A night profile of max_temp=45 resume_temp=43 cooldown_temp=46 is published as (40 45 35 55):
+# cooldown above max is genuinely invalid, and once it is pulled under max there is no room left
+# for the 3 C cooldown gap, so the band is rebuilt and the resume_temp the owner chose - valid on
+# its own - goes with it. The arithmetic is not the problem; being told nothing is. A OnePlus 8 Pro
+# owner read those numbers back off his own screen and could not tell why they were not his.
+# CLI writes only: the daemon persists this file constantly and must not narrate it.
+${isAccd:-false} || {
+  [ ".$_reqCt$_reqMt$_reqRt" = . ] || [ ".$ct $mt $rt" = ".$_reqCt $_reqMt $_reqRt" ] || {
+    echo "Note: the temperature band was adjusted to keep it workable." >&2
+    echo "  asked for: cooldown=${_reqCt:-unset} max=${_reqMt:-unset} resume=${_reqRt:-unset}" >&2
+    echo "  stored:    cooldown=$ct max=$mt resume=$rt" >&2
+    echo "  cooldown must sit below max with room to throttle, and resume below cooldown." >&2
+  }
+} || :
 
 # rc6 (A3): shutdown_temp is the HARD over-temperature cutoff -- it must sit at/above the
 # operating band, never below it. The non-numeric guard above let a low NUMERIC value (e.g.
@@ -426,7 +446,10 @@ cat $_sf $TMPDIR/.config-help >> $_ct
 # permission loss) leaves the previous config intact instead of truncating it.
 # rc21: the temp is per-process ($config.$$.tmp), so concurrent writers cannot
 # corrupt each other's file - see the _ct note above.
-mv -f $_ct $config 2>/dev/null || rm -f $_ct 2>/dev/null
+# A RENAME THAT FAILED IS NOT A PUBLISHED CONFIG. This swallowed the failure and returned 0, so a
+# config that never reached disk - a lost permission, a full filesystem, a read-only remount - was
+# reported to the user as a successful settings change, with the old values still in place.
+mv -f $_ct $config 2>/dev/null || { rm -f $_ct 2>/dev/null; set -u; exit 1; }
 # Guarded, unlike the bare `rm` this replaces: that one printed
 # "rm: .../.scripts: No such file or directory" to stderr on every writer that lost the race.
 rm -f $_sf 2>/dev/null || :

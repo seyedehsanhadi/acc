@@ -405,10 +405,39 @@ at() {
   if [ ! -f $file ] && [ $((10#$(date +%H%M))) -ge $((10#${file##*/})) ] && [ $((10#$(date +%H))) -eq $((10#${1%:*})) ]; then
     mkdir -p ${file%/*}
     shift
-    echo "$@" | sed 's/,/\;/g; s|^acc$|/dev/acc|; s|^acc |/dev/acc |; s| acc$| /dev/acc|; s| acc | /dev/acc |g' > $file
-    . $file || :
+    # THE COMMA CHAINS ON SUCCESS, NOT REGARDLESS.
+    #
+    # It used to become a semicolon, and the whole file is sourced as `. $file || :`, which turns
+    # errexit OFF for everything inside it. So the documented idiom
+    #     at 03:45 acc -s <settings>, acc -n switched to day profile
+    # sent the message whatever the settings command did. A OnePlus 8 Pro owner was told his day
+    # profile was active while every night setting was still in force, and the notification was the
+    # only thing that had worked. && makes the message mean what it says.
+    echo "$@" | sed 's/,/ \&\& /g; s|^acc$|/dev/acc|; s|^acc |/dev/acc |; s| acc$| /dev/acc|; s| acc | /dev/acc |g' > $file.run
+    # A SCHEDULE IS DONE WHEN IT SUCCEEDED, not when it started.
+    #
+    # The marker was written before the commands ran and doubles as the "already handled today"
+    # guard, so one failed run retired the profile until midnight. Record the attempt separately,
+    # allow a bounded number of retries on the next passes, and only then give up for the day.
+    if . $file.run; then
+      mv -f $file.run $file 2>/dev/null || : > $file
+      rm -f $file.tries 2>/dev/null || :
+    else
+      _atn=0
+      [ ! -f $file.tries ] || read -r _atn < $file.tries 2>/dev/null || :
+      case ${_atn:-x} in ''|*[!0-9]*) _atn=0;; esac
+      _atn=$((_atn + 1))
+      echo $_atn > $file.tries 2>/dev/null || :
+      if [ $_atn -ge 3 ]; then
+        mv -f $file.run $file 2>/dev/null || : > $file
+        command -v warn_once_per >/dev/null 2>&1 \
+          && warn_once_per sched-${file##*/} 43200 "ACC: the scheduled settings for ${1:-this profile} did not apply after 3 attempts. Your previous settings are still in force." || :
+      else
+        rm -f $file.run 2>/dev/null || :
+      fi
+    fi
   elif [ $((10#$(date +%H%M))) -lt $((10#${file##*/})) ]; then
-    rm $file 2>/dev/null || :
+    rm -f $file $file.run $file.tries 2>/dev/null || :
   fi
 }
 
