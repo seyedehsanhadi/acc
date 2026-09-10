@@ -2571,7 +2571,8 @@ if ! $_INIT; then
       fi
     fi
     if [ "$(cat $gcst 2>/dev/null)" = "$start" ]; then :; else
-      echo "$start" > $gcst 2>/dev/null || :
+      command -v _wlog >/dev/null 2>&1 && _wlog "native charge_start_level <- $start (retried after the stop write)" || :
+      chmod 0644 $gcst 2>/dev/null || :; echo "$start" > $gcst 2>/dev/null || :
     fi
   }
 
