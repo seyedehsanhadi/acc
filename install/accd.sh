@@ -663,7 +663,6 @@ if ! $_INIT; then
     grep -Ev '^$|^#' $config > $TMPDIR/.config
     config=$TMPDIR/.config
     applyOnPlug=(${applyOnPlug[*]-} ${applyOnBoot[*]-})
-    apply_on_plug default
     tempLevel=0
     # D2 (rc15): do NOT re-enable charging on exit when the battery is AT/ABOVE the user's limit. On a
     # SIGTERM stop/restart (the exitCode=143 in the logs) the daemon used to enable_charging here, opening
@@ -676,7 +675,7 @@ if ! $_INIT; then
     # rc22: ...and the same applies to a THERMAL pause. Resuming here because the level happens to
     # sit below pause_capacity hands back an uncapped charge on a pack that is over max_temp, with
     # no daemon left to pause it again. See _temp_hold.
-    if _ge_pause_cap 2>/dev/null || _temp_hold 2>/dev/null; then :; else enable_charging; fi
+    if _ge_pause_cap 2>/dev/null || _temp_hold 2>/dev/null; then :; else apply_on_plug default; enable_charging; fi
     if [[ "$exitCode" = @(1|2|7|127) ]]; then
       . $execDir/logf.sh
       logf --export
@@ -723,7 +722,8 @@ if ! $_INIT; then
           # and until now this path left no record at all: no notification, nothing in warnings.log,
           # and the tmpfs blacklist is gone at the next boot. A bundle collected afterwards showed an
           # empty chargingSwitch with nothing to explain it. Say which switch was dropped and why.
-          command -v warn_once_per >/dev/null 2>&1 && warn_once_per swclear-unsolicited 3600             "ACC dropped the charging switch '${chargingSwitch[*]% --}': charging carried on 3 times in a row while ACC had it disabled, so it is not holding. ACC will select another one the next time it needs to pause."
+          _swText="${chargingSwitch[*]}"
+          command -v warn_once_per >/dev/null 2>&1 && warn_once_per swclear-unsolicited 3600             "ACC dropped the charging switch '${_swText% --}': charging carried on 3 times in a row while ACC had it disabled, so it is not holding. ACC will select another one the next time it needs to pause."
           $TMPDIR/acca $config --set charging_switch=
           chargingSwitch=()
           unsolicitedResumes=0
@@ -1859,11 +1859,12 @@ if ! $_INIT; then
                 if [ -f $dataDir/.user-locked ]; then
                   warn_once_per lockhold 21600 "⚠️ ACC: your locked charging switch isn't holding your ${capacity[3]:-?}% limit. Pick another in AccA - ACC will not change a locked switch for you."
                 else
-                  echo "${chargingSwitch[*]% --}" >> $TMPDIR/.sw-blacklist
+                  _swText="${chargingSwitch[*]}"
+                  echo "${_swText% --}" >> $TMPDIR/.sw-blacklist
                   notif "⚠️ ACC: the auto-selected charging switch stopped holding your ${capacity[3]:-?}% limit - selecting another."
                   # notif alone is a popup: it leaves nothing behind for the diagnostic bundle, and
                   # this is one of the three places a switch can silently disappear.
-                  command -v warn_once_per >/dev/null 2>&1 && warn_once_per swclear-lockfail 3600                     "ACC dropped the charging switch '${chargingSwitch[*]% --}': it stopped holding the ${capacity[3]:-?}% limit for 3 confirmed loops. Blacklisted for this boot; another will be selected."
+                  command -v warn_once_per >/dev/null 2>&1 && warn_once_per swclear-lockfail 3600                     "ACC dropped the charging switch '${_swText% --}': it stopped holding the ${capacity[3]:-?}% limit for 3 confirmed loops. Blacklisted for this boot; another will be selected."
                   $TMPDIR/acca $config --set charging_switch= 2>/dev/null || :
                   chargingSwitch=()
                   rm $TMPDIR/.lockfail-count 2>/dev/null || :
@@ -2239,8 +2240,9 @@ if ! $_INIT; then
                 # rc8: user-locked switch not resuming -> WARN, never auto-replace (respect the lock).
                 [ -f $TMPDIR/.resumewarned ] || { touch $TMPDIR/.resumewarned 2>/dev/null || :; warn_once_per resume-locked 1800 "⚠️ ACC: charging isn't resuming at your ${capacity[2]:-?}% limit with your locked switch. Pick another in AccA - ACC will NOT change a locked switch."; }
               else
-                echo "${chargingSwitch[*]% --}" >> $TMPDIR/.sw-blacklist
-                warn_once_per resume-reselect 1800 "⚠️ ACC: charging is not resuming at your ${capacity[2]:-?}% limit with '${chargingSwitch[*]% --}' - selecting another switch."
+                _swText="${chargingSwitch[*]}"
+                echo "${_swText% --}" >> $TMPDIR/.sw-blacklist
+                warn_once_per resume-reselect 1800 "⚠️ ACC: charging is not resuming at your ${capacity[2]:-?}% limit with '${_swText% --}' - selecting another switch."
                 $TMPDIR/acca $config --set charging_switch= 2>/dev/null || :; chargingSwitch=()
                 rm $TMPDIR/.resumefail 2>/dev/null || :
               fi
@@ -2403,7 +2405,7 @@ if ! $_INIT; then
     # the firmware nodes are a percentage: clamp to [0..100] so a bad/out-of-range config
     # value can never be written raw to charge_stop_level / charge_start_level.
     case $stop in ''|*[!0-9]*) stop=80;; esac; [ "$stop" -le 100 ] || stop=100
-    case $start in ''|*[!0-9]*) start=75;; esac; [ "$start" -le 100 ] || start=100
+    case $start in ''|*[!0-9]*) start=75;; esac; [ "$start" -le 99 ] || start=99
     # A MILLIVOLT PAUSE IS NOT A PERCENTAGE, AND CLAMPING IT TO 100 DISABLES THE LIMIT.
     #
     # capacity[3] carries two domains: 0-100 is a percentage, 3001-5000 is millivolts (see
@@ -2567,6 +2569,9 @@ if ! $_INIT; then
         _nlDrift=0
         warn_once_per nativedrift 21600 "ACC: something else keeps changing this phone's charge limit, and ACC keeps putting it back. That fight can break fast and wireless charging. Turn off Adaptive Charging (Settings > Battery > Charging optimisation > Standard) and let ACC own the limit." || :
       fi
+    fi
+    if [ "$(cat $gcst 2>/dev/null)" = "$start" ]; then :; else
+      echo "$start" > $gcst 2>/dev/null || :
     fi
   }
 
@@ -2846,8 +2851,8 @@ if ! $_INIT; then
       # above the current SOC for the pulse; sync_native_limit restores the real start on
       # the next line, so there is no overshoot and the cap is never disabled.
       chmod 0644 $gcsl $gcst 2>/dev/null || :
-      echo 100 > $gcst 2>/dev/null || :
       echo 100 > $gcsl 2>/dev/null || :
+      echo 99 > $gcst 2>/dev/null || :
       sleep ${loopDelay[0]}
       sync_native_limit
     fi
