@@ -85,5 +85,37 @@ grep -q 'hvcontract' "$AD" && grep -q '\$TMPDIR/\.hvcontract' "$AD" \
   && ok "the marker lives in TMPDIR, which is tmpfs: only a reboot clears it" \
   || no "the marker is no longer kept in TMPDIR; this suite's premise needs rechecking"
 
+echo "--- 4. the whole recovery decision, on the reporter's own numbers"
+# His plug: peak 4200mV, no input current, charger string as above. That is a collapsed supply the
+# re-kick exists to repair, and the type string is the only thing that stood in the way.
+D=$W/probe; rm -rf "$D"; mkdir -p "$D/usb"
+verdict(){ # verdict <tree>
+  ( cd "$D" || exit
+    echo 0 > usb/input_current_now
+    printf '%s' "$FP5" > usb/usb_type
+    echo 4200 > "$D/.hvpeak"
+    TMPDIR=$D; dataDir=$D
+    rm -f "$D/.hvcontract" "$D/.hvkicked" "$D/.rekick-off"
+    . "$1/state-export.sh" 2>/dev/null || :
+    for fn in _mv _ma _iin_ma _usb_type _hv_may_kick; do
+      eval "$(sed -n "/^$fn() {/,/^}/p" "$1/misc-functions.sh")" 2>/dev/null || :
+    done
+    present(){ return 0; }
+    : ${hvPeakMaxMv:=5500}; : ${hvDeadMa:=50}
+    _hv_may_kick && echo KICK || echo WITHHOLD )
+}
+r=$(verdict "$execDir")
+[ ".$r" = .KICK ] && ok "a collapsed DCP at 4200mV with no input current is repaired: $r" \
+  || no "the collapse is still not repaired: $r"
+# ...and the same fixture against a tree that matches the whole type list, to show the case is real.
+if [ -n "${ARM24-}" ] && [ -f "$ARM24/misc-functions.sh" ]; then
+  r=$(verdict "$ARM24")
+  [ ".$r" = .WITHHOLD ] && ok "the pre-fix tree withholds it, which is the reported symptom: $r" \
+    || no "the pre-fix tree no longer reproduces the symptom: $r"
+else
+  ok "no ARM24 tree given, the negative control is skipped"
+fi
+
+
 rm -rf "$W" 2>/dev/null
 fin

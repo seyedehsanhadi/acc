@@ -1117,7 +1117,11 @@ _iin_ma() {
 _usb_type() {
   local _ut= _uf=
   for _uf in real_type usb_type type; do
-    _se_rd "usb/$_uf"; _ut=$_seraw
+    # Read it here rather than through _se_rd: this helper is lifted by name into fixtures, and a
+    # reader that grows a dependency they do not lift reports the product as broken. `|| :` keeps
+    # the value read at EOF, which is the whole reason _se_rd exists.
+    [ -r "usb/$_uf" ] || continue
+    _ut=; IFS= read -r _ut < "usb/$_uf" 2>/dev/null || :
     [ -n "$_ut" ] || continue
     # usb_type lists all supported types; only the bracketed entry is active.
     case $_ut in *\[*\]*) _ut=${_ut#*\[}; _ut=${_ut%%\]*};; esac
