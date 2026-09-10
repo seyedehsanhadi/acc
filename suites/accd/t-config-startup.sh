@@ -8,6 +8,7 @@ isAccd=true
 . "$execDir/cfg-guard.sh"
 warn_once_per(){ :; }
 getprop(){ echo unknown; }
+case $0 in /*) _self=$0;; *) _self=$PWD/$0;; esac
 cd "$W" || exit 2
 
 if [ "${1-}" = native ]; then
@@ -55,8 +56,9 @@ check "${chargingSwitch[*]}" 'battery/charging_enabled 1 0 --' 'the daemon adopt
 
 cp "$execDir/default-config.txt" "$config"
 export execDir W
+export _self
 ( exec 0>>"$config.lock"; flock -x 0 || exit 2
-  timeout -k 1 15 /system/bin/sh "$0" native >"$W/native.log" 2>&1 & echo $! > "$W/native.pid"
+  timeout -k 1 15 /system/bin/sh "$_self" native >"$W/native.log" 2>&1 & echo $! > "$W/native.pid"
   sleep 2
   sed -n 's/^chargingSwitch=//p' "$config" > "$W/during-lock"
   sed -i 's/^temperature=.*/temperature=(40 45 20 55)/' "$config"
