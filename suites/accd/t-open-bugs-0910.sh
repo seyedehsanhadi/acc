@@ -87,19 +87,82 @@ r=$(run_status)
 [ ".$r" = .Unknown/1 ] && ok "with inference ON the unusable reading is still refused" \
   || no "an unusable reading was inferred from: $r"
 
-echo "--- 3. the PATH wrapper must run something"
-if [ -f "$CZ" ]; then
-  if grep -q 'exec \. /data/adb' "$CZ"; then
-    no "the wrapper's fallback branch is 'exec . <file>', which is not a runnable command"
-  else
-    ok "the wrapper's fallback branch execs the script directly"
-  fi
-  # and the generated wrapper must still prefer the tmpfs launcher when it exists
-  grep -q 'exec /dev/' "$CZ" && ok "the wrapper still prefers /dev/<name> once the module is live" \
-    || no "the wrapper no longer prefers the tmpfs launcher"
+echo "--- 3. the PATH wrapper must run something, in EVERY installer copy"
+# customize.sh, install.sh and META-INF/com/google/android/update-binary are the same installer
+# under three names - byte-identical in this project - and each writes the wrapper. Correcting one
+# leaves the other two shipping the broken branch, and which of them runs depends on how the module
+# was flashed (app vs recovery).
+ROOT=${ROOT:-$(dirname "$CZ")}
+_inst=0; _bad=0
+for _c in "$ROOT/customize.sh" "$ROOT/install.sh" "$ROOT/META-INF/com/google/android/update-binary"; do
+  [ -f "$_c" ] || continue
+  _inst=$((_inst + 1))
+  grep -q 'exec \. /data/adb' "$_c" && { _bad=$((_bad + 1)); echo "      stale: ${_c#$ROOT/}"; }
+done
+if [ "$_inst" -eq 0 ]; then
+  ok "no installer in this tree, section skipped"
+  ok "no installer in this tree, section skipped"
 else
-  ok "no customize.sh in this tree, section skipped"
-  ok "no customize.sh in this tree, section skipped"
+  [ "$_bad" -eq 0 ] && ok "all $_inst installer copies exec the script directly" \
+    || no "$_bad of $_inst installer copies still carry 'exec . <file>'"
+  grep -q 'exec /dev/' "$ROOT/customize.sh" 2>/dev/null \
+    && ok "the wrapper still prefers /dev/<name> once the module is live" \
+    || no "the wrapper no longer prefers the tmpfs launcher"
+fi
+
+echo "--- 4. a uevent without a trailing newline keeps its last line"
+# The kernel normally terminates these, but a copy taken by a collector, an overlay, or a vendor
+# node that does not, drops whichever key sits last - and on a Fairphone 5 that is the charge
+# counter, so the reader falls back to a frozen attribute of 2667961 instead of the live 749841.
+UE=$W/ue; rm -rf $UE; mkdir -p $UE
+printf 'POWER_SUPPLY_NAME=battery\nPOWER_SUPPLY_CAPACITY=21\nPOWER_SUPPLY_CHARGE_COUNTER=749841' > $UE/uevent
+r=$( eval "$(/system/bin/sed -n '/^_cc_uevent() {/,/^}/p' "$BI")"
+     _cc_uevent "$UE/"; echo "${_ccue:-empty}" )
+[ ".$r" = .749841 ] && ok "the last key survives a file with no trailing newline" \
+  || no "the last key was dropped: got $r, want 749841"
+# and the ordinary terminated file must be unchanged
+printf 'POWER_SUPPLY_NAME=battery\nPOWER_SUPPLY_CHARGE_COUNTER=749841\nPOWER_SUPPLY_CAPACITY=21\n' > $UE/uevent
+r=$( eval "$(/system/bin/sed -n '/^_cc_uevent() {/,/^}/p' "$BI")"
+     _cc_uevent "$UE/"; echo "${_ccue:-empty}" )
+[ ".$r" = .749841 ] && ok "a normally terminated uevent is unaffected" \
+  || no "a terminated uevent broke: got $r"
+
+echo "--- 5. acc -i keeps an input current that arrives without a trailing newline"
+BIF=${BIF:-$(dirname "$BI")/batt-info.sh}
+SEF=${SEF:-$(dirname "$BI")/state-export.sh}
+if [ -f "$BIF" ] && [ -f "$SEF" ]; then
+  # The supply loop is not cleanly extractable, so this grades the reader it uses. A bare
+  # `read ... && break` walks past a value that arrived at EOF; _se_rd keeps it.
+  grep -q 'read -r psaRaw <' "$BIF" \
+    && no "batt-info still reads the input node with a bare read, which drops a value at EOF" \
+    || ok "batt-info reads the input node through the EOF-safe reader"
+  # ...and that reader must actually keep such a value.
+  N=$W/psy; rm -rf $N; mkdir -p $N
+  printf '%s' 1500000 > $N/input_current_now
+  r=$( eval "$(/system/bin/sed -n '/^_se_rd() {/,/^}/p' "$SEF")"
+       _se_rd "$N/input_current_now"; echo "${_seraw:-empty}" )
+  [ ".$r" = .1500000 ] && ok "the reader keeps a newline-free 1.5 A reading" \
+    || no "the reader dropped it: got $r"
+else
+  ok "no batt-info.sh/state-export.sh in this tree, section skipped"
+  ok "section skipped"
+fi
+
+echo "--- 6. the failure message must not name a cause it cannot know"
+SPF=${SPF:-$(dirname "$BI")/set-prop.sh}
+if [ -f "$SPF" ]; then
+  # setRc carries a refused voltage as well as a failed publish, so a message that says only "the
+  # configuration could not be written" is wrong whenever the config WAS written and one setting
+  # was refused - which is what an unsupported voltage node produces.
+  # -E: toybox grep has no \| alternation in a basic expression.
+  _msg=$(grep -nE 'could not be (written|applied)|NOT saved|could not be' "$SPF" | head -1)
+  case "$_msg" in
+    *"could not be written"*) no "the message blames the config write for any non-zero verdict: $_msg";;
+    "") no "no failure message found in set-prop.sh";;
+    *) ok "the failure message covers applying as well as saving";;
+  esac
+else
+  ok "no set-prop.sh in this tree, section skipped"
 fi
 
 rm -rf "$W"

@@ -438,7 +438,7 @@ mkdir -p $tmpd
 if [ -f $tmpd/.updated ]; then
   exec /dev/${i#*:} \"\$@\"
 else
-  exec . /data/adb/$domain/$id/${i%:*} \"\$@\"
+  exec /data/adb/$domain/$id/${i%:*} \"\$@\"
 fi" > $j
   done
 }

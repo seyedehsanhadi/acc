@@ -301,7 +301,10 @@ set_prop() {
     if [ "$setRc" -eq 0 ]; then
       echo "✅"
     else
-      echo "The settings were NOT saved - the configuration could not be written." >&2
+      # setRc carries a REFUSED SETTING as well as a failed publish - an unsupported voltage node
+      # sets it while the capacity limits beside it were stored perfectly well. Naming the config
+      # write as the cause was therefore wrong in the commonest case. Say what is certain.
+      echo "One or more settings could not be applied or saved; see the error above." >&2
     fi
   fi
 

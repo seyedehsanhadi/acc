@@ -742,7 +742,11 @@ batt_cap() {
 _cc_uevent() {
   local _k= _v=
   _ccue=
-  while IFS='=' read -r _k _v; do
+  # `|| [ -n "$_k" ]`: read returns non-zero AT EOF with the last line already parsed, so without
+  # this the final key is dropped whenever the file has no trailing newline. On a Fairphone 5 the
+  # charge counter sits last, and losing it sends cc_now back to a frozen attribute of 2667961
+  # instead of the live 749841.
+  while IFS='=' read -r _k _v || [ -n "$_k" ]; do
     [ "$_k" = POWER_SUPPLY_CHARGE_COUNTER ] && { _ccue=$_v; return 0; }
   done < "${1}uevent" 2>/dev/null || :
 }

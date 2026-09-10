@@ -107,7 +107,11 @@ charge_type $power_supply_type"
 
       psaRaw=
       for psaNode in "$i/input_current_now" "$i/current_now"; do
-        { read -r psaRaw < "$psaNode"; } 2>/dev/null && break
+        # _se_rd, not a bare read: read reports failure AT EOF with the value already in hand, so
+        # `read ... && break` walked past a perfectly good reading from a node with no trailing
+        # newline and acc -i then printed no input current at all.
+        _se_rd "$psaNode"; psaRaw=$_seraw
+        [ -z "$psaRaw" ] || break
       done
       _se_input_ma "$psaRaw" "$psaNode"
       power_supply_amps=0.00
