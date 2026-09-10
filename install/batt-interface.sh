@@ -69,7 +69,25 @@ idle_discharging() {
         [ $_fl -lt 2 ] || touch $TMPDIR/.dpol_unstable 2>/dev/null || :
       }
     fi
-    echo "$_cc $_ccnow" > $TMPDIR/.cc_then 2>/dev/null || :
+    # KEEP THE ANCHOR UNTIL THE COUNTER ACTUALLY MOVES.
+    #
+    # This re-stamped on EVERY pass, so with a 3-9s loop the window was always a few seconds, and a
+    # fuel gauge that steps charge_counter coarsely reads the same value across it. The delta was
+    # therefore 0 forever, this arbiter never ruled on such a phone, and the sign - the signal it
+    # exists to check - decided alone. Exactly the defect _se_ccdir carried on the export side.
+    #
+    # Re-stamp when the counter CHANGED (a fine gauge steps every pass, so nothing changes for it),
+    # when there is no anchor yet, or when the window has gone stale past the 90s ceiling this block
+    # already enforces. Otherwise hold it and let a coarse gauge accumulate a real delta.
+    #
+    # A flat counter still leaves _ccd empty, so the kernel tie-break below is untouched and a phone
+    # whose gauge never moves behaves exactly as before.
+    if [ ".${_ccp:-}" = . ] || [ "$_cc" != "${_ccp:-}" ] \
+      || [ $(( _ccnow - ${_ccts:-0} )) -gt 90 ] 2>/dev/null \
+      || [ $(( _ccnow - ${_ccts:-0} )) -lt 0 ] 2>/dev/null
+    then
+      echo "$_cc $_ccnow" > $TMPDIR/.cc_then 2>/dev/null || :
+    fi
   fi
 
   # rc21 SIGN-VS-KERNEL TIE-BREAK. The coulomb block above is the good arbiter, but it only
