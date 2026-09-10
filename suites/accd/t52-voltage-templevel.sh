@@ -165,9 +165,21 @@ printf '%s' "$_sp" | grep -q 'set_ch_volt.*|| setRc=\$?' \
   && printf '%s' "$_sp" | grep -q 'return "\$setRc"' \
   && ok "a rejected voltage propagates a non-zero command verdict" \
   || no "set_prop still hides a rejected voltage behind exit 0"
-printf '%s' "$_sp" | grep -q '\[ "\$setRc" -ne 0 \] || echo "✅"' \
-  && ok "a rejected voltage cannot print the success tick" \
-  || no "set_prop still prints success for a rejected voltage"
+# The tick is graded by its CONTRACT, not by one spelling of it: it must be guarded by the command
+# verdict, and it must come after the config has actually been published. Pinning the old one-liner
+# made this fail the moment that guard was strengthened to cover a failed publish as well.
+# The LAST tick is the one the argument branch reaches; the import branch prints its own earlier,
+# after its own write, and is not what this case grades.
+_tickLine=$(grep -n 'echo "✅"' "$SP" | tail -1 | cut -d: -f1)
+_pubLine=$(grep -n 'write-config.sh' "$SP" | tail -1 | cut -d: -f1)
+_guardWindow=$(sed -n "$((_tickLine - 5)),${_tickLine}p" "$SP" 2>/dev/null)
+case "$_guardWindow" in
+  *setRc*) ok "the success tick is guarded by the command verdict";;
+  *) no "set_prop prints the success tick without consulting setRc";;
+esac
+{ [ -n "$_tickLine" ] && [ -n "$_pubLine" ] && [ "$_tickLine" -gt "$_pubLine" ]; } 2>/dev/null \
+  && ok "the success tick comes after the config is published" \
+  || no "the tick is printed before the config reaches disk (tick=$_tickLine publish=$_pubLine)"
 
 # ---- set_temp_level ------------------------------------------------------------------------------
 _s=$(xf set_temp_level "$BI")
