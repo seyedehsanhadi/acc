@@ -413,31 +413,18 @@ at() {
     # sent the message whatever the settings command did. A OnePlus 8 Pro owner was told his day
     # profile was active while every night setting was still in force, and the notification was the
     # only thing that had worked. && makes the message mean what it says.
-    echo "$@" | sed 's/,/ \&\& /g; s|^acc$|/dev/acc|; s|^acc |/dev/acc |; s| acc$| /dev/acc|; s| acc | /dev/acc |g' > $file.run
-    # A SCHEDULE IS DONE WHEN IT SUCCEEDED, not when it started.
-    #
-    # The marker was written before the commands ran and doubles as the "already handled today"
-    # guard, so one failed run retired the profile until midnight. Record the attempt separately,
-    # allow a bounded number of retries on the next passes, and only then give up for the day.
-    if . $file.run; then
-      mv -f $file.run $file 2>/dev/null || : > $file
-      rm -f $file.tries 2>/dev/null || :
-    else
-      _atn=0
-      [ ! -f $file.tries ] || read -r _atn < $file.tries 2>/dev/null || :
-      case ${_atn:-x} in ''|*[!0-9]*) _atn=0;; esac
-      _atn=$((_atn + 1))
-      echo $_atn > $file.tries 2>/dev/null || :
-      if [ $_atn -ge 3 ]; then
-        mv -f $file.run $file 2>/dev/null || : > $file
-        command -v warn_once_per >/dev/null 2>&1 \
-          && warn_once_per sched-${file##*/} 43200 "ACC: the scheduled settings for ${1:-this profile} did not apply after 3 attempts. Your previous settings are still in force." || :
-      else
-        rm -f $file.run 2>/dev/null || :
-      fi
-    fi
+    # THE MARKER GOES DOWN BEFORE THE COMMANDS RUN, and it is what stops this schedule firing
+    # again. at() is called from _srccfg, which the daemon runs every pass, so the window between
+    # "due" and "recorded" is one loop. An earlier attempt at this file recorded the schedule only
+    # once its commands SUCCEEDED, to allow a retry -- and a command that fails, or simply takes
+    # longer than a loop, then re-fires on every single pass. Measured on a Mi A3 on the charger:
+    # 69 concurrent `acc -s` processes from one profile line, fighting each other over the config.
+    # A retry is not worth that. The notification is chained with && above, so a failed profile is
+    # visible without one.
+    echo "$@" | sed 's/,/ \&\& /g; s|^acc$|/dev/acc|; s|^acc |/dev/acc |; s| acc$| /dev/acc|; s| acc | /dev/acc |g' > $file
+    . $file || :
   elif [ $((10#$(date +%H%M))) -lt $((10#${file##*/})) ]; then
-    rm -f $file $file.run $file.tries 2>/dev/null || :
+    rm -f $file 2>/dev/null || :
   fi
 }
 

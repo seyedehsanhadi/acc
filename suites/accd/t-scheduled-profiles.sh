@@ -129,26 +129,31 @@ case "$r" in
      no "the message the owner sees does not reflect what happened";;
 esac
 
-echo "--- 4. a schedule that failed must not be recorded as done for the day"
-# at() writes its marker BEFORE running the commands, and its own guard is `[ ! -f $file ]`, so a
-# profile that failed at 03:45 is never attempted again until the marker is cleared at midnight.
-at_retries(){
-  ( TMPDIR=$W/tmp4; mkdir -p "$TMPDIR/schedules"
+echo "--- 4. a due schedule must fire exactly once, however its commands end"
+# at() is called from _srccfg, which the daemon runs every pass, so whatever records "this one has
+# fired" has to be written BEFORE the commands run. An earlier version of this fix recorded the
+# schedule only on success, so it could be retried -- and a settings command that fails, or merely
+# outlives one loop, re-fired on every pass. Measured on a Mi A3 on the charger: 69 concurrent
+# `acc -s` processes from a single profile line, fighting each other over the config file. The
+# failed-profile case is covered by the notification gate in section 3, not by a retry.
+at_once(){
+  ( TMPDIR=$W/tmp4; rm -rf "$TMPDIR"; mkdir -p "$TMPDIR/schedules"
     isAccd=true
     eval "$(sed -n '/^at() {/,/^}/p' "$MF")"
     H=$((10#$(date +%H))); M=$((10#$(date +%M)))
     [ $M -ge 1 ] || { echo skip; return 0; }
     T=$(printf '%02d:%02d' "$H" "$((M - 1))")
-    rm -f "$W/ran"
+    rm -f "$W/ran4"
+    # a command that FAILS, then the same schedule offered again on the next pass
     at "$T" false
-    at "$T" touch "$W/ran"
-    [ -f "$W/ran" ] && echo retried || echo "stuck" )
+    at "$T" touch "$W/ran4"
+    [ -f "$W/ran4" ] && echo refired || echo once )
 }
-r=$(at_retries)
+r=$(at_once)
 case "$r" in
   skip)    ok "skipped: run at least a minute into the hour";;
-  retried) ok "a failed schedule is retried rather than marked done";;
-  *)       no "a failed schedule was marked done and never retried";;
+  once)    ok "a failed schedule does not re-fire on the next pass";;
+  *)       no "the schedule re-fired after its command failed - this is the runaway";;
 esac
 
 echo "--- 5. a temperature band that had to be repaired must say so"
