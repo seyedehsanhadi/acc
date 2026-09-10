@@ -143,7 +143,9 @@ _gate(){ A=$1; shift
   fn $A misc-functions.sh _mv > $W/g.sh
   fn $A misc-functions.sh _ma >> $W/g.sh
   fn $A misc-functions.sh _iin_ma >> $W/g.sh
-  src $A state-export.sh >> $W/g.sh
+  # NOT src: it strips everything after a '#', which mangles every ${var#pattern} in the file and
+  # leaves the lifted readers unusable. src exists for the has/hasnt greps, not for including code.
+  cat "$A/state-export.sh" >> $W/g.sh
   fn $A misc-functions.sh _usb_type >> $W/g.sh
   fn $A misc-functions.sh _hv_may_kick >> $W/g.sh
   grep -qF '_hv_may_kick()' $W/g.sh || { echo ABSENT; return; }
