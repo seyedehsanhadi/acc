@@ -48,6 +48,15 @@ cfg_srcsafe() {
 cfg_lock() {
   local _cfl=
   _cfl=$(readlink -f "$1") && [ -n "$_cfl" ] || return 1
+  # flock is a toybox applet, and it is not on every ROM ACC runs on. Refusing every write there
+  # would take away the ability to change a setting at all, which is far worse than the narrow
+  # race the lock closes. Degrade to the pre-lock behaviour: the read-merge-publish below still
+  # rebases on what is on disk, so a lost update needs two writers inside the same few
+  # milliseconds rather than the same few minutes.
+  if ! command -v flock >/dev/null 2>&1; then
+    command -v warn_once_per >/dev/null 2>&1       && warn_once_per noflock 86400 "ACC: this ROM has no flock, so config writes cannot be serialised. Settings still save; two apps writing at the same instant could still lose one change." || :
+    return 0
+  fi
   exec 0>>"$_cfl.lock" || return 1
   if command -v timeout >/dev/null 2>&1; then
     timeout 10 flock -x 0 && return 0

@@ -96,5 +96,34 @@ else
   no "reset lock absent"
 fi
 
+echo "--- 4. a ROM without flock can still save a setting"
+# flock is a toybox applet and not every ROM ships it. Hide it and prove a write still lands:
+# refusing every write there would be a worse regression than the race the lock closes.
+mkcfg
+nof=$W/nobin; rm -rf "$nof"; mkdir -p "$nof"
+oldifs=$IFS; IFS=:
+for d in $PATH; do
+  IFS=$oldifs
+  [ -d "$d" ] || continue
+  for p in "$d"/*; do
+    b=${p##*/}
+    [ "$b" = flock ] && continue
+    [ -e "$nof/$b" ] || ln -sf "$p" "$nof/$b" 2>/dev/null || :
+  done
+  IFS=:
+done
+IFS=$oldifs
+r=$( PATH=$nof; export PATH
+     command -v flock >/dev/null 2>&1 && echo "flock-still-visible" && exit
+     run set:language 'language=de' )
+l=$(sed -n 's/^language=//p' "$W/data/config.txt")
+case "$r:$l" in
+  rc=0:de) ok "a write without flock still publishes: language=$l" ;;
+  flock-still-visible*) no "could not hide flock, this case proves nothing" ;;
+  *) no "a write without flock was refused: $r language=$l" ;;
+esac
+rm -rf "$nof"
+
+
 rm -rf "$W" 2>/dev/null
 fin
