@@ -729,8 +729,10 @@ _se_gate_ma() {
 # (QC4 tops at ~27-28W not 100W; PD PPS SPR caps at 100W; PD3.1 EPR reaches 240W - all verified
 # against primary sources + teardowns, do not replace with marketing numbers).
 # Reason when charging slower than the class suggests, priority order:
-#   user_limit (ACC's own max_charging_current is set - we know our config),
-#   thermal (battery at/above 42.0 C), taper (charge_type says Taper/Trickle, or SOC >= 95).
+#   voltage_limit (max_charging_voltage sits at or below the pack's own voltage, so the charger
+#   has nothing to push against), user_limit (max_charging_current is set AND the measured current
+#   is within 15% of it), thermal (battery at/above 42.0 C), taper (charge_type says Taper/Trickle,
+#   or SOC >= 95).
 # Read-only; approx=true marks the battery-side V x A fallback (always <= input watts, so the
 # class can only UNDER-state, never inflate). Args: $1=inMv $2=inMa $3=battCurRaw $4=battVoltRaw
 # $5=status $6=tempDeciC $7=capacityPct $8=measuredClass
@@ -749,9 +751,37 @@ _se_watts() {
   fi
 }
 
+# Last all-digit field of a config entry. max_charging_current is usually a bare number but may
+# carry a node in front of it ("battery/constant_charge_current 1800"), and the value is always
+# last. Sets $_secfgn to that number, or to null when there is nothing numeric to take.
+_se_cfg_num() {
+  local _f
+  _secfgn=null
+  for _f in $1; do
+    case "$_f" in ''|*[!0-9]*) ;; *) _secfgn=$_f;; esac
+  done
+}
+
+# True when a current cap is close enough to the measured current to be what is holding it there.
+# Either side may be the one the cap applies to: on a Tensor phone max_charging_current is the
+# CHARGER-INPUT current, on a Qualcomm phone it is the battery-side current, and ACC does not
+# know which from the config alone. 85% is the band; a cap the current is nowhere near is not an
+# explanation for anything. Args: $1=cap mA $2=battery current raw $3=input mA.
+_se_cap_binds() {
+  local _cap="$1" _bc="$2" _in="$3" _bm _thr
+  case "$_cap" in ''|*[!0-9]*|0) return 1;; esac
+  _thr=$(( _cap * 85 / 100 ))
+  if [ "$_in" != null ] && [ "${_in#-}" -ge "$_thr" ] 2>/dev/null; then return 0; fi
+  if [ "$_bc" != null ]; then
+    _se_ma "${_bc#-}"; _bm=$_sema
+    [ "$_bm" != null ] && [ "$_bm" -ge "$_thr" ] 2>/dev/null && return 0
+  fi
+  return 1
+}
+
 _se_charge() {
   local inmv="$1" inma="$2" bcur="$3" bvolt="$4" st="$5" tdc="$6" cap="$7" mcls="${8:-}"
-  local w=null cls=null why=null approx=false bma bmv ct filling=false
+  local w=null cls=null why=null approx=false bma bmv ct filling=false _sevlim _secap _sevnow
   # Input power is MEASURED, and it is real whether or not the battery is taking it. While ACC
   # holds an input-cut switch the charger still runs the phone -- a Mi A3 held at its pause level
   # was drawing 1797 mA from the wall with the battery at -170 mA -- but the whole block used to
@@ -761,7 +791,11 @@ _se_charge() {
   # watts with a null class is therefore the honest reading of a hold: power in, none of it to the
   # battery. The battery-side fallback below stays inside the charging branch -- it is a proxy for
   # input power, and during a hold the battery current is flowing the wrong way to stand in for it.
-  if [ "$inmv" != null ] && [ "$inma" != null ] && [ "$inmv" -gt 1000 ] 2>/dev/null && [ "${inma#-}" -gt 50 ] 2>/dev/null; then
+  # The 50 mA floor here hid a measurement it already had: at 30 mA in, the row printed
+  # "5.1 V - 0.03 A - (nothing) W input", a current shown beside a wattage refused. Anything above
+  # zero is a reading and multiplies out fine; a genuine zero and an unreadable node both stay
+  # null, which is the distinction the floor was really there to protect.
+  if [ "$inmv" != null ] && [ "$inma" != null ] && [ "$inmv" -gt 1000 ] 2>/dev/null && [ "${inma#-}" -gt 0 ] 2>/dev/null; then
     _se_watts "$inmv" "$inma"; w=$_sew
   fi
   # WHICH WAY THE CHARGE IS GOING IS ALREADY DECIDED, and not by this node.
@@ -796,7 +830,20 @@ _se_charge() {
       elif [ "${w%.*}" -lt 45 ]; then cls='"fast"'
       elif [ "${w%.*}" -lt 90 ]; then cls='"superfast"'
       else cls='"hyper"'; fi
-      if [ -n "${maxChargingCurrent[0]-}" ]; then why='"user_limit"'
+      # WHY IS NOT "WHICH SETTING EXISTS", IT IS "WHICH SETTING BINDS".
+      #
+      # user_limit used to fire on the mere PRESENCE of max_charging_current, and it was tested
+      # first, so a phone with any current cap could never report thermal or taper - and a
+      # OnePlus 8 Pro capped at 1800 mA while drawing 181 mA was told its cap was the reason,
+      # when the real block was a 4000 mV ceiling on a pack already resting at 4008 mV. There was
+      # no reason code for a voltage ceiling at all. Both are fixed here: the ceiling gets its
+      # own code and is tested first because it blocks charging outright, and the cap has to be
+      # anywhere near the measured current before it may take the blame.
+      _se_cfg_num "${maxChargingVoltage[*]-}"; _sevlim=$_secfgn
+      _se_cfg_num "${maxChargingCurrent[*]-}"; _secap=$_secfgn
+      _se_voltage_mv "$bvolt"; _sevnow=$_semv
+      if [ "$_sevlim" != null ] && [ "$_sevnow" != null ]       && [ "$_sevnow" -ge $(( _sevlim - 20 )) ] 2>/dev/null; then why='"voltage_limit"'
+      elif [ "$_secap" != null ] && _se_cap_binds "$_secap" "$bcur" "$inma"; then why='"user_limit"'
       elif [ "$tdc" != null ] && [ "$tdc" -ge 420 ] 2>/dev/null; then why='"thermal"'
       else
         ct=; { read -r ct < /sys/class/power_supply/battery/charge_type; } 2>/dev/null || :
