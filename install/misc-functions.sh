@@ -1,3 +1,5 @@
+command -v mtk_current_flag >/dev/null 2>&1 || . "${execDir:-/data/adb/vr25/acc}/supply-quirks.sh"
+
 apply_on_boot() {
 
   local entry=
@@ -1153,7 +1155,7 @@ _hv_may_kick() {
   # invariant structural: whoever is told "yes" has already spent the plug's single repair. The
   # conservative failure mode is a kick that was authorised and then not carried out, which costs
   # one missed repair rather than an unbounded re-detection loop on a live contract.
-  : > "$TMPDIR/.hvkicked" 2>/dev/null || :
+  true > "$TMPDIR/.hvkicked" 2>/dev/null || :
   return 0
 }
 
@@ -1254,7 +1256,7 @@ rekick_usb() {
     command -v _wlog >/dev/null 2>&1 && _wlog "rekick withheld ($_reason): lifted the input limit instead (now $(_vbus_mv)mV) - re-detection would renegotiate a plug we have already won" || :
     return 1
   fi
-  : > "$TMPDIR/.hvkicked" 2>/dev/null || :
+  true > "$TMPDIR/.hvkicked" 2>/dev/null || :
 
   # NO LATCH YET - AND A SINGLE READ HERE IS THE v3 BUG VERBATIM.
   #
@@ -1284,7 +1286,7 @@ rekick_usb() {
     [ $_rkn -lt 3 ] && sleep 1
   done
   if [ "$(_mv "${_rkhi:-0}")" -ge "${hvLatchMv:-6500}" ] 2>/dev/null; then
-    : > "$TMPDIR/.hvcontract" 2>/dev/null || :
+    true > "$TMPDIR/.hvcontract" 2>/dev/null || :
     command -v _wlog >/dev/null 2>&1 && _wlog "rekick skipped ($_reason): $(( _rkhi / 1000 ))mV negotiated contract seen while sampling - apsd_rerun would drop it to 5V until replug" || :
     return 1
   fi
@@ -1357,6 +1359,10 @@ rekick_usb() {
 
 
 enable_charging() {
+
+    # Release MMI's write-only disable flags, including ones latched by an older generic scan.
+    local _mtk_node
+    for _mtk_node in $(mtk_current_flags); do write 0 "$_mtk_node" || :; done
 
     # Same unplug-blip guard as below: restore the saved switch config, but only
     # physically flip it ON when actually plugged in (online); otherwise just clear the
@@ -1651,6 +1657,10 @@ flip_sw() {
       off="$(parse_value "$3")"
     fi
 
+    # Older configs treated this write-only boolean as a numeric current cap.
+    if command -v mtk_current_flag >/dev/null 2>&1 && mtk_current_flag "$1"; then
+      on=0; off=1
+    fi
     [ $flip = on ] || cat $currFile > $curThen
     # rc7 (U1): write EVERY node of a multi-node group (best-effort) instead of aborting on the
     # first node that fails -- a group like the Pixel all-paths current cut needs ALL nodes set, and
@@ -1794,10 +1804,26 @@ resetbs() {
   set +e
   dumpsys batterystats --reset
   rm -rf /data/system/battery*stats*
-  dsys_batt set ac 1
-  dsys_batt set level 100
-  sleep 2
-  dsys_batt reset
+  # THE LEVEL SPOOF ONLY MAKES SENSE NEAR FULL, AND IT IS WHAT USERS SEE.
+  #
+  # `set level 100` exists to make the framework record a full-charge event so it zeroes its own
+  # accounting. At a low charge it does something else entirely: the phone displays 100% for two
+  # seconds and drops back. A sweet (Redmi Note 10 Pro) user reported exactly that -- "the battery
+  # is 12% but once in a while it jumps to 100% and immediately goes back to 12%" -- and it read as
+  # a serious gauge fault, on a phone where every source agreed on 12%. ACC wrote the 100 itself.
+  #
+  # The stats reset above is unconditional and is the part that matters. Spoof the level only when
+  # the pack really is near full, where the claim is true and the flash is invisible.
+  _rbsl=; { read -r _rbsl < ${battCapacity:-/sys/class/power_supply/battery/capacity}; } 2>/dev/null || _rbsl=
+  case "${_rbsl:-x}" in *[!0-9]*) _rbsl=;; esac
+  if [ -n "$_rbsl" ] && [ "$_rbsl" -lt 95 ] 2>/dev/null; then
+    :
+  else
+    dsys_batt set ac 1
+    dsys_batt set level 100
+    sleep 2
+    dsys_batt reset
+  fi
   set -e
 } &>/dev/null
 
@@ -1900,6 +1926,9 @@ write() {
   local f=$dataDir/logs/write.log
   local _cur _tgt _unverified
   blacklisted=false
+  if command -v mtk_current_flag >/dev/null 2>&1 && mtk_current_flag "${2-}"; then
+    case "$one" in 0|1) :;; *) return 1;; esac
+  fi
 
   # 6.5.1-rc14 DEEP FIX (fast charge): IDEMPOTENT write. If the node already holds the target
   # value, do NOTHING -- no chmod, no echo, no 5x retry below. ACC re-asserts the switch EVERY
