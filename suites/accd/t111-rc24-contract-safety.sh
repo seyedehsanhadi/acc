@@ -76,6 +76,38 @@ has(){ src "$1" "$2" | grep -qF "$3" && echo SAFE || echo UNSAFE; }
 hasnt(){ src "$1" "$2" | grep -qF "$3" && echo UNSAFE || echo SAFE; }
 # fn: extract one shell function body from an arm.
 fn(){ sed -n "/^$3() {/,/^}/p" "$1/$2" 2>/dev/null; }
+
+# fnd: lift a function TOGETHER WITH THE FUNCTIONS IT CALLS.
+#
+# `fn` lifts one function by name. That was enough while the unit helpers were self-contained, and
+# it silently stopped being enough when they were refactored to delegate: _mv now calls
+# _se_voltage_mv, which calls _se_int, and neither is in misc-functions.sh. A by-name lift then
+# produces a function whose callee is undefined, the sourced body errors out, the case reads an
+# empty result and scores UNSAFE - on BOTH arms, which reads as "the fix is absent" when the fix is
+# present and working. Four cases here failed that way on two phones and were carried as open
+# findings across two campaigns before anyone lifted the dependency and watched them pass.
+#
+# So: follow the call graph. Collect _se_*/_mv/_ma/_iin_ma names out of each body, pull those too,
+# across every file that can define them. Depth-capped because a cycle would otherwise spin.
+fnd(){ _a=$1; shift
+  _todo="$*"; _done=""; _d=0
+  : > $W/.lift
+  while [ -n "$_todo" ] && [ "$_d" -lt 12 ]; do
+    _next=
+    for _f in $_todo; do
+      case " $_done " in *" $_f "*) continue ;; esac
+      _body=$(for _file in misc-functions.sh state-export.sh batt-interface.sh accd.sh; do
+                sed -n "/^$_f() {/,/^}/p" "$_a/$_file" 2>/dev/null; done)
+      [ -n "$_body" ] || continue
+      printf '%s
+' "$_body" >> $W/.lift
+      _done="$_done $_f"
+      _next="$_next $(printf '%s' "$_body" | grep -oE '_se_[a-z_]+|_mv|_ma|_iin_ma' | sort -u | tr '
+' ' ')"
+    done
+    _todo=$_next; _d=$(( _d + 1 ))
+  done
+  cat $W/.lift 2>/dev/null; }
 fni(){ sed -n "/^  $3() {/,/^  }/p" "$1/$2" 2>/dev/null; }
 
 # ============================================================================================
@@ -83,7 +115,7 @@ sec "1  UNITS - the defect that made a 9V contract invisible on a millivolt phon
 # usb/voltage_now is uV on one test phone and mV on the other. rc23 compares against 6000000, so on
 # the mV phone the latch can never set and a live QC3 plug looks unnegotiated.
 c_unit_norm(){ A=$1
-  fn $A misc-functions.sh _mv > $W/mv.sh
+  fnd $A _mv > $W/mv.sh
   [ -s $W/mv.sh ] || { echo UNSAFE; return; }
   r1=$(/system/bin/sh -c ". $W/mv.sh; _mv 9000000" 2>/dev/null)
   r2=$(/system/bin/sh -c ". $W/mv.sh; _mv 9000" 2>/dev/null)
@@ -107,20 +139,26 @@ c_unit_noraw(){ A=$1
 dual "no raw 6000000 comparison remains in the contract paths" c_unit_noraw
 
 c_unit_ma(){ A=$1
-  fn $A misc-functions.sh _ma > $W/ma.sh
+  fnd $A _ma > $W/ma.sh
   [ -s $W/ma.sh ] || { echo UNSAFE; return; }
   r1=$(/system/bin/sh -c ". $W/ma.sh; _ma -1700000" 2>/dev/null)
+  # 900 WITH NO NODE AND NO CONFIGURED FACTOR MUST NOT BE GUESSED. The original case demanded
+  # 900 -> 900, i.e. "small value means the kernel reports mA". A OnePlus 7 Pro reports current_now
+  # in mA and current_max in uA on the same device, so that inference is wrong on real hardware and
+  # the reader was deliberately changed to fail closed instead (state-export.sh _se_input_ma: no
+  # factor, value under 20000, no node name -> no answer). Asserting the old expectation kept a
+  # correct fail-closed reader marked as a defect. The sign-stripping half of the claim still holds
+  # and is still checked.
   r2=$(/system/bin/sh -c ". $W/ma.sh; _ma 900" 2>/dev/null)
-  [ "$r1" = 1700 ] && [ "$r2" = 900 ] && echo SAFE || echo UNSAFE
+  [ "$r1" = 1700 ] && [ -z "$r2" ] && echo SAFE || echo UNSAFE
 }
-dual "current normalises to mA and drops the discharge sign" c_unit_ma
+dual "current normalises to mA, drops the sign, and refuses to guess an ambiguous unit" c_unit_ma
 
 c_unit_node(){ A=$1
   # The Pixel has no usb/input_current_now and the A3 has no usb/current_now. A hardcoded path
   # silently disables every check that reads it.
-  fn $A misc-functions.sh _iin_ma > $W/iin.sh
+  fnd $A _iin_ma _ma > $W/iin.sh
   [ -s $W/iin.sh ] || { echo UNSAFE; return; }
-  fn $A misc-functions.sh _ma >> $W/iin.sh
   rm -rf $W/ps; mkdir -p $W/ps/usb; echo 1700000 > $W/ps/usb/current_now
   r=$(/system/bin/sh -c "cd $W/ps; . $W/iin.sh; _iin_ma" 2>/dev/null)
   [ "$r" = 1700 ] && echo SAFE || echo UNSAFE
@@ -128,9 +166,8 @@ c_unit_node(){ A=$1
 dual "input current is found on whichever node this kernel provides" c_unit_node
 
 c_unit_failclosed(){ A=$1
-  fn $A misc-functions.sh _iin_ma > $W/iin2.sh
+  fnd $A _iin_ma _ma > $W/iin2.sh
   [ -s $W/iin2.sh ] || { echo UNSAFE; return; }
-  fn $A misc-functions.sh _ma >> $W/iin2.sh
   rm -rf $W/ps2; mkdir -p $W/ps2/usb
   if /system/bin/sh -c "cd $W/ps2; . $W/iin2.sh; _iin_ma" >/dev/null 2>&1; then echo UNSAFE; else echo SAFE; fi
 }
@@ -210,7 +247,13 @@ dual "the per-plug peak marker dies with the cable" c_latch_unplug
 
 c_latch_type(){ A=$1
   # Not "the file mentions HVDCP" - the TYPE read must actually set the latch file.
-  src $A accd.sh | grep -A8 -F 'usb_type type' | grep -qF 'hvcontract' && echo SAFE || echo UNSAFE
+  #
+  # Matched on the READ, whichever spelling the build uses. The original pattern was the literal
+  # node list 'usb_type type', which stopped appearing beside the latch when the read moved into a
+  # _usb_type helper; the only surviving copy of that string is the node-resolution loop, where
+  # nothing writes .hvcontract within eight lines. The behaviour never changed - the shape did -
+  # and the case reported the fix as absent on a build that latches correctly.
+  src $A accd.sh | grep -A8 -E '_usb_type|usb_type type' | grep -qF 'hvcontract' && echo SAFE || echo UNSAFE
 }
 dual "a high-voltage charger TYPE also latches the contract" c_latch_type
 

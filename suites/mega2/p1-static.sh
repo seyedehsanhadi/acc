@@ -13,18 +13,54 @@ hdr "P1 STATIC"
 SD=$execDir/suites/accd
 
 # ---- 1: every t-suite ---------------------------------------------------------------------------------
-_ran=0; _failed=0
+_ran=0; _failed=0; _skipped_mode=
 for _t in $SD/t*.sh; do
   [ -f "$_t" ] || continue
   _name=$(basename "$_t" .sh)
+
+  # A suite that needs the cable in one state must not be RUN in the other. Left to run
+  # anyway it either invents a verdict from hardware that is not there, or quietly skips its
+  # own body and reports a pass over nothing - and a pass over nothing is what makes an
+  # all-green unplugged run mean less than it looks. The requirement is declared in the
+  # suite, next to the assertions that need it, and the phase reports the mismatch as a SKIP
+  # with the reason rather than dropping it.
+  _req=$(sed -n 's/^#[[:space:]]*requires:[[:space:]]*//p' "$_t" 2>/dev/null | head -1)
+  case "${_req:-any}" in
+    plugged)
+      if [ "${EXPECT_PLUGGED:-no}" != yes ]; then
+        _skipped_mode="${_skipped_mode} ${_name}"
+        skip "${_name} (declares: requires plugged - this run has the cable OUT)"
+        continue
+      fi ;;
+    unplugged)
+      if [ "${EXPECT_PLUGGED:-no}" = yes ]; then
+        _skipped_mode="${_skipped_mode} ${_name}"
+        skip "${_name} (declares: requires unplugged - this run has the cable IN)"
+        continue
+      fi ;;
+  esac
   _ran=$(( _ran + 1 ))
   # DC too: t72 reads $DC for diag-collect.sh and only falls back to $execDir/diag-collect.sh. That
   # fallback resolved somewhere without the file here, so t72 reported "could not extract the
   # battery-auth block" while the installed diag-collect.sh had it and t72 passed 28/0 standalone.
   # Pass it explicitly rather than relying on a default that depends on the caller's environment.
-  if execDir=$execDir DC=${DC:-$execDir/diag-collect.sh} sh "$_t" > $WORK/.out.$_name 2>&1; then
+  _t0=$(date +%s 2>/dev/null || echo 0)
+  execDir=$execDir DC=${DC:-$execDir/diag-collect.sh} suite_tmo sh "$_t" > $WORK/.out.$_name 2>&1
+  _rc=$?
+  _t1=$(date +%s 2>/dev/null || echo 0)
+  _el=$(( ${_t1:-0} - ${_t0:-0} ))
+  # A timeout is recognised by the CLOCK, not by the exit status. Measured on the two phones:
+  # bluejay's toybox timeout returns 124, laurus's returns 143 (128+SIGTERM) and overshoots the
+  # bound by 16s because mksh defers SIGTERM until its current child returns. Reading the status
+  # would have filed laurus's wedge as an ordinary suite failure - a false product finding of
+  # exactly the kind this harness keeps manufacturing.
+  if [ "$_rc" = 0 ]; then
     _l=$(grep -E '^t[0-9]+:' $WORK/.out.$_name 2>/dev/null | tail -1)
     ok "${_name}  ${_l:-passed}"
+  elif [ "$_el" -ge "$SUITE_TMO" ]; then
+    _failed=$(( _failed + 1 ))
+    no "${_name}  TIMEOUT: killed after ${_el}s against a ${SUITE_TMO}s bound (rc=$_rc), so its verdict is unknown"
+    tail -3 $WORK/.out.$_name 2>/dev/null | sed 's/^/        /'
   else
     _failed=$(( _failed + 1 ))
     _l=$(grep -E '^t[0-9]+:' $WORK/.out.$_name 2>/dev/null | tail -1)
@@ -33,6 +69,9 @@ for _t in $SD/t*.sh; do
   fi
 done
 note "$_ran suites ran, $_failed with failures"
+if [ -n "${_skipped_mode:-}" ]; then
+  note "NOT COVERED BY THIS RUN (cable state):${_skipped_mode}"
+fi
 
 # ---- 2: coverage of every rc21->rc22 change -------------------------------------------------------------
 CHANGED=$execDir/suites/mega2/changed-functions.txt
@@ -49,7 +88,12 @@ if [ -f "$CHANGED" ]; then
   # the word appearing in the PROSE HEADERS of t35 and t43, neither of which asserts anything about
   # them. An audit of the rc21->rc22 diff later found 43 of 92 behavioural changes with no assertion
   # behind them while this gate reported full coverage.
-  cat $SD/t*.sh $execDir/suites/mega2/p*.sh 2>/dev/null | sed 's/#.*//' > $WORK/.allsuites 2>/dev/null
+  # suites/amps/ counts too. AMPS ships as amps.sh AND acc-compat.sh - the same file under two
+  # names - so every AMPS function appears TWICE in the changed list, and with only suites/accd
+  # scanned the gate reported 53 uncovered of which 46 were those 23 functions double-counted,
+  # against a suite directory it simply never opened. A coverage number that large and that wrong
+  # teaches people to ignore the gate.
+  cat $SD/t*.sh $execDir/suites/amps/t*.sh $execDir/suites/mega2/p*.sh 2>/dev/null | sed 's/#.*//' > $WORK/.allsuites 2>/dev/null
   while IFS=: read -r _file _fn; do
     [ -n "${_fn:-}" ] || continue
     _tot=$(( _tot + 1 ))
