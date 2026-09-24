@@ -78,7 +78,7 @@ else
 fi
 
 # ---- 3: a dead journal must not veto a restore write ---------------------------------------------------
-_wr=$(sed -n '/^wr(){/,/return \$_wrc; }/p' "$AMPS")
+_wr=$(sed -n '/^wr(){/,/^}/p' "$AMPS")
 [ -n "$_wr" ] || no "could not lift wr() - its tail changed shape again, so this whole check is blind"
 printf '%s\n' "$_wr" | grep -q '_RESTORING:-0.*= 1 \] || jrn_begin' \
   && ok "the journal is bypassed while restoring, so a full /data cannot block the replay" \

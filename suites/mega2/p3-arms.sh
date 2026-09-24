@@ -123,25 +123,28 @@ arm_stop() { daemon_stop >/dev/null 2>&1; }
 # Restore, then PROVE it. A single silent attempt is not enough: on bluejay P3's own restore left
 # execDir/module.prop reading 202505180 (VR25) and only the exit trap's second pass corrected it. A run
 # that died in that window would have left the phone on an eight-year-old build with no warning.
-# Verify against the installed module's versionCode and retry before giving up.
+# Verify against the saved candidate snapshot and retry before giving up.
 restore_arms() {
-  _want=$(grep -m1 '^versionCode=' /data/adb/modules/${id:-acc}/module.prop 2>/dev/null | cut -d= -f2)
+  _want=$(grep -m1 '^versionCode=' $RC22/module.prop 2>/dev/null | cut -d= -f2)
   _try=0
   while [ $_try -lt 3 ]; do
-    install_arm rc22 >/dev/null 2>&1
-    rm -f $ARMFLAG 2>/dev/null || :
+    install_arm rc22 >/dev/null 2>&1 || :
     _have=$(grep -m1 '^versionCode=' $execDir/module.prop 2>/dev/null | cut -d= -f2)
     [ -n "${_want:-}" ] && [ "${_have:-}" = "${_want:-}" ] && break
-    [ -z "${_want:-}" ] && break
     _try=$(( _try + 1 ))
     sleep 2
   done
-  daemon_start >/dev/null 2>&1
   _have=$(grep -m1 '^versionCode=' $execDir/module.prop 2>/dev/null | cut -d= -f2)
-  if [ -n "${_want:-}" ] && [ "${_have:-}" != "${_want:-}" ]; then
-    echo "  RESTORE FAILED: execDir is versionCode ${_have:-unknown}, module says ${_want} - the phone is on the WRONG BUILD"
+  if [ -z "${_want:-}" ] || [ "${_have:-}" != "${_want:-}" ]; then
+    echo "  RESTORE FAILED: execDir is versionCode ${_have:-unknown}, saved candidate is ${_want:-unknown} - the phone is on the WRONG BUILD"
     return 1
   fi
+  daemon_start >/dev/null 2>&1
+  if ! daemon_alive; then
+    echo "  RESTORE FAILED: candidate versionCode ${_want} is present but its daemon did not start"
+    return 1
+  fi
+  rm -f $ARMFLAG 2>/dev/null || :
   return 0
 }
 
@@ -246,7 +249,7 @@ end_measure
 # ---- verdict -----------------------------------------------------------------------------------------
 echo ""
 note "SUMMARY (cpu ticks per ${MEAS}s, lower is better; each arm is the median of 3 runs)"
-note "  rc21          : ${A_rc21:-n/a}${S_rc21:+  (spread ${S_rc21})}"
+note "  ${PREVLBL:-rc21}          : ${A_rc21:-n/a}${S_rc21:+  (spread ${S_rc21})}"
 note "  rc22          : ${A_rc22:-n/a}${S_rc22:+  (spread ${S_rc22})}"
 
 # The floor for a comparison is the larger of the two arms' spreads, and an arm whose spread already
@@ -281,14 +284,14 @@ compare_to() {  # $1 label, $2 value, $3 that arm's spread
     # cost exactly what the shipped one costs (34 vs 34 ticks, three windows each).
     # So it is reported, loudly, and the ratio decides. If the ratio has nothing to normalise
     # against, there is no second opinion and the absolute becomes the verdict again.
-    if [ -n "${A_rc21:-}" ] && [ "${A_rc21:-0}" -gt 0 ] 2>/dev/null && [ "$1" = rc21 ]; then
+    if [ -n "${A_rc21:-}" ] && [ "${A_rc21:-0}" -gt 0 ] 2>/dev/null && [ "$1" = "${PREVLBL:-rc21}" ]; then
       note "  rc22 costs ${_d} more ticks than $1 in absolute terms (${A_rc22} vs $2, floor ${_fl}) -- absolutes are not comparable across boots, so the ratio check below is the verdict"
     else
       no "rc22 costs ${_d} more ticks than $1 (${A_rc22} vs $2), beyond the ${_fl} floor - a real idle regression"
     fi
   fi
 }
-compare_to "rc21" "${A_rc21:-}" "${S_rc21:-0}"
+compare_to "${PREVLBL:-rc21}" "${A_rc21:-}" "${S_rc21:-0}"
 
 # DRIFT IS JUDGED ON THE RATIO, NOT THE ABSOLUTE TICK COUNT.
 #
@@ -307,24 +310,23 @@ compare_to "rc21" "${A_rc21:-}" "${S_rc21:-0}"
 # actually matters: is this build more expensive than the one we shipped? The absolutes are still
 # recorded, because they are useful for reading history by hand - they are just not the verdict.
 [ -n "${A_rc22:-}" ] && baseline_record idle_ticks_rc22 "$A_rc22"
-[ -n "${A_rc21:-}" ] && baseline_record idle_ticks_rc21 "$A_rc21"
+[ -n "${A_rc21:-}" ] && baseline_record "idle_ticks_${PREVLBL:-rc21}" "$A_rc21"
 [ -n "${S_rc22:-}" ] && baseline_record rc22_spread "$S_rc22"
 
 if [ -n "${A_rc22:-}" ] && [ -n "${A_rc21:-}" ] && [ "${A_rc21:-0}" -gt 0 ] 2>/dev/null; then
   _ratio=$(( (A_rc22 * 100) / A_rc21 ))
-  baseline_check rc22_vs_rc21_pct "$_ratio" 25 "rc22 idle cost as % of rc21"
+  baseline_check "rc22_vs_${PREVLBL:-rc21}_pct" "$_ratio" 25 "rc22 idle cost as % of ${PREVLBL:-rc21}"
 elif [ -n "${A_rc22:-}" ]; then
-  skip "rc22-vs-rc21 idle ratio: the rc21 arm produced no value this run, so there is nothing to normalise against"
+  skip "rc22-vs-${PREVLBL:-rc21} idle ratio: the ${PREVLBL:-rc21} arm produced no value this run, so there is nothing to normalise against"
 fi
 
-# Leave the phone on its installed build with a live daemon. Nothing under execDir was modified.
+# Restore the saved candidate before reporting P3 complete; the comparison arm replaced execDir.
 arm_stop
 reset_config
-daemon_stop >/dev/null 2>&1; daemon_start >/dev/null 2>&1
-_vc=$(grep -m1 '^versionCode=' $execDir/module.prop 2>/dev/null | cut -d= -f2)
-if daemon_alive; then
-  ok "installed build running again after the arm sweep (versionCode ${_vc})"
+if restore_arms; then
+  _vc=$(grep -m1 '^versionCode=' $execDir/module.prop 2>/dev/null | cut -d= -f2)
+  ok "saved candidate build restored and running after the arm sweep (versionCode ${_vc})"
 else
-  no "the installed daemon did not come back after the arm sweep"
+  no "the saved candidate build was not restored with a live daemon; recovery marker retained"
 fi
 baseline_summary

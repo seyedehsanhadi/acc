@@ -49,4 +49,22 @@ else
   no "uninstall.sh not found, cannot cross-check the unrestricted values"
 fi
 
+# Xiaomi smb5: restrict_cur only votes FCC while restrict_chg=1 (Mi A3: restrict_cur 600000 with
+# restrict_chg 0 left 1.43 A flowing; restrict_chg 1 gave 0.60 A). munch has nothing else that caps
+# its charge pumps, so a cap must raise restrict_chg and a release must drop it.
+_ap=$(sed -n '/^apply_on_plug() {/,/^}/p' "$SRC")
+_lq=$(printf '%s\n' "$_ap" | grep -n 'restrict_cur) _rq=' | head -1 | cut -d: -f1)
+_lg=$(printf '%s\n' "$_ap" | grep -n 'mcc-custom" \] && \[ -z' | head -1 | cut -d: -f1)
+_lw=$(printf '%s\n' "$_ap" | grep -n 'write \\\$\$arg \$file 0' | head -1 | cut -d: -f1)
+[ -n "$_lq" ] && [ -n "$_lg" ] && [ -n "$_lw" ] && [ "$_lq" -gt "$_lg" ] && [ "$_lq" -lt "$_lw" ] \
+  && ok "restrict_chg is paired with restrict_cur, flagged only where the node is really written" \
+  || no "restrict_chg is not paired with restrict_cur after the stale-cap guard (lq=$_lq lg=$_lg lw=$_lw)"
+printf '%s\n' "$_ap" | grep -q 'write 1 \$_rq 0 && touch \$TMPDIR/.restrict-chg-own' \
+  && printf '%s\n' "$_ap" | grep -q '\[ ! -f \$TMPDIR/.restrict-chg-own \] || { write 0 \$_rq 0' \
+  && ok "a cap raises restrict_chg and a release drops it only when ACC raised it" \
+  || no "restrict_chg is not owned: a release could clear a vendor restriction ACC never set"
+printf '%s\n' "$_ap" | grep -q '\[ ".\$_tv" != ".\$_rqc" \]' \
+  && ok "restrict_chg is raised only when restrict_cur holds the cap (a rejected write never arms a stale ceiling)" \
+  || no "restrict_chg is raised without checking restrict_cur held the cap"
+
 fin

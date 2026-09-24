@@ -11,6 +11,7 @@ eqv() { [ "$1" = "$2" ] || { echo "FAIL $3: [$1] != [$2]"; exit 1; }; P=$((P+1))
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 TMPDIR=$W
+dataDir=$W
 mkdir -p "$W/battery" "$W/bms" "$W/usb" "$W/wireless"
 cd "$W" || exit 1
 currFile=battery/current_now
@@ -49,6 +50,7 @@ echo 895 > "$currFile"; echo -895000 > bms/current_now
 eqv "$(current_factor)" 1000 'OnePlus paired gauges'
 echo 895000 > "$currFile"
 eqv "$(current_factor)" 1000000 'microamp gauge'
+rm -f "$W/.current-unit"
 ampFactor=1000
 eqv "$(current_factor)" 1000 'explicit scale wins'
 for value in 4200 4200000 +004200000; do

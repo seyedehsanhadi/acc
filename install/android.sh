@@ -1,7 +1,8 @@
 is_android() {
+  ${_isAndroid:-false} && return 0
   [ ! -d /data/usbmsc_mnt/ ] && [ -x /system/bin/dumpsys ] \
     && [[ "$(readlink -f $execDir)" != *com.termux* ]] \
-    && pgrep -f zygote >/dev/null
+    && pgrep -f zygote >/dev/null && _isAndroid=true
 }
 
 

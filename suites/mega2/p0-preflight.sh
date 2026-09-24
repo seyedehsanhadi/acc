@@ -40,8 +40,11 @@ note "supports:  [[:space:]]=$_cls   (full construct sweep is t57's job)"
 
 # ---- 2: the assertion-sanity suite runs FIRST -------------------------------------------------------
 # If the suites contain patterns this phone's grep cannot honour, every later verdict is suspect.
-if [ -f $execDir/suites/accd/t57-assertion-sanity.sh ]; then
-  if execDir=$execDir sh $execDir/suites/accd/t57-assertion-sanity.sh >$WORK/.t57 2>&1; then
+# The suite tree is wherever this file was run from; the module dir does not ship one.
+_t57=${SELF:-${0%/*}}/../accd/t57-assertion-sanity.sh
+[ -f "$_t57" ] || _t57=$execDir/suites/accd/t57-assertion-sanity.sh
+if [ -f "$_t57" ]; then
+  if execDir=$execDir sh "$_t57" >$WORK/.t57 2>&1; then
     ok "t57 assertion-sanity passes - no unfailable assertions in the suites"
   else
     no "t57 assertion-sanity FAILED - the suites contain assertions that cannot fail; stop and fix"
@@ -58,6 +61,24 @@ else
   no "a phase writes shutdown_temp - REFUSING to continue"
   exit 1
 fi
+
+# ---- 3b: the CLI this campaign drives the product with must actually run --------------------------
+#
+# Every phase reaches the product through `acc`, and every one of those calls ends in
+# `>/dev/null 2>&1 || :`. A `command not found` is therefore indistinguishable from the product
+# refusing the request, and that is not hypothetical: launched with `su -c 'sh run.sh plugged'` on
+# bluejay, /data/adb/ksu/bin was not on PATH, every `acc` call returned 127, and the campaign
+# reported 14 product failures - none of them real. The run is worthless if this is not true, so
+# this aborts rather than noting it.
+for _c in acc acca accd; do
+  command -v $_c >/dev/null 2>&1     && ok "$_c resolves to $(command -v $_c)"     || { no "$_c does not resolve - every call through it would return 127 and read as a product refusal. REFUSING to continue"; MEGA2_ABORT=yes; }
+done
+unset _c
+if [ "${MEGA2_ABORT:-no}" != yes ]; then
+  acc -v >/dev/null 2>&1; _prc=$?
+  [ "$_prc" = 0 ]     && ok "acc answers (rc=0), so a later non-zero is the product's answer and not a missing command"     || { no "acc resolves but exits $_prc - REFUSING to continue"; MEGA2_ABORT=yes; }
+fi
+[ "${MEGA2_ABORT:-no}" = yes ] && return 0 2>/dev/null
 
 # ---- 4: state capture, and proof the restore path actually works -------------------------------------
 save_state

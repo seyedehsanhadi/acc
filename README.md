@@ -270,6 +270,8 @@ configVerCode=202505180
 
 allowIdleAbovePcap=false
 ampFactor=
+inputAmpFactor=
+tempFactor=
 battStatusWorkaround=true
 capacity=(5 101 70 75 false)
 cooldownCurrent=
@@ -757,6 +759,12 @@ runCmdOnPause=''
 # Default: 55
 #
 # Shutdown the system if battery temperature >= this value.
+# Accepted range: 40-70 C. Anything outside it is refused and the default is stored instead, with a
+# note saying so.
+# It may sit BELOW max_temp. The two limits are independent: max_temp pauses charging, this one
+# powers the phone off whether or not a cable is attached, so "power off at 45, pause charging at
+# 50" simply means the pause is never reached. Raising max_temp on its own still carries a
+# shutdown_temp you never set up with it, so the cutoff cannot end up below the pause by accident.
 
 
 # temp_level (tl) #
@@ -796,7 +804,6 @@ runCmdOnPause=''
 # The Tensor gain is smaller because its state build is already cheaper (444ms vs 1216ms per call).
 # 0 disables the heartbeat entirely: state.json then updates only when level or status changes,
 # which suits a forever-plugged phone whose meter nobody watches.
-
 
 #/DC#
 ```
@@ -919,6 +926,11 @@ Options
       acc -f (charge to 100%)
       acc -f -s mcc=500 (charge to 100% with a 500 mA limit)
       acc -f 90 -a (the -a (auto) tries to restart accd automatically shortly after the charger is unplugged; not supported by all devices)
+      acc -f 0 (cancel a one-time charge and go back to your configured limits)
+
+    A one-time charge ends when the target is reached, when the firmware reports the battery full,
+    on reboot, or with acc -f 0. It ALSO ends if accd restarts -- and changing any setting restarts
+    accd -- so avoid touching settings mid-charge if you want the one-time target to hold.
 
   -F|--flash ["zip_file"]   Flash any zip files whose update-binary is a shell script
     e.g.,

@@ -7,8 +7,15 @@ ok(){ P=$((P+1)); echo "  PASS  $*"; }
 no(){ F=$((F+1)); echo "  FAIL  $*"; }
 fin(){ echo "$ID: $P passed, $F failed"; [ "$F" -eq 0 ]; }
 
-ROOT=${ROOT:-${1:-.}}
-[ -d "$ROOT/install" ] && I=$ROOT/install || I=$ROOT
+# Resolve to a tree that actually HOLDS these files. `.` is whatever directory the caller
+# happened to be in: under P1 that is the harness directory, so every read missed and the suite
+# reported "missing ./set-ch-volt.sh" as though the product had lost a file.
+ROOT=${ROOT:-${1:-}}
+for _c in "${ROOT:-}/install" "${ROOT:-}" "${execDir:-}" /data/adb/vr25/acc; do
+  [ -n "$_c" ] && [ -f "$_c/set-ch-volt.sh" ] && { I=$_c; break; }
+done
+unset _c
+I=${I:-${ROOT:-.}}
 SCV=$I/set-ch-volt.sh
 AD=$I/accd.sh
 SP=$I/set-prop.sh

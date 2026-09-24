@@ -367,7 +367,7 @@ _selftest() {
   # dataDir points under a regular FILE, so the .earlycap-pending write cannot land; the fail-safe
   # must bow out rather than cut a node it can't protect. Root bypasses chmod, so use a bad path.
   _mkps; _node battery/capacity 80; _node battery/input_suspend 0
-  : > "$_T/notdir"
+  true > "$_T/notdir"
   _cfg "battery/input_suspend 0 1 --" "5 101 72 74 false"
   ( EARLYCAP_CFG="$_T/config" EARLYCAP_PS="$_T/ps" config="$_T/config" PS="$_T/ps" dataDir="$_T/notdir/x" log=/dev/null; _run ) >/dev/null 2>&1
   rm -f "$_T/notdir"

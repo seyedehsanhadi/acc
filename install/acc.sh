@@ -397,7 +397,7 @@ fi
 if ${verbose:-true} && !  eq "${1-}" "-l*|--log*|-w*|--watch*"; then
   [ -z "${LINENO-}" ] || export PS4='$LINENO: '
   touch $log
-  [ $(du -k $log | cut -f 1) -ge 256 ] && : > $log
+  [ $(du -k $log | cut -f 1) -ge 256 ] && true > $log
   echo "###$(date)###" >> $log
   echo "versionCode=$(sed -n s/versionCode=//p $execDir/module.prop 2>/dev/null)" >> $log
   set -x 2>>$log
@@ -598,21 +598,48 @@ case "${1-}" in
   -d|--disable)
     shift
     ${verbose:-true} || exec > /dev/null
-    ! daemon_ctrl stop > /dev/null || print_stopped
+    _dStopped=false
+    ! daemon_ctrl stop > /dev/null || { print_stopped; _dStopped=true; }
    . $execDir/acquire-lock.sh
     disable_charging "$@"
+    [ $# -gt 0 ] || ! $_dStopped || touch $TMPDIR/.d-stopped 2>/dev/null || :
   ;;
 
   -D|--daemon)
-    shift; daemon_ctrl "$@"
+    shift; [ $# -eq 0 ] || rm -f $TMPDIR/.d-stopped 2>/dev/null || :
+    daemon_ctrl "$@"
   ;;
 
   -e|--enable)
     shift
     ${verbose:-true} || exec > /dev/null
-    ! daemon_ctrl stop > /dev/null || print_stopped
+    _eRestart=false
+    ! daemon_ctrl stop > /dev/null || { print_stopped; _eRestart=true; }
+    [ ! -f $TMPDIR/.d-stopped ] || _eRestart=true
+    rm -f $TMPDIR/.d-stopped 2>/dev/null || :
     . $execDir/acquire-lock.sh
-    enable_charging "$@"
+    if [ $# -eq 0 ] && $_eRestart && at_or_above_pause; then
+      echo "The charging limit (${capacity[3]}) is reached, so ACC keeps holding it. For a one-time charge past it: acc -f [capacity]"
+    else
+      enable_charging "$@"
+    fi
+    # A BARE `acc -e` stops the daemon only to take the lock, and this was the one lock-taking
+    # path in the project that never put it back: set-prop.sh does it three times and the --test
+    # path above does it too, all with this same idiom. The cost of the omission is silent - the
+    # command prints "Charging enabled" and the charge limit simply stops being enforced until
+    # the next reboot. Measured on a Pixel 6a and a Mi A3: no accd process afterwards, on both.
+    # The ARGUMENT forms (`acc -e 80`, `-e 30m`, `-e 4100mv`) are blocking overrides that end in
+    # disable_charging, and the documented idiom restarts the daemon by hand after them
+    # (README: `acc -e 30m && acc -d 6h && acc -e 85 && accd`), so they keep the daemon down.
+    # $TMPDIR/accd is service.sh, which releases the lock itself - the same call set-prop makes.
+    # Unquoted $config, matching this file's own `exec $TMPDIR/accd $config` near the top:
+    # config is not always set in this scope, and quoting would hand accd an empty argument
+    # instead of none.
+    if [ $# -eq 0 ] && $_eRestart; then
+      true > $TMPDIR/${id}.lock 2>/dev/null || :
+      exec 4>&- 2>/dev/null || :
+      $TMPDIR/accd $config
+    fi
   ;;
 
 
@@ -1031,7 +1058,7 @@ case "${1-}" in
       # signals nobody; closing fd 4 drops our flock so the incoming daemon takes it honestly rather
       # than inheriting it. If the daemon then fails to start, an unheld lock is the safe direction:
       # the next acc or accd invocation can take it, where a lock held by a dead pid strands them.
-      : > $TMPDIR/${id}.lock 2>/dev/null || :
+      true > $TMPDIR/${id}.lock 2>/dev/null || :
       exec 4>&- 2>/dev/null || :
 
       if $daemonWasUp; then

@@ -106,6 +106,20 @@ save set:language 'language=de'
 [ ! -e "$W/EXECUTED" ] && ok 'saving does not execute scheduled commands' || no 'saving executed a scheduled command'
 
 reset
+: > "$dataDir/.user-locked"
+rm -f "$dataDir/.rediscover"
+cp "$config" "$W/private.txt"
+( isAccd=false; config=$W/private.txt; save set:s 's=""' )
+[ -f "$dataDir/.user-locked" ] && [ ! -f "$dataDir/.rediscover" ] && ok 'private config leaves installed discovery markers alone' || no 'private config changed installed discovery markers'
+( isAccd=false; save set:s 's=""' )
+[ ! -f "$dataDir/.user-locked" ] && [ -f "$dataDir/.rediscover" ] && ok 'installed config still requests rediscovery' || no 'installed config lost rediscovery'
+rm -f "$dataDir/.rediscover"
+: > "$dataDir/.user-locked"
+ln -sf "$config" "$W/alias.txt"
+( isAccd=false; config=$W/alias.txt; save set:s 's=""' )
+[ ! -f "$dataDir/.user-locked" ] && [ -f "$dataDir/.rediscover" ] && ok 'installed config alias keeps marker semantics' || no 'config alias lost rediscovery'
+
+reset
 mkfifo "$TMPDIR/.wake" || exit 2
 timeout -k 1 4 /system/bin/sh "$0" writer wake > "$W/wake.log" 2>&1
 check "$?" 0 'a vanished FIFO reader cannot hang a successful config write'

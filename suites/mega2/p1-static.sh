@@ -10,7 +10,8 @@
 
 hdr "P1 STATIC"
 
-SD=$execDir/suites/accd
+SD=$SELF/../accd
+[ -d "$SD" ] || SD=$execDir/suites/accd
 
 # ---- 1: every t-suite ---------------------------------------------------------------------------------
 _ran=0; _failed=0; _skipped_mode=
@@ -75,12 +76,15 @@ fi
 
 # ---- 2: coverage of every rc21->rc22 change -------------------------------------------------------------
 CHANGED=$execDir/suites/mega2/changed-functions.txt
+_changed_for_prev=$execDir/suites/mega2/changed-functions-${PREVLBL:-}.txt
+[ -n "${PREVLBL:-}" ] && [ -f "$_changed_for_prev" ] && CHANGED=$_changed_for_prev
 if [ -f "$CHANGED" ]; then
   _tot=0; _cov=0; _unc=
   # The list is generated on a PC and arrives with CRLF endings. A trailing carriage return makes
   # every function name unmatchable, which reported 0 of 41 covered and looked like a catastrophic
   # product finding rather than a line-ending bug. Strip it.
-  tr -d '\r' < "$CHANGED" > $WORK/.changed 2>/dev/null || cp -f "$CHANGED" $WORK/.changed 2>/dev/null
+  tr -d '\r' < "$CHANGED" | sed 's/^\([^ :]*\) /\1:/' > $WORK/.changed 2>/dev/null \
+    || cp -f "$CHANGED" $WORK/.changed 2>/dev/null
   # One concatenated blob, searched once per function. The obvious nesting (every function against
   # every suite file) is 41 x 35 greps and took minutes on a Mi A3; this is 41.
   # Comments stripped. A name that appears only in a comment is not even a pointer, and counting it

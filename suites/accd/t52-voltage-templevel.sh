@@ -107,6 +107,19 @@ case "$_vs" in *'active=4150000'*) ok "a stale daemon cannot clear a published v
 case "$_vs" in *'clear=4200000'*) ok "a real daemon clear still restores the default";;
   *) no "daemon release guard blocked a real clear: $_vs";; esac
 
+_vcold=$(
+  TMPDIR=$W/vcold; dataDir=$W/vcold/data; config=$dataDir/config.txt
+  mkdir -p $TMPDIR $dataDir
+  echo 'maxChargingVoltage=(4150 battery/voltage_max::4150000::4400000)' > $config
+  isAccd=false; maxChargingVoltage=()
+  apply_on_boot(){ echo "$*"; }
+  print_volt_restored(){ :; }
+  eval "$_s"
+  set_ch_volt -
+)
+case "$_vcold" in *'default force'*) ok "a cold-cache clear restores defaults from the persisted config";;
+  *) no "a missing tmpfs cache suppressed voltage restoration: $_vcold";; esac
+
 # A readable candidate is not necessarily writable. Tensor exposes constant_charge_voltage as
 # mode 0666 while SELinux/firmware rejects every write; accepting it creates a phantom cap.
 _vr=$(

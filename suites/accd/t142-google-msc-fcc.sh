@@ -7,8 +7,14 @@ ok(){ P=$((P+1)); echo "  PASS  $*"; }
 no(){ F=$((F+1)); echo "  FAIL  $*"; }
 fin(){ echo "$ID: $P passed, $F failed"; [ "$F" -eq 0 ]; }
 
-ROOT=${ROOT:-${1:-.}}
-[ -d "$ROOT/install" ] && I=$ROOT/install || I=$ROOT
+# Same resolution as t141: these files all exist in the installed module, so a phone is a
+# perfectly valid place to run this - it just has to look where they are.
+ROOT=${ROOT:-${1:-}}
+for _c in "${ROOT:-}/install" "${ROOT:-}" "${execDir:-}" /data/adb/vr25/acc; do
+  [ -n "$_c" ] && [ -f "$_c/misc-functions.sh" ] && { _T142I=$_c; break; }
+done
+unset _c
+I=${_T142I:-$ROOT}
 MF=$I/misc-functions.sh
 RC=$I/read-ch-curr-ctrl-files-p2.sh
 AD=$I/accd.sh

@@ -102,9 +102,124 @@ restore_state() {
 }
 
 # T-COST once shipped without a trap and left ACC stopped on BOTH phones. Every signal, always.
-arm_trap() { trap 'restore_state; exit 130' INT TERM HUP; trap 'restore_state' EXIT; }
+# ---- suspend ------------------------------------------------------------------------------------
+# An unplugged, screen-off phone SUSPENDS, and a suspended phone does not run a campaign.
+#
+# Measured on laurus, same run, same mode: while adb-over-WiFi was attached the log advanced at
+# 7.0 lines/min; the moment the laptop left the network it dropped to 0.24 lines/min and stayed
+# there for nearly nine hours - 30x slower - with the battery unmoved at 48%, because the SoC was
+# asleep almost the whole time. adb was the only thing holding the phone awake. Nothing was hung
+# and nothing was broken; the phone was simply not running.
+#
+# P3, P7 and P10 already take a wakelock, because they measure power and a suspend would corrupt
+# the number. P0, P1, P2, P8 and P9 did not - which is exactly the unplugged set.
+#
+# THE WRITE IS VERIFIED BY READ-BACK. /sys/power/wake_lock is absent on some kernels and refuses a
+# write on others, and a silent failure here would leave the campaign dozing while the log claims
+# a lock is held. A campaign-level name of its own, so releasing it can never drop the lock a
+# measurement phase is holding.
+WL_NAME=${WL_NAME:-mega2run}
+WL_LOCK=/sys/power/wake_lock
+WL_UNLOCK=/sys/power/wake_unlock
+
+wl_held() { grep -qw "$WL_NAME" "$WL_LOCK" 2>/dev/null; }
+
+wl_drop() {
+  [ -e "$WL_UNLOCK" ] || return 0
+  echo "$WL_NAME" > "$WL_UNLOCK" 2>/dev/null || :
+  wl_held && return 1
+  return 0
+}
+
+wl_take() {
+  [ -e "$WL_LOCK" ] || return 1
+  # A lock stranded by a previous kill -9 is released and retaken, so the state is known either way.
+  wl_held && wl_drop >/dev/null 2>&1
+  echo "$WL_NAME" > "$WL_LOCK" 2>/dev/null || return 1
+  wl_held
+}
+
+# A HELD WAKELOCK IS A BATTERY HAZARD, and `kill -9` skips every trap.
+#
+# If the campaign dies hard while holding the lock, the phone never sleeps again and drains to
+# flat - a worse outcome than the slow runs this fixes. This watchdog outlives the campaign on
+# purpose: it releases the lock when the campaign's pid disappears, and releases it regardless
+# after WL_DEADLINE seconds even if it cannot tell what happened. Its filename deliberately does
+# not contain "run.sh", so a `pkill -f run.sh` aimed at the campaign does not take the safety net
+# with it.
+WL_DEADLINE=${WL_DEADLINE:-14400}
+wl_guard() {
+  [ -n "${WORK:-}" ] || return 0
+  _wg=$WORK/wl-guard.sh
+  cat > "$_wg" <<WLG
+#!/system/bin/sh
+_t=0
+while [ \$_t -lt $WL_DEADLINE ]; do
+  [ -d /proc/$1 ] || break
+  sleep 10
+  _t=\$(( \$_t + 10 ))
+done
+echo "$WL_NAME" > "$WL_UNLOCK" 2>/dev/null || :
+WLG
+  chmod 0755 "$_wg" 2>/dev/null || :
+  if command -v setsid >/dev/null 2>&1; then
+    setsid sh "$_wg" </dev/null >/dev/null 2>&1 &
+  else
+    sh "$_wg" </dev/null >/dev/null 2>&1 &
+  fi
+  return 0
+}
+
+arm_trap() { trap 'restore_state; wl_drop >/dev/null 2>&1; exit 130' INT TERM HUP; trap 'restore_state; wl_drop >/dev/null 2>&1' EXIT; }
 
 # ---- daemon ------------------------------------------------------------------------------------------
+# One wedged suite must not wedge the campaign.
+#
+# P1 ran every suite with a bare `sh "$_t"` and no bound. On laurus t132-flight-dir-on-boot sat
+# there for 42 minutes - ten times its own worst-case internal deadline of ~240s - and the whole
+# unplugged run stopped dead behind it, with no summary and no way to tell a hang from a slow
+# phone. A suite that exceeds this is reported as a TIMEOUT failure, never silently skipped.
+#
+# -k is not optional: mksh DEFERS SIGTERM until its current child returns, so a plain `timeout N`
+# measures nothing on a suite that is blocked inside one. The SIGKILL is what actually ends it.
+SUITE_TMO=${SUITE_TMO:-420}
+if command -v timeout >/dev/null 2>&1; then
+  suite_tmo(){ timeout -k 5 "$SUITE_TMO" "$@"; }
+  _HAVE_SUITE_TMO=yes
+else
+  suite_tmo(){ "$@"; }
+  _HAVE_SUITE_TMO=no
+fi
+
+# `acc`, `acca` and `accd` are symlinks the installer drops into a root provider's bin directory -
+# /data/adb/ksu/bin on KernelSU, /su/bin on SuperSU. None of those is on PATH under
+# `su -c 'sh <script>'`, which is how this campaign is launched. Measured on bluejay:
+# `command -v acc` finds nothing and `acc -D start` returns 127.
+#
+# Every phase drives the product through those names, and every one of those calls ends in
+# `>/dev/null 2>&1 || :`, so a 127 is indistinguishable from the product refusing. An entire
+# plugged campaign reported 14 failures on this alone - "pause_capacity did not land (config says
+# 75, asked for 16)", "the daemon would not start for arm B", "3 of 3 cycles failed to enforce",
+# "daemon DOWN at the end" - while the daemon in fact started first try from its absolute path.
+#
+# A shim directory rather than adding the provider path: on a phone where the installer could not
+# write a bin directory at all there is no symlink to find, and PATH alone would fix nothing. It is
+# exported, so the child processes that run the suites inherit it too - t129 drives `acca`, and a
+# 127 there reads as "acca -s mcv= left the hardware capped".
+MEGA2_BIN=$WORK/bin
+mkdir -p $MEGA2_BIN 2>/dev/null
+for _l in acc:acc.sh acca:acca.sh accd:service.sh; do
+  _n=${_l%%:*}; _s=${_l#*:}
+  [ -f "$execDir/$_s" ] || continue
+  printf '#!/system/bin/sh
+exec /system/bin/sh %s "$@"
+' "$execDir/$_s" > $MEGA2_BIN/$_n 2>/dev/null || :
+  chmod 0755 $MEGA2_BIN/$_n 2>/dev/null || :
+done
+unset _l _n _s
+PATH=$MEGA2_BIN:$PATH
+export PATH MEGA2_BIN
+
 daemon_pid(){ cat $TD/acc.lock 2>/dev/null; }
 daemon_alive(){ _p=$(daemon_pid); [ -n "${_p:-}" ] && [ -d /proc/$_p ]; }
 daemon_stop(){ acc -D stop >/dev/null 2>&1 || :; sleep 3; _p=$(daemon_pid); [ -n "${_p:-}" ] && [ -d /proc/$_p ] && { kill -TERM $_p 2>/dev/null; sleep 3; }; :; }

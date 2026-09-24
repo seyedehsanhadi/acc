@@ -72,10 +72,19 @@ j=$(say null null -300000 3700000 Discharging 300 40)
 [ "$(_f "$j" watts)" = null ] && ok "unplugged: no input nodes -> watts null" \
                               || no "unplugged: watts was $(_f "$j" watts), expected null"
 
-# a charger reporting a trickle below the noise floor is not a charger
+# The 50 mA floor was REMOVED on purpose (state-export.sh: it "hid a measurement it already
+# had" - 30 mA in printed a current beside a refused wattage). Anything above zero is a real
+# reading and multiplies out fine. What the floor was actually protecting is the distinction
+# below: a genuine zero and an unreadable node both stay null. That case is still asserted
+# above, so dropping the floor costs no coverage.
 j=$(say 5000 20 -300000 3700000 Discharging 300 40)
-[ "$(_f "$j" watts)" = null ] && ok "noise floor: 20 mA input ignored" \
-                              || no "noise floor: watts was $(_f "$j" watts), expected null"
+[ "$(_f "$j" watts)" = 0.100 ] && ok "a 20 mA input is reported, not hidden (0.100 W)" \
+                              || no "20 mA input: watts was $(_f "$j" watts), expected 0.100"
+
+# a genuine zero is not a reading, and must stay null - this is what the floor protected
+j=$(say 5000 0 -300000 3700000 Discharging 300 40)
+[ "$(_f "$j" watts)" = null ] && ok "a true zero input stays null" \
+                              || no "zero input: watts was $(_f "$j" watts), expected null"
 
 # --- 4b. a suspended input must not report its stale current -----------------
 # Measured on a Mi A3 with input_suspend=1: usb/input_current_now still read 2084 mA while

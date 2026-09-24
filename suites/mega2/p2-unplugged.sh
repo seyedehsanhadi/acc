@@ -47,7 +47,13 @@ _n=$(sw_node 2>/dev/null); _on=$(sw_on_val)
 _isbin=no
 case "$(sw_off_val)" in pcap|*%) : ;; *) _isbin=yes ;; esac
 if [ "$_isbin" != yes ]; then
-  skip "the live release test (this phone uses a level switch; covered by the thermal hold in P4)"
+  # "Covered by P4" is only true in a mode that RUNS P4. An unplugged campaign does not, so
+  # saying so there hands back a coverage claim nothing in this run supports.
+  if [ "${EXPECT_PLUGGED:-no}" = yes ]; then
+    skip "the live release test (this phone uses a level switch; covered by the thermal hold in P4)"
+  else
+    skip "the live release test (level switch, and it needs the cable IN) - NOT COVERED by this unplugged run; it is checked in the plugged campaign's P4"
+  fi
 elif [ -n "${_n:-}" ] && [ -f "$_n" ]; then
   _off=$(sw_off_val)
   if [ -n "${_off:-}" ]; then

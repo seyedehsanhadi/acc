@@ -107,6 +107,10 @@ OUT=${OUT:-/data/local/tmp/consumption-3way.txt}
 TSV=${TSV:-/data/local/tmp/consumption-3way.tsv}
 LOCK=acccons
 
+# WHICH BUILDS. Default is the set this suite was written for; ARMS lets a run compare a different
+# one without a second copy of the file. Each name needs $ARMDIR/<name>tree/ with its *.sh and
+# module.prop. "off" is added by the rotation below and is not a tree.
+ARMS=${ARMS:-"vr25 rc23 rc24"}
 ROUNDS=${ROUNDS:-6}
 WINDOW=${WINDOW:-150}
 SETTLE=${SETTLE:-45}
@@ -318,7 +322,7 @@ case "${_scr:-}" in
   *)     say "screen  : $_scr";;
 esac
 
-for _a in vr25 rc23 rc24; do
+for _a in $ARMS; do
   [ -f "$ARMDIR/${_a}tree/accd.sh" ] || { say "ABORT: no $_a tree at $ARMDIR/${_a}tree"; exit 1; }
   say "arm     : $_a = versionCode $(sed -n 's/^versionCode=//p' $ARMDIR/${_a}tree/module.prop 2>/dev/null || echo '?')"
 done
@@ -334,7 +338,7 @@ say "backup  : $BK, checksum $WANT, installed versionCode $(sed -n 's/^versionCo
 say ""
 say "arm preflight - each build must come up and accrue CPU before anything is measured"
 _bad=0
-for _a in vr25 rc23 rc24; do
+for _a in $ARMS; do
   install_arm $_a
   _pp=$(daemon_pid)
   if [ -z "$_pp" ]; then
@@ -342,17 +346,21 @@ for _a in vr25 rc23 rc24; do
     _bad=1
     continue
   fi
-  _j0=$(accd_jiffies); sleep 30; _j1=$(accd_jiffies); _pq=$(daemon_pid)
+  _j0=$(accd_jiffies); sleep ${PREFLIGHT:-30}; _j1=$(accd_jiffies); _pq=$(daemon_pid)
   if [ -z "$_pq" ]; then
     say "  $_a: daemon died within 30s - this arm cannot be measured"
     _bad=1
   elif [ "$(( _j1 - _j0 ))" -gt 0 ] 2>/dev/null; then
     say "  $_a: up as pid $_pp, accrued $(( ( _j1 - _j0 ) * 1000 / HZ ))ms of CPU in 30s - measurable"
   else
-    say "  $_a: up as pid $_pp but accrued NO CPU in 30s - refusing to score it as efficient"
-    _bad=1
+    say "  $_a: up as pid $_pp but accrued NO CPU in ${PREFLIGHT:-30}s - refusing to score it as efficient"
+    _bad=1; _dropped="${_dropped:-} $_a"
   fi
 done
+if [ "$_bad" != 0 ] && [ "${DROP_BAD:-0}" = 1 ] && [ -n "${_dropped:-}" ]; then
+  _keep=; for _x in $ARMS; do case " $_dropped " in *" $_x "*) ;; *) _keep="$_keep $_x";; esac; done
+  say "DROPPED (DROP_BAD=1, reported, not scored):$_dropped"; ARMS=${_keep# }; _bad=0
+fi
 if [ "$_bad" != 0 ]; then
   say ""
   say "ABORT: at least one arm cannot be measured on this phone. Fix that first - a benchmark that"
@@ -373,17 +381,21 @@ fi
 # The rotation. Four arms, one rotation step per round, so no arm sits in the same slot twice.
 r=1
 while [ $r -le $ROUNDS ]; do
-  case $(( (r - 1) % 4 )) in
-    0) ORDER="off vr25 rc23 rc24";;
-    1) ORDER="rc24 off vr25 rc23";;
-    2) ORDER="rc23 rc24 off vr25";;
-    3) ORDER="vr25 rc23 rc24 off";;
-  esac
+  # Rotate by one slot per round so no arm sits in the same position twice, derived from $ARMS so
+  # the rotation follows the arm list instead of a hardcoded set of four.
+  ORDER=$(ALL="off $ARMS"; N=0; for _x in $ALL; do N=$((N+1)); done
+          K=$(( (r - 1) % N )); I=0; _head=; _tail=
+          for _x in $ALL; do
+            if [ $I -lt $K ]; then _tail="$_tail $_x"; else _head="$_head $_x"; fi
+            I=$((I+1))
+          done
+          echo "${_head# }${_tail}")
   if [ "$DEADLINE_MIN" -gt 0 ] 2>/dev/null; then
     _left=$(( T_START + DEADLINE_MIN * 60 - $(date +%s) ))
     # Refuse to START a round there is not time to finish. A half-finished round is worse than none:
     # its build windows have no floor window to pair against and are discarded anyway.
-    _need=$(( 4 * (SETTLE + WINDOW) * 2 ))
+    _nArms=0; for _x in off $ARMS; do _nArms=$((_nArms+1)); done
+    _need=$(( _nArms * (SETTLE + WINDOW) * 2 ))
     if [ "$_left" -lt "$_need" ]; then
       say ""
       say "stopping after $(( r - 1 )) complete rounds: $(( _left / 60 ))min left against roughly $(( _need / 60 ))min needed for another."

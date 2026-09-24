@@ -491,6 +491,12 @@ runCmdOnPause=''
 # Default: 55
 #
 # Shutdown the system if battery temperature >= this value.
+# Accepted range: 40-70 C. Anything outside it is refused and the default is stored instead, with a
+# note saying so.
+# It may sit BELOW max_temp. The two limits are independent: max_temp pauses charging, this one
+# powers the phone off whether or not a cable is attached, so "power off at 45, pause charging at
+# 50" simply means the pause is never reached. Raising max_temp on its own still carries a
+# shutdown_temp you never set up with it, so the cutoff cannot end up below the pause by accident.
 
 
 # temp_level (tl) #

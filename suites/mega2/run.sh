@@ -1,6 +1,7 @@
 #!/system/bin/sh
 # mega2 - the super mega test.
 #
+#   sh run.sh fast          P0 P1 P2           (cable OUT, no mutation and no battery arms)
 #   sh run.sh checks        P0 P1 P2 P8 P9     (cable OUT, no battery measurement)
 #   sh run.sh battery       P0 P3              (cable OUT, the ~20min idle-CPU arms)
 #   sh run.sh unplugged     P0 P1 P2 P8 P9 P3  (cable OUT, both of the above)
@@ -40,6 +41,16 @@ export EXPECT_PLUGGED
 # Armed BEFORE any phase runs. A run that dies without this leaves the config, the switch and the
 # daemon wherever the failure happened - which has stranded a phone before.
 arm_trap
+
+# Hold the SoC awake for the WHOLE campaign, not just the phases that measure power. Reported
+# either way: a run that could not take the lock is going to be slow and must say so, rather
+# than leaving the next person to wonder why nine hours produced half a catalogue.
+if wl_take; then
+  wl_guard $$
+  echo "#  wakelock: holding '$WL_NAME' for the whole run (released on exit; guard releases it after ${WL_DEADLINE}s or if this run dies)"
+else
+  echo "#  WARNING: could not take a wakelock at $WL_LOCK - an unplugged phone will SUSPEND between ticks and this run may take many hours"
+fi
 
 # A phase file that exists but no mode dispatches is coverage that silently does not run. `unplugged`
 # - the DEFAULT mode - fell out of the dispatch during an unrelated repair and every invocation of it
@@ -82,6 +93,20 @@ case "$MODE" in
     run_phase p0-preflight.sh
     run_phase p1-static.sh
     run_phase p2-unplugged.sh
+    ;;
+  static)
+    # P0 and P1 only - the source-level answer, with no hardware interaction past preflight.
+    # This mode was documented at the top of this file and never implemented: it fell through to
+    # "unknown mode: static" and exited 2.
+    #
+    # The cable state is READ rather than demanded. Every other mode asserts one, because it is
+    # about to measure hardware that needs it; this one is not, so requiring a state would fail a
+    # perfectly valid run for the wrong reason. Reading it also lets P1's `requires:` gate decide
+    # correctly which suites apply.
+    plugged && EXPECT_PLUGGED=yes || EXPECT_PLUGGED=no
+    export EXPECT_PLUGGED
+    run_phase p0-preflight.sh
+    run_phase p1-static.sh
     ;;
   checks)
     # Everything unplugged EXCEPT the battery/idle-CPU measurement. Correctness first: P3 takes ~20

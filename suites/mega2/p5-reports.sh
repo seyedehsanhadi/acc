@@ -42,11 +42,18 @@ if command -v acc >/dev/null 2>&1; then
         || ok "R2 acc -i does not claim charging while unplugged"
     fi
     # A power figure of exactly 0.00 with current flowing means the supply gate is comparing wrong.
-    case "${_w:-}" in
-      *0.00*) [ "$(cur_raw)" = 0 ] 2>/dev/null \
-                && ok "R2 zero power with zero current is consistent" \
-                || no "R2 power reads 0.00 while current_now=$(cur_raw) - the supply gate is not firing" ;;
-      *) ok "R2 power is a non-zero figure" ;;
+    #
+    # Read the NUMBER, not a substring of the line. `case "$_w" in *0.00*)` also matches
+    # "power_now 10.00W" - and 20.00, 30.00, every tens value - so a phone pulling 10W was filed as
+    # reporting zero power. Measured on a Pixel 6a mid-charge: the note three lines above printed
+    # "power_now 10.00W" and the assertion underneath called it 0.00.
+    _wn=$(printf '%s' "${_w:-}" | tr -cd '0-9.\n ' | awk '{ for (i=NF; i>0; i--) if ($i ~ /^[0-9]+(\.[0-9]+)?$/) { print $i; exit } }')
+    case "${_wn:-}" in
+      ''|0|0.0|0.00|0.000)
+        [ "$(cur_raw)" = 0 ] 2>/dev/null \
+          && ok "R2 zero power with zero current is consistent" \
+          || no "R2 power reads ${_wn:-empty} while current_now=$(cur_raw) - the supply gate is not firing" ;;
+      *) ok "R2 power is a non-zero figure (${_wn})" ;;
     esac
   else
     no "R2 acc -i produced no output"
@@ -83,7 +90,8 @@ _clears=$(cnt -F 'rm -f $TMPDIR/.hvcontract' $execDir/accd.sh)
 # The measured failure: `acc -e` unplugged printed "Charging enabled", exited 0, wrote nothing, and left
 # input_suspend=1. Covered live in P2; here we assert the shipped source no longer gates the release.
 _ec=$(sed -n '/^enable_charging()/,/^}/p' $execDir/misc-functions.sh 2>/dev/null | sed 's/#.*//')
-_flip=$(printf '%s' "$_ec" | grep -n 'flip_sw on || cycle_switches on' | head -1 | cut -d: -f1)
+# The fallback behind the flip has been renamed; match the flip itself, not its tail.
+_flip=$(printf '%s' "$_ec" | grep -nE 'flip_sw on \|\| (cycle_switches on|\{ present && _rearm_sweep)' | head -1 | cut -d: -f1)
 if [ -n "${_flip:-}" ]; then
   printf '%s' "$_ec" | sed -n "1,${_flip}p" | grep -qE 'if present; then' \
     && no "R5 the switch release is gated on present() again - unplugged phones will strand" \

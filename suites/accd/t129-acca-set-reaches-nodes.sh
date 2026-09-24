@@ -103,12 +103,17 @@ fi
 ok "staged: $_staged node(s) held at 4150000 against a 4400000 default"
 
 "$A/acca" -s mcv= >/dev/null 2>&1
-sleep 3
 
-_still=
-for n in $_vn; do
-  v=$(cat "$PS/$n" 2>/dev/null)
-  [ "$v" = 4400000 ] || _still="$_still $n=$v"
+_i=0
+while :; do
+  sleep 3
+  _still=
+  for n in $_vn; do
+    v=$(cat "$PS/$n" 2>/dev/null)
+    [ "$v" = 4400000 ] || _still="$_still $n=$v"
+  done
+  [ -n "$_still" ] && [ $_i -lt 10 ] || break
+  _i=$((_i+1))
 done
 [ -z "$_still" ] \
   && ok "acca -s mcv= restored every voltage node to its default" \

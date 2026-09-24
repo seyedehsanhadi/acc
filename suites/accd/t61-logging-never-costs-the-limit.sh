@@ -56,7 +56,7 @@ fi
 # a writability test in front of it. Asserting the line is absent is therefore wrong - the first
 # version of this check did exactly that and failed a correct build, because the redirect still
 # appears (indented) inside the guard. What matters is the ORDER: the test must come first.
-_gline=$(printf '%s' "$_blk" | grep -n 'if : > \$dataDir/logs/init.log' | head -1 | cut -d: -f1)
+_gline=$(printf '%s' "$_blk" | grep -nE 'if (true|:) > \$dataDir/logs/init.log' | head -1 | cut -d: -f1)
 _rline=$(printf '%s' "$_blk" | grep -n 'exec > \$dataDir/logs/init.log' | head -1 | cut -d: -f1)
 if [ -n "$_gline" ] && [ -n "$_rline" ]; then
   [ "$_gline" -lt "$_rline" ] 2>/dev/null \
@@ -66,9 +66,22 @@ else
   no "could not find both the writability test and the redirect in the log-init block"
 fi
 
-printf '%s' "$_blk" | grep -q 'if : > \$dataDir/logs/init.log 2>/dev/null' \
+printf '%s' "$_blk" | grep -qE 'if (true|:) > \$dataDir/logs/init.log 2>/dev/null' \
   && ok "the file is proven writable before anything is redirected into it" \
   || no "nothing proves the log file is writable before the redirect"
+
+# ---- 2b: the probe must not be ':' -------------------------------------------------------------------
+#
+# ':' is a POSIX SPECIAL BUILTIN, and a redirection error on a special builtin is fatal to a
+# non-interactive shell. `if : > $dataDir/logs/init.log` therefore KILLED the daemon on exactly the
+# unwritable /data the guard exists to survive - the shell died on the redirection before the `if`
+# ever had a status to test. The guard read as protection and was none. `true` is a regular builtin,
+# where a failed redirection only sets a non-zero status, which is what the `if` needs.
+if printf '%s' "$_blk" | grep -q 'if : > \$dataDir/logs/init.log'; then
+  no "the writability probe is ':', a special builtin - a failed redirection on it ENDS the shell, so the guard never runs and the daemon dies silently on an unwritable /data. Use 'true'."
+else
+  ok "the writability probe is not ':', so a failed redirection sets a status instead of killing the daemon"
+fi
 
 # ---- 3: there is a fallback that keeps the daemon running ----------------------------------------------
 printf '%s' "$_blk" | grep -q 'exec > /dev/null' \

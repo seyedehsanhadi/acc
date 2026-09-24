@@ -17,9 +17,9 @@
 #      charge_stop_level 5, siop_level 0 - so a probe on a healthy charge could leave the phone at
 #      zero current while ACC reported everything normal.
 #
-#      The failure arm immediately below already had this right: keep a candidate cut only when at
-#      or above the level the user asked to pause at, because below that it protects nothing. They
-#      were separate copies of the same decision and only one had the check.
+#      A later attempt kept every rejected candidate cut at the pause level. Device testing proved
+#      that was not protection: Mi A3 was left with unowned input_suspend=1 and could not resume
+#      inside 150s. Both reject paths must always hand back candidates they did not adopt.
 #
 #   2. A scan's restore replayed a probe-time SNAPSHOT over ACC's own release. $SW carries two lines
 #      for the same node - the deliberate HIGH release from ctrl-files.sh and a snapshot appended at
@@ -45,20 +45,17 @@ AD=$execDir/accd.sh
 SC=$execDir/acc-switch-scan.sh
 for f in "$MF" "$AD" "$SC"; do [ -f "$f" ] || { no "missing $f"; fin; }; done
 
-# ---- 1. the reject arm hands the node back below the pause level --------------------------------
-grep -q '^at_or_above_pause() {' "$MF" \
-  && ok "at_or_above_pause exists as one shared decision" \
-  || no "no shared helper - the two arms can drift apart again"
-
-_n=$(grep -c 'at_or_above_pause || flip_sw on' "$MF")
+# ---- 1. both rejected-candidate paths go through ONE decision, and nothing is left unowned --------
+_cycle=$(awk '/^cycle_switches\(\) \{/,/^}/' "$MF")
+_n=$(printf '%s\n' "$_cycle" | grep -c '^[[:space:]]*hand_back_or_hold$') || _n=0
 [ "${_n:-0}" -eq 2 ] \
-  && ok "both the reject and the failure arm use it ($_n call sites)" \
-  || no "expected 2 call sites, found ${_n:-0} - one arm is not covered"
+  && ok "both the reject and failure arms decide through the same helper" \
+  || no "expected 2 hand_back_or_hold call sites, found ${_n:-0}"
 
 _rej=$(sed -n '/if \$_rej; then/,/continue/p' "$MF")
-printf '%s' "$_rej" | grep -q 'at_or_above_pause' \
-  && ok "the reject arm consults the pause level before latching" \
-  || no "the reject arm still latches unconditionally"
+printf '%s' "$_rej" | grep -q 'hand_back_or_hold' \
+  && ok "the stability-reject arm hands its candidate back or records the hold" \
+  || no "the stability-reject arm can leave an unowned cut"
 
 # [[:space:]], not \s -- see t44. This is a negative assertion, so an unmatchable pattern
 # made it pass unconditionally instead of failing loudly.
@@ -66,15 +63,18 @@ printf '%s' "$_rej" | grep -qE '^[[:space:]]*flip_sw off' \
   && no "the reject arm still has a bare 'flip_sw off' with no level check" \
   || ok "no unconditional cut left in the reject arm"
 
-# Both domains must be handled, and an unreadable value must hand the node BACK, never latch it.
-_h=$(sed -n '/^at_or_above_pause() {/,/^}/p' "$MF")
-printf '%s' "$_h" | grep -q 'volt_now' && printf '%s' "$_h" | grep -q 'batt_cap' \
-  && ok "handles both the millivolt and percent domains" \
-  || no "one of the two pause-setting domains is unhandled"
-
-printf '%s' "$_h" | grep -q "case \"\${capacity\[3\]-}\" in ''|\*\[!0-9\]\*) return 1" \
-  && ok "an unparseable pause setting answers no, so the node is handed back" \
-  || no "an unparseable pause setting does not fail toward handing the node back"
+# The level check is back, because re-arming every failed candidate at or above the pause level is
+# what lets the battery climb through the fan-out. What it suppresses is recorded and released at
+# the end of a sweep that adopted nothing, which is the hole the blanket removal was aimed at.
+grep -q '^at_or_above_pause() {' "$MF" \
+  && ok "the level check exists, so a cut is not re-armed while a pause is what we are after" \
+  || no "the level check is gone - every failed candidate re-arms charging at the limit"
+grep -q '^release_unowned_probes() {' "$MF" \
+  && ok "a sweep that adopts nothing releases what it held" \
+  || no "nothing releases a suppressed cut when the sweep adopts nothing"
+printf '%s\n' "$_cycle" | grep -q 'release_unowned_probes' \
+  && ok "the sweep calls it on the no-adoption path" \
+  || no "release_unowned_probes is never called from the sweep"
 
 # ---- 2. the scan does not replay negotiation snapshots -------------------------------------------
 # rc23b: the filter moved. It used to sit inside restore_all_on; it now lives in restore_on_safe,

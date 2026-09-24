@@ -27,8 +27,8 @@
 #   1. the budget is a LOCAL of cycle_switches_off, not a global. mksh scopes locals dynamically, so
 #      cycle_switches sees it while that call is on the stack and it is gone the moment it returns.
 #      A global would go stale and silently bound `online && ( cycle_switches on )` at accd.sh:2885 -
-#      the exit-trap restore sweep, and the ONLY path that un-cuts candidates deliberately left cut
-#      at or above the pause level. Bounding that strands a phone unable to charge.
+#      the exit-trap restore sweep. A global budget would go stale and unexpectedly shorten that
+#      safety cleanup path.
 #   2. an UNARMED sweep is unchanged. That is what the on direction and the restore path get.
 #   3. `acc -t` is exempt. It walks everything on purpose with a user watching.
 #
@@ -46,6 +46,19 @@ MF=$execDir/misc-functions.sh
 [ -f "$MF" ] || { no "misc-functions.sh not found"; fin; }
 _src=$(awk '/^cycle_switches\(\) \{/,/^\}/' "$MF")
 [ -n "$_src" ] || { no "could not extract cycle_switches"; fin; }
+
+# The sweep calls three helpers that live OUTSIDE it. Lifting only cycle_switches left them
+# undefined in the box, so every call failed silently under `set +e` and the restore never ran -
+# which read as "N nodes left cut", a product verdict invented by the harness. Lift them too, and
+# assert they arrived, because a silent miss here fabricates exactly that failure again.
+_hlp=$(sed -n '/^at_or_above_pause() {/,/^}/p;/^hand_back_or_hold() {/,/^}/p;/^release_unowned_probes() {/,/^}/p' "$MF")
+# Only helpers this build actually defines are required: older builds inlined the restore and have
+# none of these, and failing them for that would be a verdict on the harness, not on the sweep.
+for _fn in at_or_above_pause hand_back_or_hold release_unowned_probes; do
+  grep -q "^${_fn}() {" "$MF" || continue
+  printf '%s\n' "$_hlp" | grep -q "^${_fn}() {" \
+    || no "harness: $_fn is defined in misc-functions.sh but was not lifted - the restore arms cannot run in this box"
+done
 
 W=${TMPDIR:-/data/local/tmp}/t86box
 
@@ -66,7 +79,6 @@ run(){
     # a candidate whose cut did nothing -> the failure arm, which is the path that ran for 5 minutes.
     # It sleeps, because the bound under test is a clock and a free stub would never trip it.
     not_charging(){ echo x >> $W/tried; sleep $_cost; return 1; }
-    at_or_above_pause(){ return 1; }          # below the limit, so a restore is expected
     journal_arm(){ :; }; journal_disarm(){ :; }; journal_blacklisted(){ return 1; }
     invalid_switch(){ return 1; }; status(){ return 0; }
     volt_now(){ echo 4000000; }; batt_cap(){ echo 50; }
@@ -77,7 +89,9 @@ run(){
     echo -1000000 > $W/curr
     probePending=$W/.probe-pending; echo x > $probePending
     loopDelay=(3 9); capacity=(5 101 70 74 false); LVL_SETTLE_STEP=0
+    eval "$_hlp" 2>/dev/null || :
     eval "$_src" 2>/dev/null || exit 1
+    command -v hand_back_or_hold >/dev/null 2>&1 || echo "MISSING-HELPER" >> $W/tried
     : > $W/tried
     # Stand in for cycle_switches_off arming the budget. Unarmed when $_bud is empty, which is what
     # the restore direction and the exit-trap sweep see.
@@ -140,8 +154,8 @@ case "${_head:-node1}" in
 esac
 
 # ---- 8: an UNARMED sweep is unchanged -------------------------------------------------------------------
-# This is what `cycle_switches on` and the exit-trap restore sweep at accd.sh:2885 get. Bounding that
-# path would strand a phone whose candidates were deliberately left cut at or above the pause level.
+# This is what `cycle_switches on` and the exit-trap restore sweep get. It remains unbounded so a
+# crash cleanup can walk every candidate known to older builds too.
 set -- $(run 8 false '' 1)
 [ "$1" -eq 8 ] 2>/dev/null \
   && ok "an UNARMED sweep still walks all 8 - the restore direction and the exit-trap sweep are untouched" \
@@ -158,7 +172,7 @@ set -- $(run 8 true 1 1)
 _off=$(awk '/^cycle_switches_off\(\) \{/,/^\}/' "$MF")
 printf '%s\n' "$_off" | grep -q 'local .*_swEnd' \
   && ok "cycle_switches_off declares the budget local, so it cannot go stale and bound the restore sweep" \
-  || no "the budget is not declared local in cycle_switches_off - a stale global would silently bound accd.sh:2885's restore sweep, the only path that un-cuts candidates left cut at or above pause"
+  || no "the budget is not declared local in cycle_switches_off - a stale global would silently bound the restore sweep"
 
 # ---- 11: one budget for the whole call, not one per pass --------------------------------------------------
 # Three separate budgets would put the ceiling at 3x, worse than the 326s full walk it is meant to beat.

@@ -32,7 +32,7 @@ EXCLUDE_NAMES = {
     'acc-hardtest.sh', 'bt-test.sh',
     'AMPS-CHANGELOG.md', 'CHANGES-rc20-to-rc21.md',
 }
-EXCLUDE_PREFIX = ('HANDOFF-', 'FIX-PLAN-')
+EXCLUDE_PREFIX = ('HANDOFF-', 'FIX-PLAN-', 'CHANGES-')
 # Internal audit notes. They name local paths and test scaffolding, and rc23 shipped none.
 EXCLUDE_SUFFIX = ('-AUDIT.md',)
 # suites/ is the development test harness: 176 files, half the zip, and no runtime code reads it.

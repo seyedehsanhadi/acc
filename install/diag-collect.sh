@@ -48,6 +48,7 @@ _QUICK='
  acc-logs/flight.log acc-logs/warnings.log acc-logs/write.log acc-logs/write-ledger.txt
  acc-logs/shutdown-trace.log acc-logs/accd-trace-tail.txt acc-logs/acc-cli-trace-tail.txt
  acc-logs/backup-module.prop acc-logs/plugins.txt acc-logs/schedules.txt
+ acc-logs/daemon-events.log acc-state.txt charging/units-sample.txt
  env/runtime-state.txt env/daemon-detail.txt env/modules.txt env/env.txt
  reboot/bootreason.txt reboot/reboot-history.txt
  crash/acca-last-crash.txt crash/acca-breadcrumbs.txt
@@ -280,6 +281,7 @@ case "${_V_batt:-}" in ''|*[!0-9]*) _V_batt= ;; esac
     return 1
   }
   if _diag_accd; then _dOK=1; else echo "  (!) daemon DOWN (no shell running accd.sh) -> charging is UNMANAGED, limit not enforced"; _vn=$((_vn+1)); fi
+  [ -s "$DD/logs/daemon-events.log" ] && tail -3 "$DD/logs/daemon-events.log" 2>/dev/null | sed 's/^/  daemon-events: /'
   # charge limit: backed by config.txt capacity= (raw tuple shown so a wrong field-order is visible)
   if [ -n "$_V_cap" ]; then
     if [ -n "$_V_pause" ]; then _capOK=1
@@ -662,6 +664,20 @@ _acl=$(ls -t $T/acc-*.log 2>/dev/null | grep -v '/accd-' | head -1); [ -n "$_acl
 grab acc-logs/schedules.txt "scheduled profiles: what fired today, what it ran, and any failed attempts" sh -c 'echo "== now: $(date +%H:%M:%S) =="; if [ -d '"$T"'/schedules ]; then for s in '"$T"'/schedules/*; do [ -e "$s" ] || continue; echo "-- ${s##*/} --"; cat "$s" 2>/dev/null; done; else echo "(no schedules directory - nothing has fired since boot)"; fi; echo "== at lines in the config =="; grep -n "^:" "'"$DD"'/config.txt" 2>/dev/null || echo "(none)"' 
 cpf acc-logs/write-ledger.txt "write-ledger (tmpfs)" "$T/.write-ledger"
 cpf state.json  "daemon state snapshot" "$T/state.json"
+cpf acc-logs/daemon-events.log "daemon starts, exits (code) and stop requests (who asked)" "$DD/logs/daemon-events.log"
+grab acc-state.txt "switch ownership and learned facts (lock, last good switch, unit, blacklists, -d marker)" sh -c 'for f in '"$DD"'/.user-locked '"$DD"'/.last-good-switch '"$DD"'/.current-unit '"$DD"'/.rediscover '"$DD"'/.rekick-off '"$DD"'/.no-probe '"$T"'/.d-stopped '"$T"'/.sw-blacklist '"$T"'/.acc-f-config '"$T"'/.hvcontract '"$T"'/.dpol; do if [ -e "$f" ]; then echo "== ${f##*/}: $(head -c 300 "$f" 2>/dev/null | tr "
+" " ")"; else echo "-- ${f##*/}: absent"; fi; done'
+if _want charging/units-sample.txt; then
+  { echo "3 samples, 2s apart: every supply's current/input/online/present/voltage + battery status (unit and sign evidence)"
+    for _us in 1 2 3; do
+      echo "-- $(date +%H:%M:%S 2>/dev/null) status=$(cat /sys/class/power_supply/battery/status 2>/dev/null)"
+      for _un in /sys/class/power_supply/*/current_now /sys/class/power_supply/*/input_current_now /sys/class/power_supply/*/current_avg /sys/class/power_supply/*/online /sys/class/power_supply/*/present /sys/class/power_supply/*/voltage_now; do
+        [ -r "$_un" ] && echo "${_un#/sys/class/power_supply/}=$(_tmo 2 cat "$_un" 2>/dev/null)"
+      done
+      [ $_us = 3 ] || sleep 2
+    done; } > "$STAGE/charging/units-sample.txt" 2>/dev/null
+  man "OK     unit/sign sample, 3x over 4s -> charging/units-sample.txt"
+fi
 cpf config.txt  "full config" "$DD/config.txt"
 grab config-active.txt "active config (no comments)" sh -c "grep -Ev '^\$|^#' '$DD/config.txt' 2>/dev/null"
 cpf amps-verified.txt "AMPS verified artifact" /data/local/tmp/acc-compat-verified

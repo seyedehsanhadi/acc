@@ -16,6 +16,7 @@
 [ "${_cfgFallback:-0}" != 1 ] || exit 0
 
 command -v cfg_lock >/dev/null 2>&1 || . "$execDir/cfg-guard.sh"
+config=$(readlink -f "$config") && [ -n "$config" ] || exit 1
 cfg_lock "$config" || exit 1
 
 # The lock covers reading, merging and publishing. Atomic rename alone loses updates.
@@ -77,6 +78,15 @@ esac
 
 s0="${charging_switch-${s}}"
 
+
+# WHICH names this call actually carried, captured BEFORE the intake below collapses "named by the
+# caller" and "re-read from the config" into one variable. The shutdown_temp repair further down has
+# to tell them apart: dragging a DEFAULTED cutoff up to follow a raised max_temp is a convenience,
+# doing it to a cutoff the user just asked for silently loses their setting. Must sit above the
+# assignments -- `mt=${max_temp-${mt-...}}` leaves mt set either way, so ${mt+x} after it is always
+# true and the test would say every call named everything.
+_mtAsked=false; [ -z "${max_temp+x}${mt+x}" ] || _mtAsked=true
+_stAsked=false; [ -z "${shutdown_temp+x}${st+x}" ] || _stAsked=true
 
 ab="${apply_on_boot-${ab-${applyOnBoot[@]}}}"
 af=${amp_factor-${af-$ampFactor}}
@@ -239,7 +249,7 @@ fi
 : ${ct:=45}
 
 # What was actually asked for, so the repairs below can be reported rather than applied in silence.
-_reqCt=${ct:-} _reqMt=${mt:-} _reqRt=${rt:-}
+_reqCt=${ct:-} _reqMt=${mt:-} _reqRt=${rt:-} _reqSt=${st:-}
 
 # resume_temp must sit below max_temp; an at/above value collapses the hysteresis
 # to a minimal 1 C swing that rapid-toggles, so force it down. This is a real
@@ -311,14 +321,50 @@ ${isAccd:-false} || {
   }
 } || :
 
-# rc6 (A3): shutdown_temp is the HARD over-temperature cutoff -- it must sit at/above the
-# operating band, never below it. The non-numeric guard above let a low NUMERIC value (e.g.
-# st=8) through, and the daemon then shuts the phone down whenever battery temp >= st (8C is
-# always true). Keep st in a sane band [max(max_temp,40) .. 70]; outside that = garbage.
-# Reset to an mt-AWARE default (mt+5 for a high max_temp) so st>=max_temp ALWAYS holds -- a
-# fixed 55 sat BELOW a high max_temp (e.g. mt=57) and the phone shut down before it ever paused.
+# rc6 (A3): shutdown_temp is the HARD over-temperature cutoff. The non-numeric guard above let a
+# low NUMERIC value (e.g. st=8) through, and the daemon then shuts the phone down whenever battery
+# temp >= st (8C is always true). Keep st in a sane band [40..70]; outside that = garbage, and the
+# replacement is mt-AWARE (mt+5 for a high max_temp) so a rebuilt default never lands below the
+# pause temperature.
 case ${st:-55} in *[!0-9]*) st=55;; esac
-{ [ ${st:-55} -ge $mt ] && [ ${st:-55} -ge 40 ] && [ ${st:-55} -le 70 ]; } 2>/dev/null || st=$(( mt <= 50 ? 55 : mt + 5 ))
+{ [ ${st:-55} -ge 40 ] && [ ${st:-55} -le 70 ]; } 2>/dev/null || st=$(( mt <= 50 ? 55 : mt + 5 ))
+# st BELOW max_temp is not garbage, and rejecting it lost the setting.
+#
+# `acc -s shutdown_temp=45` against the default max_temp of 50 printed the success tick, stored 55
+# and said nothing. The reporter's phone then reached 47 C with a cutoff they believed was at 45 and
+# nothing fired -- there was no cutoff at 45, because the number never reached the config.
+# Device-proven on laurus and bluejay: asked 45, stored 55; asked 42, stored 55.
+#
+# The two limits are independent. max_temp pauses CHARGING; shutdown_temp powers the phone off
+# whatever the cable is doing, so "power off at 45, pause charging at 50" is coherent -- the pause
+# simply never gets reached. The daemon has always honoured it: _temp_shutdown_check band-checks
+# 40..70 and has no max_temp term at all, so a hand-edited 45 works today and only the setter
+# refused it. Same argument this file already makes for a wide resume_temp: normalisation dressed
+# as safety, discarding a legitimate and more conservative choice.
+#
+# The rc6 case is the other direction and stays: raising max_temp to 57 while shutdown_temp sits at
+# its DEFAULT 55 would power the phone off before it ever paused. So the drag-up now fires only when
+# this call moved max_temp and did NOT name shutdown_temp. A stored 45 counts as chosen, which is
+# what lets it survive the daemon re-persisting the config with neither name set -- validating it
+# the old way on every write would have bent it straight back to 55.
+# Known ceiling: a front-end that resubmits the whole band on every save names shutdown_temp every
+# time, so the drag-up never fires for it and a raised max_temp leaves the cutoff where it was. That
+# is the conservative direction and the value is on screen, so it is visible rather than silent.
+# Only a cutoff still sitting at the shipped default may be dragged. A stored 45 was chosen by
+# someone, and `acc -s max_temp=60` must not silently relabel it 65 -- the call named max_temp, not
+# shutdown_temp, so the cutoff is not what it asked to change.
+if $_mtAsked && ! $_stAsked && [ "${st:-55}" = 55 ]; then
+  [ ${st:-55} -ge $mt ] 2>/dev/null || st=$(( mt <= 50 ? 55 : mt + 5 ))
+fi
+# ...and say so when the number stored is not the number asked for. The band report above covers
+# cooldown/max/resume only, which is why the substitution this block exists to stop was silent for
+# as long as it was: `acc -s shutdown_temp=45` answered with the success tick and nothing else.
+${isAccd:-false} || {
+  $_stAsked && [ "$st" != "$_reqSt" ] && {
+    echo "Note: shutdown_temp was stored as $st, not $_reqSt." >&2
+    echo "  the cutoff must be between 40 and 70 C, and a cutoff left unnamed follows max_temp ($mt) up." >&2
+  }
+} || :
 
 
 # reset switch (in auto-mode) if pbim has changed and another switch is not being set
@@ -497,6 +543,9 @@ mv -f $_ct $config 2>/dev/null || { rm -f $_ct 2>/dev/null; set -u; exit 1; }
 # isAccd=true means the running daemon wrote this config; a user `acc/acca -s` runs with
 # isAccd=false. The 3 auto-replace sites (disable_charging fallback, breach monitor, resume
 # watchdog) read this marker and only ever auto-change an AUTO-locked switch, never a user lock.
+# Shared discovery markers describe the installed config, not a profile or CLI scratch file.
+# -ef also accepts aliases of the same file without treating a separate config as active.
+if [ "$config" -ef "$dataDir/config.txt" ]; then
 case "$s" in
   # rc14: a USER `--` lock must SURVIVE the daemon re-persisting config. Previously the daemon
   # (isAccd) cleared .user-locked whenever it rewrote a `--` switch -- including re-saving the
@@ -509,6 +558,7 @@ case "$s" in
   '') ${isAccd:-false} || { rm -f $dataDir/.user-locked 2>/dev/null; touch $dataDir/.rediscover 2>/dev/null; } || :;;  # D7: the rm was UNCONDITIONAL -- only a USER going automatic (isAccd=false) clears the lock; a daemon blank must not
   *) ${isAccd:-false} || rm -f $dataDir/.user-locked 2>/dev/null || :;;
 esac
+fi
 
 
 # The config and its lock marker are committed; release the writer lock before waking the daemon.

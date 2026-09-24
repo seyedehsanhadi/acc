@@ -11,6 +11,7 @@ if ! flock -n 0; then
   # rc6 (F3): only ever signal a real positive PID -- a blank/0/negative/garbage first line
   # (corrupt or racing lock file) must NOT become `kill 0` (whole process group) or `kill -1`.
   case "$pid" in ''|0|*[!0-9]*) pid=;; esac
+[ -z "$pid" ] || echo "$(date +%s) $(date +%F_%T) stop-request daemon=$pid by=[$(tr '\0' ' ' </proc/$$/cmdline | cut -c1-120)] parent=[$(tr '\0' ' ' </proc/$PPID/cmdline | cut -c1-120)]" >> /data/adb/${domain:-vr25}/${id}-data/logs/daemon-events.log
   [ -z "$pid" ] || kill $pid >/dev/null
   timeout 10 flock 0
   [ -z "$pid" ] || kill -KILL $pid >/dev/null

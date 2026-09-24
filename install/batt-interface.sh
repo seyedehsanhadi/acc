@@ -398,9 +398,15 @@ current_factor() {
     '') :;;
     *) return 0;;
   esac
+  local uf=${dataDir:-/data/adb/vr25/acc-data}/.current-unit u=
+  { read -r u < "$uf"; } 2>/dev/null || :
+  if [ "$u" = "$currFile 1000000" ]; then echo 1000000; return; fi
   v=$(current_now); v=${v#-}
   [ "$v" != null ] || return 0
-  if [ "$v" -ge 16000 ]; then echo 1000000; return; fi
+  if [ "$v" -ge 16000 ]; then
+    echo "$currFile 1000000" > "$uf" 2>/dev/null || :
+    echo 1000000; return
+  fi
   [ "$v" -gt 0 ] || return 0
   case "$currFile" in */battery/current_now|battery/current_now)
     for p in bms/current_now "${ACC_PSY:-/sys/class/power_supply}/bms/current_now"; do

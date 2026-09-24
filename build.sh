@@ -11,6 +11,14 @@
 
 (cd ${0%/*} 2>/dev/null
 
+# Keep standalone recovery/scanner entry points on the same supply ABI rules as ACC.
+for file in install.sh install/uninstall.sh amps.sh; do
+  { sed -n '1,/#SQ#/p' "$file"; cat install/supply-quirks.sh; \
+    sed -n '/^#\/SQ#/,$p' "$file"; } > "$file.tmp" || exit 9
+  mv -f "$file.tmp" "$file" || exit 9
+done
+cp -f amps.sh acc-compat.sh || exit 9
+
 . ./check-syntax.sh || exit $?
 
 set_prop() {

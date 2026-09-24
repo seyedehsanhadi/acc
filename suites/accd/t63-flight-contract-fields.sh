@@ -78,9 +78,9 @@ _fmt=$(printf '%s' "$_code" | grep -o "'%s\(,%s\)*\\\\n'" | head -1)
 if [ -n "$_fmt" ]; then
   _ph=$(printf '%s' "$_fmt" | tr ',' '\n' | grep -c '%s') || _ph=0
   case "${_ph:-0}" in ''|*[!0-9]*) _ph=0;; esac
-  [ "${_ph:-0}" -eq 11 ] 2>/dev/null \
-    && ok "the flight record writes 11 fields, including vbus, ICL and supply type" \
-    || no "the flight record writes ${_ph} fields - the three contract fields are not in the format string"
+  [ "${_ph:-0}" -eq 12 ] 2>/dev/null \
+    && ok "the flight record writes 12 fields, including vbus, ICL, supply type and temperature" \
+    || no "the flight record writes ${_ph} fields, expected 12 - a field is missing from the format string"
 else
   no "could not find the flight_rec format string"
 fi
@@ -102,6 +102,28 @@ else
   no "could not isolate the record printf statement"
 fi
 
+# ---- 4c: FIELD 12 is the battery temperature ---------------------------------------------------------
+#
+# Two temperature reports arrived on the same day that no bundle could answer, because this
+# recorder carried level, current, status, vbus, ICL and supply type and no temperature at all -
+# so the only reading in a bundle was the instant the collector ran, long after the phone cooled.
+# The column has to be READ with the builtin like the other three: a $(cat) here is a fork on
+# every loop, which is the rc19 regression this suite exists to prevent.
+if printf '%s' "$_code" | grep -q 'read _fq < "$temp"'; then
+  ok "the temperature field is read with the read builtin - no fork at loop rate"
+elif printf '%s' "$_code" | grep -qE '_fq=\$\(cat|_fq=\$\(<'; then
+  no "the temperature field is read with a subshell - a fork per loop, the rc19 regression"
+else
+  no "nothing reads a temperature into the flight record - a thermal report cannot be answered from the log"
+fi
+if [ -n "${_pf:-}" ]; then
+  printf '%s' "$_pf" | grep -qF '"${_fq:-}"' \
+    && ok "the temperature value is an argument to the record printf" \
+    || no "_fq is not an argument to the record printf - the field would be written empty forever"
+else
+  no "could not isolate the record printf statement - no verdict on the temperature argument"
+fi
+
 # ---- 5: on a device with a flight log, the lines really carry the fields ------------------------------
 # Source structure is not proof the values arrive. Where a log exists, read it.
 FL=${dataDir:-/data/adb/vr25/acc-data}/logs/flight.log
@@ -109,9 +131,18 @@ if [ -s "$FL" ]; then
   _last=$(tail -1 "$FL")
   _n=$(printf '%s' "$_last" | tr ',' '\n' | grep -c .) || _n=0
   case "${_n:-0}" in ''|*[!0-9]*) _n=0;; esac
-  [ "${_n:-0}" -ge 9 ] 2>/dev/null \
+  [ "${_n:-0}" -ge 11 ] 2>/dev/null \
     && ok "a live flight.log line carries ${_n} fields" \
     || no "a live flight.log line carries only ${_n} fields - the recorder is still writing the old format"
+  # Field 12 is the RAW battery temperature. Shape only, like field 9: a running daemon that has
+  # not yet resolved its temp path legitimately writes it empty, but anything non-numeric there
+  # means the read returned a path or an error string instead of a reading.
+  _v12=$(printf '%s' "$_last" | cut -d, -f12)
+  case "${_v12:-}" in
+    '') ok "temperature field present and empty (no resolved temp node on this device)" ;;
+    *[!0-9-]*) no "temperature field is not numeric: ${_v12}" ;;
+    *) ok "temperature field is numeric (${_v12} raw)" ;;
+  esac
   # Field 9 is vbus. Unplugged it may legitimately be 0 or empty, so only its SHAPE is asserted:
   # whatever is there must be a number, because a path or an error string means the read went wrong.
   _v9=$(printf '%s' "$_last" | cut -d, -f9)

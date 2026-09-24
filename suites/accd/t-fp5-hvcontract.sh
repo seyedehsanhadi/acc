@@ -108,12 +108,12 @@ r=$(verdict "$execDir")
 [ ".$r" = .KICK ] && ok "a collapsed DCP at 4200mV with no input current is repaired: $r" \
   || no "the collapse is still not repaired: $r"
 # ...and the same fixture against a tree that matches the whole type list, to show the case is real.
-if [ -n "${ARM24-}" ] && [ -f "$ARM24/misc-functions.sh" ]; then
-  r=$(verdict "$ARM24")
+if [ -n "${ARM23-}" ] && [ -f "$ARM23/misc-functions.sh" ]; then
+  r=$(verdict "$ARM23")
   [ ".$r" = .WITHHOLD ] && ok "the pre-fix tree withholds it, which is the reported symptom: $r" \
     || no "the pre-fix tree no longer reproduces the symptom: $r"
 else
-  ok "no ARM24 tree given, the negative control is skipped"
+  ok "no ARM23 tree given, the negative control is skipped"
 fi
 
 

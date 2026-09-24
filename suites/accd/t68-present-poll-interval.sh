@@ -49,7 +49,13 @@ for _fn in _nap_idle _nap_hold; do
     no "$_fn still calls present() on every 1s tick - the charger driver is queried once a second while idle"
   fi
   # The gate must wrap the present call, not sit somewhere decorative.
-  _gate=$(printf '%s' "$_b" | sed -n '/presentEvery/,/fi/p')
+  # /presentEvery/,/fi/ closes on the first NESTED fi, not the gate's own. A deadline check
+  # was added inside the gate after rc23, so the present() call fell outside the extracted
+  # range and this case reported it missing while the daemon was correct. Close on the fi at
+  # the SAME indent as the opening if - the rule xf.awk exists to enforce.
+  _gate=$(printf '%s' "$_b" | awk '
+    !f && /presentEvery/ { f=1; ind=$0; sub(/[^ \t].*$/, "", ind); closer = ind "fi"; print; next }
+    f { print; if ($0 == closer) exit }')
   printf '%s' "$_gate" | grep -qE '^ *!? *present( |$)' \
     && ok "$_fn's present() call is inside the interval gate" \
     || no "$_fn has an interval variable but present() is not inside the gate"

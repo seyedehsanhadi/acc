@@ -5,13 +5,27 @@ ID=t140
 P=0; F=0
 ok(){ P=$((P+1)); echo "  PASS  $*"; }
 no(){ F=$((F+1)); echo "  FAIL  $*"; }
-fin(){ echo "$ID: $P passed, $F failed"; [ "$F" -eq 0 ]; }
+S=0
+sk(){ S=$((S+1)); echo "  SKIP  $*"; }
+fin(){ echo "$ID: $P passed, $F failed${S:+, $S skipped}"; [ "$F" -eq 0 ]; }
 
-ROOT=${ROOT:-${1:-.}}
-I=$ROOT/install.sh
-C=$ROOT/customize.sh
-U=$ROOT/META-INF/com/google/android/update-binary
-for _f in "$I" "$C" "$U"; do [ -f "$_f" ] || { no "missing $_f"; fin; exit $?; }; done
+# This gate reads the three INSTALLER entry points, which live only in the source tree - the
+# installed module carries the flattened install/ scripts and none of install.sh, customize.sh or
+# META-INF. Run from a phone it could only ever report "missing ./install.sh", which reads as a
+# product failure and is not one. Find the repo if it is reachable; otherwise skip and say so.
+ROOT=${ROOT:-${1:-}}
+if [ -z "${ROOT:-}" ]; then
+  for _r in . .. ../.. ../../.. "${execDir:-}/.."; do
+    [ -n "$_r" ] && [ -f "$_r/install.sh" ] && [ -f "$_r/customize.sh" ] && { ROOT=$_r; break; }
+  done
+  unset _r
+fi
+I=${ROOT:-.}/install.sh
+C=${ROOT:-.}/customize.sh
+U=${ROOT:-.}/META-INF/com/google/android/update-binary
+for _f in "$I" "$C" "$U"; do
+  [ -f "$_f" ] || { sk "the installer entry points are not reachable from here ($_f) - this gate reads the source tree, which an installed module does not contain"; fin; exit $?; }
+done
 
 _h1=$(sha256sum "$I" | awk '{print $1}')
 _h2=$(sha256sum "$C" | awk '{print $1}')

@@ -61,28 +61,45 @@ _promote(){ # $1 switch  $2 chDisabledByAcc  -> the verdict
   && ok "(the fault, reproduced) switch consumed AND flag not yet set -> the kernel overrules a working cut" \
   || no "could not reproduce the promotion in the unguarded context - this suite's premise is stale"
 
-# ---- 4: disable_charging must record the cut BEFORE it can bail on that confirmation ----------------
+# ---- 4: the ONE line that fixes the fault, and what must not be bolted onto it ----------------------
+# The fault above is reached only when $flip is empty at the confirmation. `flip=off` on the line
+# before it is what stops that, and the tie-break tests `switch != off` BEFORE it tests
+# chDisabledByAcc, so once that line is there the ownership flag can do nothing extra here. test24-4
+# hoisted the flag above the confirmation anyway and paired it with a rollback; t152 measured both
+# and they were reverted. This suite grades the line that actually does the work.
 _dis=$(awk '/^disable_charging\(\) \{/,/^\}/' "$MF")
 [ -n "$_dis" ] || { no "could not extract disable_charging"; fin; }
-_ret=$(printf '%s\n' "$_dis" | grep -n 'return 7' | head -1 | cut -d: -f1)
-_set=$(printf '%s\n' "$_dis" | grep -n 'chDisabledByAcc=true' | head -1 | cut -d: -f1)
-case "${_ret:-x}${_set:-x}" in
-  *x*) no "could not locate both the 'return 7' bail and the chDisabledByAcc=true in disable_charging" ;;
-  *)
-    # Either the flag is recorded before the bail, or the confirmation is explicitly run with the
-    # suppression re-armed. Both are correct; neither being true is the bug.
-    # Anchor on the confirmation it guards, not on the bail: the two are separated by the comment
-    # block that explains the guard, so counting back from `return 7` measures prose, not code.
-    _if=$(printf '%s\n' "$_dis" | grep -n 'if ! not_charging' | head -1 | cut -d: -f1)
-    _guarded=0
-    [ -n "$_if" ] && printf '%s\n' "$_dis" | sed -n "$(( _if > 3 ? _if - 3 : 1 )),${_if}p" \
-      | grep -q 'flip=off' && _guarded=1
-    if [ "${_set:-9999}" -lt "${_ret:-0}" ] 2>/dev/null || [ "$_guarded" = 1 ]; then
-      ok "the pause confirmation cannot fire the promotion (flag recorded first, or suppression re-armed)"
-    else
-      no "disable_charging bails at line ${_ret} of the function and only records chDisabledByAcc at ${_set} - a working cut is graded broken and ACC forgets it cut, which strands the resume path"
-    fi ;;
-esac
+_pre=$(printf '%s\n' "$_dis" | sed -n '1,/if ! not_charging; then/p')
+printf '%s\n' "$_pre" | grep -q '^    flip=off' \
+  && ok "flip=off is re-armed immediately before the confirmation, so switch=off suppresses the promotion" \
+  || no "flip=off is missing before the confirmation - the fault above is live"
+
+# And nothing between that line and the confirmation may consume a status verdict, or the
+# suppression would be incomplete for it.
+_win=$(printf '%s\n' "$_dis" | sed -n '/^    flip=off/,/if ! not_charging; then/p' | sed '1d;$d')
+_extra=$(printf '%s\n' "$_win" | grep -c 'not_charging\|is_charging\|read_status')
+[ "${_extra:-0}" -eq 0 ] \
+  && ok "no other status consumer sits between flip=off and the confirmation" \
+  || no "$_extra status consumers sit in that window, where flip=off may already be consumed"
+
+# The failed-cut arm. sw_holds waits up to four firmware ticks and not_charging samples for _STI
+# seconds, so a confirmation that did not land is not proof the switch does not work. Undoing the
+# write here resets that progress on every pass - measured in t152 as never reaching a hold at all
+# for a switch needing three applied passes, against pass 3 when the cut is kept.
+_fail=$(printf '%s\n' "$_dis" | sed -n '/if ! not_charging; then/,/return 7/p')
+printf '%s\n' "$_fail" | grep -q 'flip_sw on' \
+  && no "the failure path re-arms the switch before returning 7 - a settling switch can never confirm" \
+  || ok "a failed confirmation leaves the cut in place and lets the next daemon pass retry it"
+printf '%s\n' "$_fail" | grep -q 'chDisabledByAcc' \
+  && no "the failure path touches the ownership flag, which is only set after a confirmed cut" \
+  || ok "the failure path leaves the ownership flag alone"
+
+# Ownership is recorded once the cut is CONFIRMED, which is the rc24 position and the only one that
+# cannot claim a cut ACC does not have.
+_after=$(printf '%s\n' "$_dis" | sed -n '/return 7/,$p')
+printf '%s\n' "$_after" | grep -q 'chDisabledByAcc=true' \
+  && ok "ownership is recorded after the confirmation, on the path where the cut is known to hold" \
+  || no "chDisabledByAcc=true is not on the confirmed path"
 
 # ---- 5: enable_charging must not clear the flag on the write alone ---------------------------------
 _en=$(awk '/^enable_charging\(\) \{/,/^\}/' "$MF")

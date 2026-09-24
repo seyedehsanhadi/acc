@@ -30,7 +30,25 @@ AD=$execDir/accd.sh
 [ -f "$AD" ] || { no "missing $AD"; fin; }
 
 _sv=$(sed 's/^[[:space:]]*#.*//' "$SV" | tr '\n' ' ')
-_ad=$(sed 's/^[[:space:]]*#.*//' "$AD" | tr '\n' ' ')
+_ad=$(sed 's/^[[:space:]]*#.*//' < "$AD" | tr '\n' ' ')
+
+# A lift is a pipeline, and a pipeline can be killed. Caught in a mega2 run on a Pixel 6a: the
+# suite's output began with "Terminated" and the very next assertion - the only one that reads
+# $_ad - reported "discovery still goes FV-exclusive", a product verdict invented by a truncated
+# command substitution. The same suite passed 5/0 standalone seven times against the identical
+# files. Every negative assertion below is of the form "the text does not contain X", so an empty
+# or short $_ad fails them all and blames the product. Check the lift arrived first, and say so as
+# a harness fault rather than a finding.
+_adLines=$(sed -n '$=' "$AD" 2>/dev/null || echo 0)
+case "${_adLines:-0}" in ''|*[!0-9]*) _adLines=0;; esac
+if [ "${#_ad}" -lt $(( _adLines * 4 )) ] 2>/dev/null || [ "${#_ad}" -lt 1000 ]; then
+  no "harness: the accd.sh lift came back at ${#_ad} bytes for a ${_adLines}-line file - it was truncated or interrupted, so nothing below is a verdict on the product"
+  fin
+fi
+case "$_ad" in
+  *sync_native_limit*) : ;;
+  *) no "harness: the accd.sh lift does not contain sync_native_limit, so it is not the file this suite grades"; fin ;;
+esac
 
 case "$_sv" in
   *.fv-nohold*) ok "set-ch-volt records a votable that failed to hold" ;;
@@ -44,10 +62,11 @@ case "$_sv" in
   *'pmic-votable/FV/*) _mcvWasFV=true'*) ok "the FV test matches the votable path" ;;
   *) no "the FV detection does not match the votable entries" ;;
 esac
-case "$_ad" in
-  *'! -f $TMPDIR/.fv-nohold'*) ok "discovery skips FV exclusivity once the votable has failed" ;;
-  *) no "discovery still goes FV-exclusive after a vote that never held" ;;
-esac
+if sed 's/^[[:space:]]*#.*//' < "$AD" | grep -qF '! -f $TMPDIR/.fv-nohold'; then
+  ok "discovery skips FV exclusivity once the votable has failed"
+else
+  no "discovery still goes FV-exclusive after a vote that never held"
+fi
 
 # The marker must be in tmpfs so a reboot retries. A dataDir path would make one bad vote
 # permanent across reboots.

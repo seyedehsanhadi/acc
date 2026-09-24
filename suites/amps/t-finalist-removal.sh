@@ -35,6 +35,7 @@ over(){ return 1; }; ex(){ test -e "$1"; }; gate(){ :; }; stop_check(){ :; }
 rd(){ cat "$1"; }; read1(){ echo 0; }; san(){ echo "$1"; }; snap_add(){ :; }
 wr(){ printf '%s\n' "$2" > "$1"; }; sleep(){ :; }; log(){ :; }
 chg_now(){ echo 1; }; med_cur(){ echo 0; }; vmv(){ echo 0; }
+counter_value(){ echo 0; }
 hold_probe(){ SAMP_FIRST=0; SAMP_LAST=1; SAMP_N=1; C1=0; CL=1; }
 classify_held(){ echo NOT-HELD; }; route_stab(){ routed=$1; }
 routed=
@@ -71,6 +72,16 @@ check test "$(cat "$PSY/toggle")" = '0 0'
 finalist_stress toggle "$PSY/toggle enabled disabled" cut
 check test "$writes" = 0
 check test "$_FS_UNVERIFIED" = toggle
+# A known write-only boolean still needs the full functional pause/resume gate.
+mtk_current_flag(){ [ "$1" = "$PSY/toggle" ]; }
+rd(){ return 1; }
+chg_now(){ [ "$(cat "$PSY/toggle")" = 0 ] && echo 1 || echo 0; }
+echo 0 > "$PSY/toggle"; writes=0; _FS_SEEN=
+finalist_stress toggle "$PSY/toggle 0 1" cut
+check test "$writes" -ge 4
+check test "$(cat "$PSY/toggle")" = 0
+check test -z "$_FS_UNVERIFIED"
+unset -f mtk_current_flag
 # Three rejected picks must not let the fourth bypass the same functional test.
 loop=$(awk '/^_fsr=0$/{p=1} p{print} p && /^done$/{exit}' "$AMPS")
 RECO_LBL=bad1; RECO_CLS=cut; RECO_LATCH=0; SUGGEST='/mock/node 1 0'; calls=0

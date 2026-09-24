@@ -28,6 +28,7 @@ set -u
 domain=vr25
 export TMPDIR=/dev/.$domain/acc
 execDir=/data/adb/$domain/acc
+. "$execDir/supply-quirks.sh"
 dataDir=/data/adb/$domain/acc-data
 PATH=/data/adb/$domain/bin:$PATH
 
@@ -168,6 +169,7 @@ _write() {  # _write <on|off> <switch line>
       echo "  skipping blacklisted node: $f" >&2
       continue
     fi
+    if command -v mtk_current_flag >/dev/null 2>&1 && mtk_current_flag "$f"; then onv=0; offv=1; fi
     if [ "$dir" = off ]; then v=$offv; else v=$onv; fi
     case "$v" in
       3600mV) o=$(cat "$f" 2>/dev/null || echo 0); [ "$o" -lt 10000 ] 2>/dev/null && v=3600 || v=3600000;;
@@ -226,6 +228,9 @@ restore_on_safe() {
   local _restore=
   set -f; set -- ${1-}; set +f
   while [ $# -ge 3 ]; do
+    if command -v mtk_current_flag >/dev/null 2>&1 && mtk_current_flag "$1"; then
+      _restore="$_restore $1 0 1"; shift 3; continue
+    fi
     case "$1" in
       --|*/current_max|*/input_current*|*/constant_charge_current*|*restrict_cur*) shift 3; continue;;
     esac

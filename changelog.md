@@ -8,6 +8,32 @@ Community fork of VR-25's ACC, maintained by seyedehsanhadi.
 
 Changes since the fork baseline (v2025.5.18-stable.6.5):
 
+**v2025.5.18-6.5.1-rc25 (202505373)**
+
+Most of this came from field reports on phones the project had not run on before: Poco F4, Moto G64 5G, Redmi Note 10 Pro, Fairphone 5 and two OnePlus models. Bundles AMPS v7.3.3.
+
+Fixed
+- Current limits now hold on Xiaomi phones with charge pumps. A 4000 mA limit used to let about 8 A through.
+- Charging no longer drops and reconnects on fast-charge phones, either while a current limit is set or right after plugging in. ACC now leaves the charger's input and charge-pump nodes to the firmware.
+- Clearing a voltage limit always releases it. A race with the daemon, or a reboot, could leave the phone capped near 70% while the app showed no limit.
+- Clearing a voltage limit that sat below the battery no longer leaves the phone plugged in but not charging.
+- A phone can no longer be left unable to charge after a blocked switch, a rejected switch candidate, or a capacity pause that waited for the battery to cool.
+- `acc -e` and `acc -d` (and AccA's enable and disable buttons) hand control back to the daemon, and `acc -e` works when the switch is chosen automatically.
+- An automatically chosen switch no longer marks itself as manually locked, and a failing one is replaced again. Manual locks are still never replaced.
+- A working switch is no longer dropped because the current unit could not be read, and a proven microamp unit is remembered across reboots.
+- Temperature pauses are retried and held until the battery cools to your resume temperature.
+- The shutdown temperature is stored on its own, raising max_temp no longer overwrites it, and the idle nap ends early when the battery reaches it.
+- Charger re-detection runs only on a supply that is really dead, so a working fast-charge contract is never renegotiated.
+- No more brief false 100% on plug or unplug, and no more permanent "unstable" current sign that made slow charging look like draining.
+- Motorola MediaTek phones: the on/off current flag is recognised and released correctly.
+- Scheduled profiles apply once and actually take effect; settings save on ROMs without `flock`.
+- Uninstall is safer: it no longer touches other modules' files, stray processes or broken links.
+
+Improved
+- Much lower standby cost. In our test the daemon used about 7 times less CPU than rc24 on a Pixel 6a and about 19 times less on a Mi A3, roughly 3.5 mAh a day on the Pixel.
+- `acc --diag` has a fast quick tier, can no longer hang, and bundles now include a daemon start/stop log, per-supply current samples and the switch state.
+- The flight log records battery temperature, and every firmware limit write is logged with its real reason.
+
 **v2025.5.18-6.5.1-rc24 (202505333)**
 
 Nobody reported a fault in rc23. Everything below was found by testing it, so these are latent

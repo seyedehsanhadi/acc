@@ -128,7 +128,7 @@ journal_check() {
       done < "$probeBlacklist"
     fi
     if [ "$_pbn" -ge "${probeStrikeMax:-3}" ] && [ ! -f "$probeLatch" ]; then
-      : > "$probeLatch" 2>/dev/null || :
+      true > "$probeLatch" 2>/dev/null || :
       sync 2>/dev/null || :
       command -v notif >/dev/null 2>&1 && notif "⚠️ ACC: $_pbn charging switches have crash-rebooted this phone. Automatic switch searching is now OFF so it cannot happen again. Pick one by hand with 'acc -ss', or clear with 'acc -sb clear'." || :
     fi

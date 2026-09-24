@@ -94,6 +94,9 @@ ampFactor=; ampFactor_=
 is "factor with a microamp reading"     "$(current_factor)" 1000000
 ampFactor=; ampFactor_=; status; is "status on a uA phone" "$_status" Charging
 
+# Each shape below is a different phone. A proven unit is remembered per node (dataDir), which is
+# right on one phone and wrong across the simulated ones, so forget it between them.
+rm -f "$W/.current-unit"
 # the OnePlus 7 Pro shape: battery in mA, second gauge in uA, ~1000x apart
 wnl "$currFile" -895; wnl "$W/bms/current_now" -822265
 ampFactor=; ampFactor_=
@@ -102,6 +105,7 @@ is "factor, mA battery beside a uA gauge" "$(current_factor)" 1000
 # the OnePlus 8 Pro shape (kona, oplus): mA battery, uA input node, and NO bms to compare against.
 # Only a ratio near 1000 may settle it - input and battery current differ physically by at most
 # about 3x, so 500-2000x is a unit difference, not physics.
+rm -f "$W/.current-unit"
 rm -f "$W/bms/current_now"
 wnl "$currFile" -1500; wnl "$W/usb/input_current_now" 1650000
 ampFactor=; ampFactor_=
@@ -109,6 +113,7 @@ is "factor, mA battery beside a uA input node" "$(current_factor)" 1000
 
 # and the shape that must NOT resolve: a uA phone idling at 8 mA while the charger runs the load.
 # 2000000/8000 is 250x, which is a plausible physical ratio, so there is no verdict to give.
+rm -f "$W/.current-unit"
 wnl "$currFile" -8000; wnl "$W/usb/input_current_now" 2000000
 ampFactor=; ampFactor_=
 is "factor, uA phone under load - no verdict" "$(current_factor)" ""
@@ -272,7 +277,8 @@ is "fine gauge, moved up"                     "$(ccd 1006000)" rising
 stamp 1868032 600
 is "stale anchor (600s) cannot rule"          "$(ccd 1868032)" unknown
 B=$(cat "$CC")
-is "a stale anchor is refreshed"              "$(( $(date +%s) - ${B##* } ))" 0
+_age=$(( $(date +%s) - ${B##* } )); [ "$_age" -le 1 ] 2>/dev/null && _age=0
+is "a stale anchor is refreshed"              "$_age" 0
 
 # an impossible jump is still refused
 stamp 1000000 10

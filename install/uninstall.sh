@@ -7,6 +7,59 @@
 set -u
 id=acc
 domain=vr25
+#SQ#
+# Motorola's MMI MediaTek driver exposes CURRENT_MAX as a write-only disable flag.
+# Other MediaTek drivers expose a numeric current limit at the same supply names.
+# Require both the vendor and the unreadable ABI before using boolean semantics.
+mtk_current_flag() {
+  case "/$1" in
+    */mtk-master-charger/current_max|*/mtk-slave-charger/current_max|*/mtk-mst-div-chg/current_max|*/mtk-slv-div-chg/current_max) ;;
+    *) return 1;;
+  esac
+  [ -f "$1" ] || return 1
+  case "$(getprop ro.product.manufacturer 2>/dev/null)" in
+    [Mm][Oo][Tt][Oo][Rr][Oo][Ll][Aa]*) ;;
+    *) return 1;;
+  esac
+  ! cat "$1" >/dev/null 2>&1
+}
+
+mtk_current_flags() {
+  local _mtk_name
+  for _mtk_name in mtk-master-charger mtk-slave-charger mtk-mst-div-chg mtk-slv-div-chg; do
+    mtk_current_flag "${1:-/sys/class/power_supply}/$_mtk_name/current_max" \
+      && printf '%s\n' "${1:-/sys/class/power_supply}/$_mtk_name/current_max"
+  done
+  return 0
+}
+
+# Command nodes are not restoreable settings. Only re-detect a proven dead,
+# low-voltage USB supply; an unknown reading must not destroy a working contract.
+charge_redetect_safe() {
+  local _p=${1:-/sys/class/power_supply} _f _v _i=
+  [ ! -f /dev/.vr25/acc/.hvcontract ] || return 1
+  [ ! -f /data/adb/vr25/acc-data/.rekick-off ] || return 1
+  [ "$(cat "$_p/usb/present" 2>/dev/null)" = 1 ] ||
+    [ "$(cat "$_p/usb/online" 2>/dev/null)" = 1 ] || return 1
+  for _f in real_type usb_type type; do
+    _v=$(cat "$_p/usb/$_f" 2>/dev/null)
+    case $_v in *\[*\]*) _v=${_v#*\[}; _v=${_v%%\]*};; esac
+    case $_v in *HVDCP*|*PD*|*QC*|*PPS*|*VOOC*|*WARP*|*DASH*|*SCP*|*hvdcp*|*pd*) return 1;; esac
+  done
+  _v=$(cat "$_p/usb/voltage_now" 2>/dev/null)
+  case $_v in ''|*[!0-9]*) return 1;; esac
+  [ "$_v" -gt 100000 ] && _v=$((_v / 1000))
+  [ "$_v" -gt 0 ] && [ "$_v" -lt 5500 ] || return 1
+  for _f in input_current_now current_now; do
+    _i=$(cat "$_p/usb/$_f" 2>/dev/null); _i=${_i#-}
+    case $_i in ''|*[!0-9]*) continue;; esac
+    # power_supply current is in uA. Refuse ambiguous/missing sensors.
+    [ "$_i" -le 50000 ] && return 0
+    return 1
+  done
+  return 1
+}
+#/SQ#
 export TMPDIR=/dev/.$domain/$id
 
 # rc21: the uninstaller is the recovery backstop -- it must run even where busybox cannot be set up
@@ -113,29 +166,40 @@ unset f bin_dir busybox_dir magisk_busybox
 exec 2>/dev/null
 
 # terminate/kill $id processes
+accd_pid() {
+  case "${1:-}" in ''|0|1|*[!0-9]*) return 1;; esac
+  local _script
+  _script=$(readlink -f /data/adb/$domain/$id/${id}d.sh 2>/dev/null)
+  [ -n "$_script" ] || _script=/data/adb/$domain/$id/${id}d.sh
+  tr '\000' '\n' < "/proc/$1/cmdline" 2>/dev/null | grep -qxF \
+    -e "/data/adb/$domain/$id/${id}d.sh" \
+    -e "$_script" \
+    -e "$TMPDIR/${id}d"
+}
 mkdir -p $TMPDIR 2>/dev/null || :
 if command -v flock >/dev/null 2>&1; then
   (flock -n 0 || {
-    read pid
-    kill $pid
+    pid=; read pid || :
+    accd_pid "$pid" || pid=
+    [ -z "$pid" ] || kill "$pid"
     timeout 10 flock 0
-    kill -KILL $pid >/dev/null 2>&1
+    [ -z "$pid" ] || { accd_pid "$pid" && kill -KILL "$pid" >/dev/null 2>&1; }
     timeout 10 flock 0
   }) <>$TMPDIR/${id}.lock
 else
   # rc21: no flock (bare recovery / no-busybox env, see the non-fatal busybox block above) -- just
   # kill the daemon directly if it is running. In a cold recovery session there is no daemon at all,
   # so this is usually a no-op. The final flock above is now timeout-bounded so it can never hang.
-  for _p in $(pgrep -f 'accd\.sh' 2>/dev/null); do kill "$_p" 2>/dev/null; done
+  for _p in $(pgrep -f 'accd\.sh' 2>/dev/null); do accd_pid "$_p" && kill "$_p" 2>/dev/null; done
 fi
 # rc21: belt-and-suspenders. A boot-started daemon (via start-stop-daemon) can leave a SECOND accd
 # process that the single-pid flock-kill above misses, so a no-reboot uninstall would leave it running
 # (harmless -- its data dir is about to be removed, so it fail-safes to charging -- but not clean).
 # Sweep any lingering accd: TERM first (lets its exit trap restore charging), brief grace, then KILL.
 if command -v pgrep >/dev/null 2>&1; then
-  for _p in $(pgrep -f 'accd\.sh' 2>/dev/null); do kill "$_p" 2>/dev/null; done
+  for _p in $(pgrep -f 'accd\.sh' 2>/dev/null); do accd_pid "$_p" && kill "$_p" 2>/dev/null; done
   sleep 1
-  for _p in $(pgrep -f 'accd\.sh' 2>/dev/null); do kill -KILL "$_p" 2>/dev/null; done
+  for _p in $(pgrep -f 'accd\.sh' 2>/dev/null); do accd_pid "$_p" && kill -KILL "$_p" 2>/dev/null; done
 fi
 
 # uninstall
@@ -181,8 +245,14 @@ rm -rf \
     fi
     [ -w "$_mfd/disable_vote" ] && printf DEBUGFS > "$_mfd/disable_vote" 2>/dev/null || :
     rm -f /data/adb/$domain/${id}-data/.msc-fcc-debugfs-vote 2>/dev/null || :
-    umount "$_mfm" 2>/dev/null || :
   fi
+  # Clearing the vote removes its marker but does not unmount debugfs. Also
+  # detach nested mounts (e.g. tracing) before removing ACC's private mount.
+  # Best-effort: this runs BEFORE the charge-node restore and the daemon is already dead,
+  # so aborting here would leave the phone capped with nothing left to un-cap it.
+  for _mount in $(awk -v p="$_mfm" '$2 == p || index($2, p "/") == 1 {print $2}' /proc/mounts | sort -r); do
+    umount "$_mount" 2>/dev/null || umount -l "$_mount" 2>/dev/null       || echo "WARNING: cannot unmount $_mount; it stays mounted until the next reboot. Removal continues."
+  done
   unset _mfd _mfm
 
   # (a0) rc13: CONFIG-DRIVEN restore FIRST -- replay ACC's own recorded stock values. The generic
@@ -208,6 +278,7 @@ rm -rf \
         _node=${_tok%%::*}; _def=${_tok##*::}
         case "$_def" in ''|*[!0-9]*) continue;; esac
         case "$_node" in /*) ;; *) _node=/sys/class/power_supply/$_node;; esac
+        mtk_current_flag "$_node" && _def=0
         [ -w "$_node" ] && echo "$_def" > "$_node" 2>/dev/null || :
       done
     done
@@ -248,10 +319,12 @@ rm -rf \
     done
     # (a4) D5/D8: re-run USB source detection / input-current arbitration so a charger left
     #      input-cut (online=0, */current_max=0 by an input_suspend-type switch) re-negotiates.
-    #      Harmless when already online. Qualcomm: usb/apsd_rerun, battery/rerun_aicl.
-    for f in */apsd_rerun */rerun_aicl; do
-      [ -w "$f" ] && echo 1 > "$f" 2>/dev/null || :
-    done
+    #      Only a proven dead 5V source may be re-detected; a live contract must survive removal.
+    if charge_redetect_safe; then
+      for f in */apsd_rerun */rerun_aicl; do
+        [ -w "$f" ] && echo 1 > "$f" 2>/dev/null || :
+      done
+    fi
     # (a5) rc6 (B4): un-cap CURRENT-limit switches the daemon may have locked. The enable sweep
     # above writes "1" to on/off nodes, but the current-cap class is OFF=0 and is NOT un-capped by
     # that -- a device locked on */current_max, constant_charge_current[_max] or */input_current
@@ -266,7 +339,11 @@ rm -rf \
       # rc24: never the negotiation supplies. Writing usb/current_max renegotiates the port down to
       # ~100mA until the value is written back, so an uninstall left the phone trickle-charging.
       case "$f" in usb/*|dc/*|pc_port/*|tcpm*) continue;; esac
-      [ -w "$f" ] && echo 5000000 > "$f" 2>/dev/null || :
+      if mtk_current_flag "$f"; then
+        [ -w "$f" ] && echo 0 > "$f" 2>/dev/null || :
+      else
+        [ -w "$f" ] && echo 5000000 > "$f" 2>/dev/null || :
+      fi
     done
     for f in */siop_level; do
       [ -w "$f" ] && echo 100 > "$f" 2>/dev/null || :
@@ -300,16 +377,26 @@ rm -rf \
   [ -w /sys/class/qcom-battery/restrict_cur ] && echo 5000000 > /sys/class/qcom-battery/restrict_cur 2>/dev/null || :
 
   # remove EVERY ACC path: the module dir (resolved + explicit), KSU staging, the systemless tree,
-  # the data dir, ACC's busybox bin, then the parent and the KSU/APatch PATH symlinks (rc3).
-  rm -rf $(readlink -f /data/adb/$domain/$id) \
+  # the data dir, then the parent and the root-manager PATH symlinks (rc3).
+  _resolved=$(readlink -f /data/adb/$domain/$id 2>/dev/null)
+  # Custom installs also end in /acc. A damaged link must not delete its parent
+  # or an unrelated directory.
+  case "$_resolved" in /*/$id) rm -rf "$_resolved";; esac
+  rm -rf \
     "/data/adb/modules/$id" \
     "/data/adb/modules_update/$id" \
     "/data/adb/$domain/$id" \
-    "/data/adb/$domain/${id}-data" \
-    "/data/adb/$domain/bin"
+    "/data/adb/$domain/${id}-data"
+  # ACC created this bin dir; it goes with ACC, unless another module of the
+  # same domain is still installed and using it.
+  case "$(ls -A "/data/adb/$domain" 2>/dev/null | grep -vxE 'bin|busybox')" in
+    '') rm -rf "/data/adb/$domain/bin" "/data/adb/$domain/busybox";;
+  esac
   rmdir "/data/adb/$domain" 2>/dev/null || :
-  for b in /data/adb/ksu/bin /data/adb/ap/bin; do
-    rm -f $b/$id $b/${id}a $b/${id}d 2>/dev/null
+  for b in /data/adb/ksu/bin /data/adb/ap/bin /su/bin /su/xbin /sbin; do
+    for f in "$b/$id" "$b/${id}a" "$b/${id}d"; do
+      case "$(readlink "$f" 2>/dev/null)" in /data/adb/$domain/$id/*|/dev/.$domain/$id/*) rm -f "$f";; esac
+    done
   done
   # rc9: also remove the tmpfs work dir (TMPDIR=/dev/.$domain/$id). The block above only
   # cleared /data/adb/$domain/*, leaving /dev/.vr25/acc (stale .config/.cfg/locks) on a

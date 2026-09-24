@@ -56,13 +56,13 @@ set_ch_volt() {
     # voltage limit can never linger on the config (resurrected by the editor on reload) or on the
     # nodes until the next reboot.
     if [ $1 = - ]; then
-      # Release blocked controls too.
-      grep -q / $TMPDIR/ch-volt-ctrl-files 2>/dev/null && _BLRELEASE=1 apply_on_boot_ default force || :
+      rm $f 2>/dev/null || :
+      _BLRELEASE=1 apply_on_boot_ default force || :
+      _mcv_unlatch
       max_charging_voltage=
       maxChargingVoltage=()
       unset mcv
       $isAccd || print_volt_restored
-      rm $f 2>/dev/null || :
       return 0
     fi
 
@@ -94,7 +94,7 @@ set_ch_volt() {
 
       local _mcvTarget=$1 _mcvExtra=${2-}
       local _mcvHeld=false _mcve _mcvf _mcvt _mcvd _mcvm _mcvOk= _mcvWasFV=false
-      : > "$TMPDIR/ch-volt-ctrl-files.ok"
+      true > "$TMPDIR/ch-volt-ctrl-files.ok"
       for _mcve in ${maxChargingVoltage[@]-}; do
         case "$_mcve" in *::*::*) ;; *) continue;; esac
         case "$_mcve" in *pmic-votable/FV/*) _mcvWasFV=true;; esac
@@ -125,7 +125,7 @@ set_ch_volt() {
         # Leave a breadcrumb so the next discovery skips FV exclusivity and keeps the mirrors.
         # It lives in tmpfs, so a reboot retries the votable once: a transient miss must not
         # disable the better control permanently.
-        $_mcvWasFV && { : > $TMPDIR/.fv-nohold 2>/dev/null || :; } || :
+        $_mcvWasFV && { true > $TMPDIR/.fv-nohold 2>/dev/null || :; } || :
         _BLRELEASE=1 apply_on_boot_ default force || :
         max_charging_voltage=
         maxChargingVoltage=()
@@ -182,4 +182,20 @@ set_ch_volt() {
       || echo "${maxChargingVoltage[0]:-$(print_default)}$(print_mV)"
     return 0
   fi
+}
+
+# A float voltage below the pack makes a Qualcomm charger terminate: charge_done=1, status stays
+# Charging, current 0. Restoring the default float voltage does not restart it, so clearing the
+# limit left the phone plugged in and not charging until a replug. Measured on a Mi A3 at 54%
+# after mcv=3950 then mcv=: 0 A for minutes; one switch toggle restored 2.5 A.
+_mcv_unlatch() {
+  local _b=/sys/class/power_supply/battery
+  [ "$(cat $_b/charge_done 2>/dev/null)" = 1 ] && [ "$(cat $_b/status 2>/dev/null)" = Charging ] || return 0
+  ! at_or_above_pause 2>/dev/null || return 0
+  if [ -n "${chargingSwitch[0]-}" ]; then
+    flip_sw off >/dev/null 2>&1 || :; sleep 2; flip_sw on >/dev/null 2>&1 || :
+  elif [ -w $_b/input_suspend ]; then
+    echo 1 > $_b/input_suspend; sleep 2; echo 0 > $_b/input_suspend
+  fi
+  command -v _wlog >/dev/null 2>&1 && _wlog "charge_done latched after the voltage limit was cleared; charger re-armed" || :
 }

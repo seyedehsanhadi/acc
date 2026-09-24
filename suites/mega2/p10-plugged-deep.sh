@@ -116,16 +116,44 @@ while [ $_cyc -le "$REPS" ]; do
   _p=$(( _l + 1 )); _r=$(( _l - 3 )); [ "$_r" -lt 5 ] 2>/dev/null && _r=5
   _lw=$(ledger_lines)
 
-  acc -s resume_capacity=$_r pause_capacity=$_p >/dev/null 2>&1
+  if ! acc -s resume_capacity=$_r pause_capacity=$_p >/dev/null 2>&1; then
+    no "cycle ${_cyc}: could not save the pause limits"
+    _fails=$(( _fails + 1 ))
+    break
+  fi
   _i=0; _paused=no
   while [ $_i -lt 150 ]; do
     sleep 3; _i=$(( _i + 3 ))
     case "$(kstat)" in Discharging|Not?charging|Idle) _paused=yes; break;; esac
   done
 
+  # An empty/automatic switch can be selected by a bounded discovery sweep. Do not race that sweep
+  # with the resume edit: the selector cannot reload config until it returns, so timing from the edit
+  # while it still owns the daemon falsely reports a 150s resume failure. Wait for the live scan PID,
+  # not the marker alone (SIGKILL can leave a stale file). This is outside the resume timing below.
+  _swait=0
+  if [ "$_paused" = yes ]; then
+    while [ "$_swait" -lt 180 ]; do
+      _spid=$(cat $TD/.testingsw 2>/dev/null)
+      [ -n "${_spid:-}" ] && [ -d "/proc/$_spid" ] || break
+      sleep 3; _swait=$(( _swait + 3 ))
+    done
+    [ "$_swait" -lt 180 ] \
+      && { [ "$_swait" -eq 0 ] || note "cycle ${_cyc}: waited ${_swait}s for automatic switch discovery to finish"; } \
+      || no "cycle ${_cyc}: automatic switch discovery did not finish within 180s"
+    # .testingsw is removed when cycle_switches returns, immediately before disable_charging's
+    # final ownership confirmation. Give that normal loop one settle window before judging or
+    # editing config; otherwise the harness can race the handoff it just waited for.
+    [ "$_swait" -eq 0 ] || sleep ${loopDelay[1]:-9}
+  fi
+
   # Both levels move: on Tensor only charge_start_level re-arms, so raising the pause alone does not
   # restart charging.
-  acc -s resume_capacity=$(( _l + 5 )) pause_capacity=$(( _l + 8 )) >/dev/null 2>&1
+  if ! acc -s resume_capacity=$(( _l + 5 )) pause_capacity=$(( _l + 8 )) >/dev/null 2>&1; then
+    no "cycle ${_cyc}: could not save the resume limits"
+    _fails=$(( _fails + 1 ))
+    break
+  fi
   _j=0; _res=no
   while [ $_j -lt 150 ]; do
     sleep 3; _j=$(( _j + 3 ))

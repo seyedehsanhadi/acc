@@ -13,6 +13,8 @@ is_charging(){ $sense; }
 _le_resume_cap(){ $due; }
 _temp_hold(){ [ "$temp" -ge 500 ]; }
 temp_now(){ echo "$temp"; }
+temperature_now(){ echo "$temp"; }
+eval "$(sed -n '/^  _thermal_hold_active() {/,/^  }/p' "$execDir/accd.sh")"
 enable_charging(){ released=true; chDisabledByAcc=false; }
 disable_charging(){ released=false; }
 present(){ false; }
@@ -21,14 +23,26 @@ sleep(){ :; }
 xIdle=false; temperature=(45 50 40 55); loopDelay=(0 0)
 maxChargingCurrent=(); capacity=(5 101 70 75 false)
 P=0; F=0
+# $7 is the mtReached the loop carries in: false = no thermal pause has ever engaged, true = one
+# has and we are inside its cooling band. It defaults to false, so every existing case keeps its
+# meaning. The distinction is the whole point: resume_temp is the RELEASE end of the max_temp
+# hysteresis, not an operating ceiling, and a pause that is not thermal must not be held by it.
 check(){
- sense=$1; chDisabledByAcc=$2; due=$3; temp=$4; released=false
+ sense=$1; chDisabledByAcc=$2; due=$3; temp=$4; released=false; mtReached=${7:-false}
  eval "$route :; else $resume; fi"
  if [ "$released" = "$5" ]; then P=$((P+1)); echo "PASS $6"; else F=$((F+1)); echo "FAIL $6"; fi
 }
 check true true true 300 true 'false Charging cannot strand an owned hold below resume'
 check true true true 400 true 'owned hold resumes at the resume temperature'
-check true true true 410 false 'owned hold stays paused above the resume temperature'
+# No thermal pause ever engaged, so 41 C is just a warm pack: this MUST resume. Asserting the
+# opposite is what stranded laurus - cut at 80%, still cut at 68% with the cable out, 43.5 C
+# against max_temp 45, battery/input_suspend latched at 1.
+check true true true 410 true 'a warm pack with no thermal pause resumes' false
+# ...and the hysteresis it replaces, which must not collapse: once max_temp HAS been reached, the
+# release still waits for resume_temp.
+check true true true 410 false 'a thermal hold stays paused above the resume temperature' true
+check true true true 400 true 'a thermal hold releases at the resume temperature' true
+check true true true 510 false 'at max_temp the hold engages regardless of mtReached' false
 check true true false 300 false 'owned hold stays paused above resume capacity'
 check true false true 300 false 'a healthy charge needs no release'
 check false true true 300 true 'ordinary discharge resume is retained'

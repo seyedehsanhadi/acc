@@ -45,6 +45,15 @@ if cmp -s "$ARM23/misc-functions.sh" "$ARM24/misc-functions.sh" 2>/dev/null; the
 fi
 ok "two distinct arms staged"
 
+# The arms must be the builds this file names. A directory called rc24tree held rc25-test20 on both
+# test phones, and since test20 already carries the rc25 fixes, the rc24 arm answered SAFE whether
+# rc24 had the fix or not. See t111, which lost a case the moment the tree was corrected.
+_v23=$(sed -n 's/^version=//p' "$ARM23/module.prop" 2>/dev/null)
+_v24=$(sed -n 's/^version=//p' "$ARM24/module.prop" 2>/dev/null)
+echo "      arms: ARM23=${_v23:-unknown}  ARM24=${_v24:-unknown}"
+case "${_v23:-x}" in *rc23*) ok "the rc23 arm really is rc23 ($_v23)";; *) no "ARM23 is '${_v23:-unknown}', not an rc23 build";; esac
+case "${_v24:-x}" in *rc24) ok "the rc24 arm really is rc24 ($_v24)";; *) no "ARM24 is '${_v24:-unknown}', not rc24";; esac
+
 dual() {
   _lbl=$1; _fn=$2
   _r23=$($_fn "$ARM23" 2>/dev/null | tail -1)

@@ -53,6 +53,24 @@ setup_mut() {
   [ -f $MUT/accd.sh ] && [ -f $MUT/misc-functions.sh ]
 }
 
+# Every suite here runs with execDir=$MUT. A suite that exercises a path which RESTARTS the daemon
+# therefore starts the MUTANT daemon - `sh $MUT/accd.sh` - and nothing in this phase ever killed it.
+# It outlived P8 by 55 minutes on bluejay, so P9 and P3 both ran against a deliberately defective
+# daemon and reported its every symptom as a product failure: "daemon did not come back after
+# kill -9", "an unreadable temperature sensor killed the daemon", "a corrupt config stopped the
+# daemon from starting", "daemon DOWN at the end of the fault sweep". None of it was ACC.
+#
+# Reaped after EVERY mutation, not only at phase end: the leak must not survive into the next
+# mutation's eligibility run either.
+reap_mut() {
+  _rp=$(pgrep -f "$MUT" 2>/dev/null | tr '
+' ' ')
+  case "${_rp:-}" in ''|' ') return 0 ;; esac
+  kill -9 $_rp 2>/dev/null || :
+  sleep 1
+  echo "$_rp"
+}
+
 # Which suites can prove anything at all against THIS staged tree?
 #
 # A suite is eligible only if it PASSES against the unmutated $MUT. Testing eligibility against
@@ -62,10 +80,10 @@ setup_mut() {
 # Computed once; every mutation reuses it.
 ELIGIBLE=$MUT.eligible
 build_eligible() {
-  : > $ELIGIBLE
+  true > $ELIGIBLE
   for _t in $MUT/suites/accd/t*.sh; do
     [ -f "$_t" ] || continue
-    ( cd $MUT && execDir=$MUT TMPDIR=${TMPDIR:-/data/local/tmp} sh "$_t" >/dev/null 2>&1 )       && echo "$_t" >> $ELIGIBLE
+    ( cd $MUT && execDir=$MUT TMPDIR=${TMPDIR:-/data/local/tmp} suite_tmo sh "$_t" >/dev/null 2>&1 )       && echo "$_t" >> $ELIGIBLE
   done
   _ec=$(grep -c . $ELIGIBLE 2>/dev/null) || _ec=0
   _tc=0; for _t in $MUT/suites/accd/t*.sh; do [ -f "$_t" ] && _tc=$((_tc+1)); done
@@ -95,7 +113,7 @@ mutate() {
   _by=
   while read -r _t; do
     [ -f "$_t" ] || continue
-    if ! ( cd $MUT && execDir=$MUT TMPDIR=${TMPDIR:-/data/local/tmp} sh "$_t" >/dev/null 2>&1 ); then
+    if ! ( cd $MUT && execDir=$MUT TMPDIR=${TMPDIR:-/data/local/tmp} suite_tmo sh "$_t" >/dev/null 2>&1 ); then
       _by=$(basename "$_t"); break
     fi
   done < $ELIGIBLE
@@ -107,6 +125,8 @@ mutate() {
     MISSED=$(( MISSED + 1 ))
     no "MISSED: $1 - NO suite fails with the defect present. This is a real coverage hole."
   fi
+
+  reap_mut >/dev/null
 }
 
 # ---- eligibility, computed once against a clean staged tree ----------------------------------------
@@ -143,7 +163,7 @@ mutate "present() gate removed from the unplugged verdict" \
 # 6. Make the init log redirect unconditional again: an unwritable /data kills the daemon.
 mutate "init log redirect made unconditional (unwritable /data aborts the daemon silently)" \
   accd.sh \
-  's|^  if : > $dataDir/logs/init.log 2>/dev/null; then|  if true; then|'
+  's|^  if true > $dataDir/logs/init.log 2>/dev/null; then|  if true; then|'
 
 # 7. Remove the temperature guard from the re-enable paths.
 mutate "temperature guard removed from a re-enable path (charging resumes above max_temp)" \
@@ -196,7 +216,28 @@ mutate "write() retries on SUCCESS again (5 redundant echos re-trigger AICL)" \
   misc-functions.sh \
   's|^  \[ "${_unverified-}" = 1 \] && {|  [ "${_unverified-}" != 1 ] \&\& {|'
 
+_leaked=$(reap_mut)
 rm -rf $MUT 2>/dev/null
+
+# The installed daemon must be the one left running. A mutant that reached the daemon means every
+# phase after this one measured the wrong build, so this is a failure of the run, not a note.
+if [ -n "${_leaked:-}" ]; then
+  no "a MUTANT daemon was left running from the staged tree (pids ${_leaked}) - every later phase would have measured it"
+else
+  ok "no mutant process outlived the catalogue"
+fi
+daemon_alive || daemon_start >/dev/null 2>&1
+sleep 3
+if daemon_alive; then
+  _dc=$(tr '\0' ' ' < /proc/$(daemon_pid)/cmdline 2>/dev/null)
+  case "$_dc" in
+    *.mut*) no "the running daemon is the MUTANT: $_dc" ;;
+    *"$execDir"*) ok "the installed daemon is the one running after the catalogue" ;;
+    *) no "the daemon after the catalogue is neither the installed build nor the mutant: ${_dc:-none}" ;;
+  esac
+else
+  no "no daemon is running after the mutation catalogue - the charge limit is unheld"
+fi
 
 # ---- the score -------------------------------------------------------------------------------------
 echo ""

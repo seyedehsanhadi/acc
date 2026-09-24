@@ -112,7 +112,12 @@ _after=$(grep -m1 '^capacity=' $CFG 2>/dev/null)
 if [ -n "${_n:-}" ] && [ -f "$_n" ]; then
   _off=$(sw_off_val); _on=$(sw_on_val)
   case "$(sw_off_val)" in
-    pcap|*%) skip "the stranded-switch recovery (level switch: covered by the thermal hold in P4)" ;;
+    pcap|*%)
+      if [ "${EXPECT_PLUGGED:-no}" = yes ]; then
+        skip "the stranded-switch recovery (level switch: covered by the thermal hold in P4)"
+      else
+        skip "the stranded-switch recovery (level switch, needs the cable IN) - NOT COVERED by this unplugged run"
+      fi ;;
     *)
       daemon_stop >/dev/null 2>&1
       chmod a+w "$_n" 2>/dev/null || :; echo "$_off" > "$_n" 2>/dev/null || :

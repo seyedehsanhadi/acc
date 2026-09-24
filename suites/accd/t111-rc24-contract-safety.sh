@@ -47,6 +47,22 @@ if cmp -s "$ARM23/accd.sh" "$ARM24/accd.sh" 2>/dev/null; then
   echo "$ID: preflight failed, no verdict"; exit 1
 fi
 ok "two distinct arms staged ($(basename $ARM23) vs $(basename $ARM24))"
+
+# AND THEY MUST BE THE BUILDS THIS FILE NAMES.
+#
+# A directory called rc24tree is not evidence that it holds rc24. Both test phones carried one that
+# was actually versionCode 202505353 - rc25-test20, four releases later - and because test20 already
+# contains the rc25 fixes, every case here answered SAFE on the rc24 arm whether rc24 had the fix or
+# not. The suite reported 61/0 while grading a question it was not asking. Staging is cheap to get
+# wrong and silent when it is, so the arms name themselves before anything is graded.
+_v23=$(sed -n 's/^version=//p' "$ARM23/module.prop" 2>/dev/null)
+_v24=$(sed -n 's/^version=//p' "$ARM24/module.prop" 2>/dev/null)
+echo "      arms: ARM23=${_v23:-unknown}  ARM24=${_v24:-unknown}"
+case "${_v23:-x}" in *rc23*) ok "the rc23 arm really is rc23 ($_v23)";; *) no "ARM23 is '${_v23:-unknown}', not an rc23 build - every verdict below would be about the wrong pair";; esac
+case "${_v24:-x}" in
+  *rc24) ok "the rc24 arm really is rc24 ($_v24)";;
+  *)     no "ARM24 is '${_v24:-unknown}', not rc24 - a later build here makes every case pass for the wrong reason";;
+esac
 # The grader must be able to report a failure. Prove it on a case whose answer is known.
 _selfa=$( (echo UNSAFE) ); _selfb=$( (echo SAFE) )
 [ "$_selfa" = UNSAFE ] && [ "$_selfb" = SAFE ] && ok "grader can distinguish SAFE from UNSAFE" \
@@ -64,6 +80,23 @@ dual(){
     UNSAFE/UNSAFE) no "$_lbl [BOTH-UNSAFE: the fix is absent or does not cover this case]" ;;
     SAFE/UNSAFE)   no "$_lbl [INVERTED: rc24 regressed against rc23]" ;;
     *)             no "$_lbl [NO VERDICT: rc23='$_r23' rc24='$_r24' - the case body failed to run]" ;;
+  esac
+}
+
+# dual_now: the same grader for a claim about a fix that postdates rc24. rc24 is the OLD arm and the
+# INSTALLED build is the new one, so "rc24 UNSAFE, installed SAFE" credits the case and a regression
+# in the shipping build is still caught. Same four outcomes, named for this pair.
+NOWARM=${NOWARM:-${execDir:-/data/adb/vr25/acc}}
+dual_now(){
+  _lbl=$1; _fn=$2
+  _rOld=$($_fn "$ARM24" 2>/dev/null | tail -1)
+  _rNew=$($_fn "$NOWARM" 2>/dev/null | tail -1)
+  case "${_rOld:-?}/${_rNew:-?}" in
+    UNSAFE/SAFE)   ok "$_lbl [post-rc24 fix, present in the installed build]" ;;
+    SAFE/SAFE)     nd "$_lbl" ;;
+    UNSAFE/UNSAFE) no "$_lbl [MISSING: the installed build does not have this fix either]" ;;
+    SAFE/UNSAFE)   no "$_lbl [REGRESSED: rc24 had it and the installed build does not]" ;;
+    *)             no "$_lbl [NO VERDICT: rc24='$_rOld' installed='$_rNew']" ;;
   esac
 }
 
@@ -152,7 +185,15 @@ c_unit_ma(){ A=$1
   r2=$(/system/bin/sh -c ". $W/ma.sh; _ma 900" 2>/dev/null)
   [ "$r1" = 1700 ] && [ -z "$r2" ] && echo SAFE || echo UNSAFE
 }
-dual "current normalises to mA, drops the sign, and refuses to guess an ambiguous unit" c_unit_ma
+# This one is NOT an rc24 fix and must not be graded as one.
+#
+# `_se_input_ma` refusing to guess an ambiguous unit came out of the OnePlus 7 Pro report - the same
+# device reports current_now in mA and current_max in uA - and it landed in the rc25 line. Genuine
+# rc24 does not contain it at all (`grep -c _se_input_ma`: rc23 0, rc24 0, installed 3), so asking
+# whether rc24 fixed it can only ever answer BOTH-UNSAFE. It read SAFE for as long as it did purely
+# because the staged rc24 arm was really rc25-test20. The claim is still worth grading; the pair was
+# wrong. Compare rc24 against what is installed, which is where the fix actually is.
+dual_now "current normalises to mA, drops the sign, and refuses to guess an ambiguous unit" c_unit_ma
 
 c_unit_node(){ A=$1
   # The Pixel has no usb/input_current_now and the A3 has no usb/current_now. A hardcoded path

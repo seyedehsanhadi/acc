@@ -148,7 +148,26 @@ apply_on_plug() {
   local value=
   local default=
   local arg=${1:-value}
-  local _rk= _rv= _rc= _lv= _tv= _fvForce=false
+  local _rk= _rv= _rc= _lv= _tv= _fvForce=false _rq= _rqc= _rqn= _rqfcc=false
+
+  if [ "$arg" = value ] && [ -z "${exitCode_-}" ] && [ -f "$TMPDIR/.mcc-custom" ]; then
+    case " ${chargingSwitch[*]-} " in
+      *restrict_c*) ;;
+      *) for entry in ${maxChargingCurrent[@]-}; do
+           case $entry in */qcom-battery/restrict_cur::*) ;; *) continue;; esac
+           set -- ${entry//::/ }
+           _rqn=$1; _rq=${1%/*}/restrict_chg; _rqc=${2-}
+           [ -f "$_rqn" ] && [ -f "$_rq" ] || break
+           _tv=; { read -r _tv < "$_rqn"; } 2>/dev/null || :
+           [ ".$_tv" = ".$_rqc" ] || { write $_rqc $_rqn 0 || :; _tv=; { read -r _tv < "$_rqn"; } 2>/dev/null || :; }
+           [ ".$_tv" = ".$_rqc" ] || break
+           _lv=; { read -r _lv < "$_rq"; } 2>/dev/null || :
+           [ ".$_lv" != .0 ] || { write 1 $_rq 0 && touch $TMPDIR/.restrict-chg-own || :; _lv=; { read -r _lv < "$_rq"; } 2>/dev/null || :; }
+           [ ".$_lv" = .1 ] && _rqfcc=true
+           break
+         done;;
+    esac
+  fi
 
   for entry in ${applyOnPlug[@]-} ${maxChargingVoltage[@]-} \
     ${maxChargingCurrent[@]:-$([ .$arg != .default ] || cat $TMPDIR/ch-curr-ctrl-files 2>/dev/null || :)}
@@ -185,11 +204,17 @@ apply_on_plug() {
       fi
       continue
     fi
+    if [ "$arg" = value ] && [ ! -f "$TMPDIR/.volt-custom" ] && [ -z "${exitCode_-}" ]; then
+      case " ${maxChargingVoltage[*]-} " in *" $entry "*) continue;; esac
+    fi
     case "$file" in
       /*) ;;
       *) file=${PS:-/sys/class/power_supply}/$file ;;
     esac
     [ -f "$file" ] || continue
+    if $_rqfcc && [ "$arg" = value ]; then
+      case "$file" in */qcom-battery/restrict_cur|*/current_max|*/input_current*) continue;; esac
+    fi
     case "$file" in */pmic-votable/FV/force_*) _fvForce=true;; *) _fvForce=false;; esac
     value=${2-}
     default=${3:-${2-}}
@@ -314,6 +339,7 @@ apply_on_plug() {
       esac
     fi
 
+    case "$file" in */qcom-battery/restrict_cur) _rq=${file%/*}/restrict_chg; _rqc=$value;; esac
     set +e
     if $_fvForce; then
       write \$$arg $file 0 || :
@@ -324,6 +350,20 @@ apply_on_plug() {
   done
 
   wait
+
+  if [ -n "$_rq" ] && [ -f "$_rq" ] && [ -z "${exitCode_-}" ]; then
+    case " ${chargingSwitch[*]-} " in
+      *restrict_c*) ;;
+      *) if [ "$arg" = default ]; then
+           [ ! -f $TMPDIR/.restrict-chg-own ] || { write 0 $_rq 0 || :; rm -f $TMPDIR/.restrict-chg-own; }
+         else
+           _tv=; { read -r _tv < "${_rq%/*}/restrict_cur"; } 2>/dev/null || :
+           _lv=; { read -r _lv < "$_rq"; } 2>/dev/null || :
+           [ ".$_tv" != ".$_rqc" ] || [ ".$_lv" != .0 ] \
+             || { write 1 $_rq 0 && touch $TMPDIR/.restrict-chg-own || :; }
+         fi;;
+    esac
+  fi
 
   # rc21 bug 2: a restore clears all reject state so the next cap starts fresh.
   [ "$arg" = value ] || { rm -f $TMPDIR/.mccrej-* 2>/dev/null || :; return 0; }
@@ -359,6 +399,9 @@ apply_on_plug() {
     [ -f "$file" ] || continue
     value=${2-}
     _rk=$TMPDIR/.mccrej-${file//\//_}
+    if $_rqfcc; then
+      case "$file" in */qcom-battery/restrict_cur|*/current_max|*/input_current*) [ ! -f "$_rk" ] || rm -f "$_rk"; continue;; esac
+    fi
     _cv=$(cat "$file" 2>/dev/null)
     _held=false
     if [ "$_cv" = "$value" ]; then
@@ -443,7 +486,7 @@ calc() {
 # healthy charge - fresh install, an AccA Automatic reset, .rediscover, an auto-lock blacklist - the
 # phone is nowhere near the limit, and a cut candidate is pure loss: it is not protecting anything,
 # it just stops the charge. The values these candidates hold are hostile: */current_max 0,
-# */constant_charge_current* 0, charge_stop_level 5, siop_level 0.
+# */constant_charge_current 0, charge_stop_level 5, siop_level 0.
 #
 # Handles both domains the pause setting can be in, the same way the daemon does: a value <= 100 is
 # a percentage, 3001-5000 is millivolts. Anything unparseable answers "no", so the caller hands the
@@ -461,6 +504,56 @@ at_or_above_pause() {
   case "${_v:-x}" in ''|x|*[!0-9-]*) return 1;; esac
   [ "$_v" -ge "${capacity[3]}" ] 2>/dev/null
 }
+
+
+# One non-adopted candidate, one decision, used by both arms of the sweep.
+#
+# A VOLTAGE candidate is always restored whatever the level: its off value is a float-voltage
+# CEILING, so leaving it applied does not pause charging, it ends it, at every level and across
+# reboots. Measured on a Mi A3 at 31% with pause=31 - a rejected battery/voltage_max left at 3600000
+# against a 3.9V pack refused everything, "battery over-voltage vbat_fg = 3905196uV, fv = 3600000uV".
+#
+# Anything else is handed back unless we are at or above the pause level, where the cut is the thing
+# we are trying to achieve and re-arming each failed candidate lets the level climb through the rest
+# of the fan-out. What is left cut is RECORDED, so release_unowned_probes can put it back if the
+# sweep adopts nothing.
+hand_back_or_hold() {
+  case "${chargingSwitch[0]-}" in
+    *voltage*) flip_sw on 2>/dev/null || : ;;
+    *)
+      if at_or_above_pause; then
+        printf '%s\n' "${chargingSwitch[*]}" >> $TMPDIR/.sweep-held 2>/dev/null || :
+      else
+        flip_sw on 2>/dev/null || :
+      fi ;;
+  esac
+}
+
+
+# Hand back every node this sweep left cut on purpose. at_or_above_pause suppresses the per-candidate
+# re-arm while we are at or above the pause level, because there the cut is the thing we want and
+# re-arming each failed candidate lets the level climb through the fan-out. That reasoning assumed a
+# later enable_charging would put the node back - and enable_charging only ever touches the ADOPTED
+# switch. When the sweep adopts nothing, chargingSwitch ends up empty and the suppressed cut has no
+# owner at all. Measured on a Mi A3: every candidate rejected, battery/input_suspend left at 1, and
+# raising the limit could not resume within 150s.
+#
+# So the suppression stays, and the hole it leaves is closed here instead: at the one point where
+# "nothing was adopted" is known, release what was held. Called only on that path, so a successful
+# sweep costs nothing.
+# Called from ONE place, on the path where the sweep has just emptied chargingSwitch, so it may use
+# the global as scratch and leave it empty. That is also why there is no save/restore here: putting
+# one back would mean eval-ing a config line, and there is nothing to put back.
+release_unowned_probes() {
+  [ -s "$TMPDIR/.sweep-held" ] || { rm -f "$TMPDIR/.sweep-held"; return 0; }
+  while read -A chargingSwitch || [ -n "${chargingSwitch[0]-}" ]; do
+    [ -n "${chargingSwitch[0]-}" ] || continue
+    flip_sw on 2>/dev/null || :
+  done < "$TMPDIR/.sweep-held"
+  rm -f "$TMPDIR/.sweep-held"
+  chargingSwitch=()
+}
+
 
 kernel_owned_level_switch() {
   case "${chargingSwitch[0]##*/}:${chargingSwitch[2]##*/}" in
@@ -488,6 +581,10 @@ cycle_switches() {
   # leaves this behind, and a bare marker cannot be told apart from a scan still in progress.
   # Consumers testing -f are unaffected; one that wants the truth checks /proc for the pid.
   echo $$ > $TMPDIR/.testingsw 2>/dev/null || touch $TMPDIR/.testingsw
+
+  # A sweep killed before its tail leaves this behind. Start empty so a later sweep can never hand
+  # back a node it did not probe, and so a stale entry cannot un-cut the switch this one adopts.
+  rm -f $TMPDIR/.sweep-held
 
   # A SWEEP IS NOT A MISSED UNPLUG. accd's plug-continuity check calls any wall-clock gap larger
   # than $plugGapMax (60s) a possible cable event and drops the per-plug HV markers. This function
@@ -640,32 +737,17 @@ cycle_switches() {
             # only at the final sample" non-holder is caught by the runtime breach watchdog.
             if [ "$_chg_last" = 1 ] || [ "$_chg_n" -ge 3 ]; then _rej=true; else _rej=false; fi
             if $_rej; then
-              # Rejected: it resumed on its own, so it does not hold. Keeping it CUT is correct
-              # only while we are actually trying to pause - at or above the limit. Below it, this
-              # arm used to latch the node OFF for the rest of the session with no restore
-              # anywhere: not here, not in cycle_switches_off's second pass (skipped by the
-              # `not_charging ||` guard precisely when the abandoned node is the thing cutting),
-              # and not in enable_charging, which only touches the ACCEPTED switch. A discovery
-              # probe on a healthy charge could therefore leave */current_max or
-              # */constant_charge_current at 0 for the whole session while ACC reported normal.
-              # Same rule as the failure arm below, which already got this right.
-              # rc23c: a VOLTAGE candidate is always restored, whatever the level.
-              #
-              # The suppression below is right for a current/suspend switch: at or above the pause
-              # level charging is meant to be off, leaving the node cut costs nothing, and the next
-              # enable_charging puts it back. A voltage switch is a different animal. Its off value
-              # is a float-voltage CEILING, so leaving it applied does not pause charging - it ends
-              # it, at every level, including far below resume, and across reboots. Nothing restores
-              # it either, because the daemon never recorded owning the node.
-              #
-              # Measured on a Mi A3 with chargingSwitch=(): sitting at 31% with pause=31, a rejected
-              # battery/voltage_max was left at 3600000 against a 3.9V pack, and the charger refused
-              # everything - "battery over-voltage vbat_fg = 3905196uV, fv = 3600000uV" - until the
-              # value was written back by hand, whereupon charging resumed at 2.8A.
-              case "${chargingSwitch[0]}" in
-                *voltage*) flip_sw on 2>/dev/null || : ;;
-                *)         at_or_above_pause || flip_sw on 2>/dev/null || : ;;
-              esac
+              # Rejected: it resumed on its own, so it does not hold. Hand the node back, except at
+              # or above the pause level, where the cut is what we are trying to achieve and each
+              # re-arm would let the level climb through the rest of the fan-out. A VOLTAGE
+              # candidate is always restored whatever the level: its off value is a float-voltage
+              # CEILING, so leaving it applied does not pause charging, it ends it, at every level
+              # and across reboots. Measured on a Mi A3 at 31% with pause=31: a rejected
+              # battery/voltage_max left at 3600000 against a 3.9V pack refused everything -
+              # "battery over-voltage vbat_fg = 3905196uV, fv = 3600000uV".
+              # Whatever is left cut here is recorded, and released by release_unowned_probes if the
+              # sweep ends up adopting nothing.
+              hand_back_or_hold
               if ! ${acc_t:-false}; then
                 sed -i "\|^${chargingSwitch[*]}$|d" $TMPDIR/ch-switches
                 echo "${chargingSwitch[*]}" >> $TMPDIR/ch-switches
@@ -673,20 +755,14 @@ cycle_switches() {
               continue
             fi
           fi
-          # set working charging switch(es). PERSISTING the switch is what ends the re-probe
-          # sawtooth ("stopped at the limit, then resumed/reset", ~40 toggles in 21 min at 91%):
-          # the fan-out is gated on an EMPTY chargingSwitch[0], so a non-empty value alone stops
-          # it. The trailing " --" this used to append on the strict pass was never what
-          # suppressed the re-probe, and it is the SAME marker a user lock writes, so an
-          # automatic settle was indistinguishable from a manual pin in three places:
-          # state-export reported userLocked=true, AccA's isAutomaticSwitchEnabled reads the
-          # marker straight off the config line and showed its manual-lock label, and
-          # write-config's pbim arm skipped the deliberate "reset switch (in auto-mode)" that
-          # exists so a prioritizeBattIdleMode change re-picks an appropriate switch class.
-          # An automatic selection is not a user lock and no longer claims to be one. The real
-          # user-lock paths (set-prop's picker, acc -ss N, AccA Apply&Lock) append " --"
-          # themselves, and that is what makes write-config touch .user-locked, which it only
-          # ever does when isAccd is false.
+          # An automatic selection is NOT a user lock and must not claim to be one. The trailing
+          # " --" is the marker a manual lock writes: AccA reads it straight off the charging_switch
+          # line (isAutomaticSwitchEnabled) and shows the manual-lock label, write-config's pbim arm
+          # skips the deliberate auto-mode switch reset, and the first non-daemon write that sees it
+          # touches .user-locked -- turning an automatic pick into a real lock ACC will then refuse to
+          # replace. Device-proven on laurus and bluejay: both carried " --" and a spurious
+          # .user-locked. The runtime watchdog identifies a replaceable switch by .user-locked being
+          # ABSENT, not by this marker, so it loses nothing.
           s="${chargingSwitch[*]}"
           # rc13: breadcrumb. Cache the bare switch line (no trailing " --") so the next
           # cycle_switches_off on this or a future session can try it FIRST instead of
@@ -697,22 +773,10 @@ cycle_switches() {
           . $execDir/write-config.sh own:s || :
           break
         else
-          # reset switch/group that fails to comply, and move it to the end of the list.
-          # rc13: SUPPRESS the flip_sw on re-arm when we're already at/above the pause level
-          # (post-install fan-out through N candidates can otherwise let cap creep past pause:
-          # each failed candidate's "on" briefly un-cuts before the next is tried). The failed
-          # switch's "off" write had no protective effect anyway, so leaving the nodes alone
-          # is no worse than re-arming them, and the loop body still moves the candidate to
-          # the end. Mirrors the daemon's ${capacity[3]} domain check (% if <=100, else mV).
-          # One helper, two callers. This arm and the reject arm above must agree, and when they
-          # were separate copies only this one had the level check.
-          # rc23c: same rule as the reject arm above - a voltage candidate is always restored.
-          # Leaving a float-voltage ceiling applied does not pause charging, it ends it, at every
-          # level and across reboots, with nothing to put it back.
-          case "${chargingSwitch[0]}" in
-            *voltage*) flip_sw on 2>/dev/null || : ;;
-            *)         at_or_above_pause || flip_sw on 2>/dev/null || : ;;
-          esac
+          # Same decision as the reject arm above, through the same helper. One helper, two callers:
+          # when these were separate copies only one of them had the level check, which is the drift
+          # a39358d folded together.
+          hand_back_or_hold
           if ! ${acc_t:-false}; then
             sed -i "\|^${chargingSwitch[*]}$|d" $TMPDIR/ch-switches
             echo "${chargingSwitch[*]}" >> $TMPDIR/ch-switches
@@ -726,7 +790,14 @@ cycle_switches() {
   # line of ch-switches there and enable_charging runs this loop in the current shell, so the next
   # disable_charging could treat a leftover voltage node as the configured switch - a float ceiling,
   # not a pause. -f on the rm: a missing marker aborted the caller under set -e.
-  [ -n "${_swAdopted-}" ] || chargingSwitch=()
+  if [ -n "${_swAdopted-}" ]; then
+    # Something was adopted, so enable_charging owns the release from here. Anything the sweep held
+    # on the way to it is either this node or a candidate the next sweep will try again.
+    rm -f $TMPDIR/.sweep-held
+  else
+    chargingSwitch=()
+    release_unowned_probes
+  fi
   unset _swAdopted
   rm -f $TMPDIR/.testingsw
 }
@@ -903,21 +974,22 @@ disable_charging() {
     # rc23e: re-arm the suppression before confirming OUR OWN cut.
     #
     # not_charging CONSUMES the global $flip (batt-interface.sh: `local switch=${flip-}; flip=`), and
-    # sw_holds above already consumed the `off` that flip_sw set. So by this line $flip is empty AND
-    # chDisabledByAcc is still false - it is set below. Both suppressors of the kernel-status tie-break
-    # are therefore off, and on a phone whose status node keeps reporting Charging under a current cut
-    # the promotion fires and grades a WORKING cut as "still charging".
-    #
-    # The consequence is not a bad log line. It is `return 7` below, which means chDisabledByAcc is
-    # never set: the phone is cut and ACC has forgotten it cut it. Every later pass re-promotes for the
-    # same reason, is_charging stays true, and the loop parks in the charging branch - leaving the
-    # entire resume path, which is the `else` of that same `if`, unreachable. Measured on a Mi A3 as
-    # four stalls of 90-190s with the daemon awake and logging every 3s, which is loopDelay[0], the
-    # charging branch's own nap.
+    # sw_holds above already consumed the `off` that flip_sw set, so without this line $flip is empty
+    # by the time the confirmation runs. On a phone whose status node keeps reporting Charging under a
+    # current cut the kernel-status promotion then fires and grades a WORKING cut as "still charging",
+    # which means `return 7` and an ACC that has forgotten its own cut. Measured on a Mi A3 as four
+    # stalls of 90-190s with the daemon awake and logging every 3s.
     #
     # Suppressing here is safe and is the same judgement the flip test above makes: a cut that did NOT
     # work leaves current flowing in the charging direction, so the sign verdict says Charging on its
     # own and a broken switch is still graded broken. t79 covers exactly that case.
+    #
+    # This ONE line is the whole fix. The tie-break tests `[ "${switch-}" != off ]` before it tests
+    # chDisabledByAcc, so setting the ownership flag early adds no suppression the confirmation does
+    # not already have. test24-4 hoisted the flag above this call anyway and paired it with a
+    # rollback; both were reverted after measurement, see t152. There are zero other status consumers
+    # between here and the assignment below, so the hoist could only ever have changed calls made
+    # elsewhere while the flag was up -- on exactly the phones with an unreliable current sign.
     flip=off
     if ! not_charging; then
       # fix7: restore 2022/2023 behavior -- report failure and let the daemon loop
@@ -925,6 +997,12 @@ disable_charging() {
       # fallback above runs regardless of the lock). Do NOT exec/re-init mid-pause:
       # tearing the daemon down re-arms charging in the init window and thrashes on
       # a switch that only needs another loop to settle.
+      #
+      # And do not undo the write either, for the same reason. sw_holds waits up to four firmware
+      # ticks and not_charging samples for _STI seconds, so "did not confirm this pass" is not
+      # "does not work". A rollback here resets that progress every pass: modelled over a switch
+      # needing three applied passes, keeping the cut confirms on pass 3 with 3 writes, while
+      # re-arming never confirms at all and costs 20. t152 runs both.
       return 7 # total failure
     fi
 
@@ -1371,7 +1449,7 @@ enable_charging() {
     # chargingSwitch is actually updated (the old subshell discarded it), and re-arm input-cut /
     # current-cap switches even while online=0 (same name exception as the resume gate below).
     if [ -f $TMPDIR/.sw ]; then
-      local _resumeSwitch; _resumeSwitch=("${chargingSwitch[@]}")
+      local _resumeSwitch; _resumeSwitch=("${chargingSwitch[@]-}")
       . $TMPDIR/.sw 2>/dev/null || :; rm -f $TMPDIR/.sw 2>/dev/null || :
       # An exhausted idle-avoidance scan has no selection; keep the switch we must release.
       [ -n "${chargingSwitch[0]-}" ] || chargingSwitch=("${_resumeSwitch[@]}")
