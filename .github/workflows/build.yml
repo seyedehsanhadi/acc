@@ -35,7 +35,9 @@ jobs:
           fail=0
           for f in suites/amps/*.sh; do
             echo "---- $f"
-            if AMPS="$PWD/acc-compat.sh" sh "$f"; then :; else fail=$((fail+1)); fi
+            runner=sh
+            [ "$f" != suites/amps/t-supply-quirks.sh ] || runner=bash # this test uses Android mksh arrays
+            if execDir="$PWD/install" AMPS="$PWD/acc-compat.sh" "$runner" "$f"; then :; else fail=$((fail+1)); fi
           done
           echo "== $fail suite(s) failed"
           [ "$fail" -eq 0 ]
