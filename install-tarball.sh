@@ -125,7 +125,7 @@ set -e
 
 # this runs on exit if the installer is launched by a front-end app
 copy_log() {
-  rm -rf ${1-$id}[-_]*/ 2>/dev/null
+  [ -z "${stage_dir:-}" ] || rm -rf "$stage_dir" 2>/dev/null
   case "$PWD" in
     /data/data/*|/data/user/*)
       mkdir -p logs
@@ -137,17 +137,23 @@ copy_log() {
 }
 trap copy_log EXIT
 
-# extract tarball
-rm -rf ${1:-$id}[-_]*/ 2>/dev/null
-test -f ${1:-$id}[-_]*.tar.gz && ext=tar.gz || ext=tgz
-tar -xf ${1:-$id}[-_]*.$ext
-unset ext
+# Extract in a private directory; the old acc[-_]*/ glob deleted unrelated
+# data and backups beside the tarball.
+archive=$(ls ${1:-$id}[-_]*.tar.gz ${1:-$id}[-_]*.tgz 2>/dev/null | head -1)
+[ -n "$archive" ] && [ -f "$archive" ] || exit 5
+stage_dir="$PWD/.${id}-extract.$$"
+mkdir "$stage_dir" || exit 5
+extracted_dir=${archive%.tar.gz}
+[ "$extracted_dir" != "$archive" ] || extracted_dir=${archive%.tgz}
+extracted_dir="$stage_dir/$extracted_dir"
+tar -xf "$archive" -C "$stage_dir"
+[ -f "$extracted_dir/install.sh" ] || exit 5
 
 # prevent frontends from downgrading/reinstalling modules
 case "$PWD" in
   /data/data/*|/data/user/*)
     get_ver() { sed -n '/^versionCode=/s/.*=//p' ${1}module.prop 2>/dev/null || echo 0; }
-    bundled_ver=$(get_ver ${1:-$id}[-_]*/)
+    bundled_ver=$(get_ver "$extracted_dir/")
     regular_ver=$(get_ver /data/adb/$domain/${1:-$id}/)
     if [ $bundled_ver -le $regular_ver ] && [ $regular_ver -ne 0 ]; then
       ln -s $(readlink -f /data/adb/$domain/${1:-$id}) .
@@ -158,6 +164,6 @@ esac
 
 # install ${1:-$id}
 export installDir="$2"
-/system/bin/sh ${1:-$id}[-_]*/install.sh
+/system/bin/sh "$extracted_dir/install.sh"
 
 exit 0

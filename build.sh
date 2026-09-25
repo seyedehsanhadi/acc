@@ -224,6 +224,9 @@ fi
   mkdir -p _builds/${basename}/${basename}
 
   cp bin/${id}_flashable_uninstaller.zip install-online.sh install-tarball.sh _builds/${basename}/
+  # The release-page installer must fetch this tag, not the older default branch.
+  sed -i "s/: \${commit:=main}/: \${commit:=$version}/" _builds/${basename}/install-online.sh
+  grep -Fq "commit:=$version" _builds/${basename}/install-online.sh || exit 9
 
   # generate $id flashable zip -- deterministic name (matches the zipUrl written into module.json
   # above); an rc timestamp suffix here diverged the asset name from the manifest and broke
@@ -255,7 +258,7 @@ fi
   [ -f acc-compat.sh ] || { echo "BUILD ERROR: acc-compat.sh missing from repo root"; exit 9; }
   [ -f amps.sh ] || { echo "BUILD ERROR: amps.sh missing from repo root"; exit 9; }
   cmp -s acc-compat.sh amps.sh || { echo "BUILD ERROR: acc-compat.sh and amps.sh differ -- they are the same engine under two names; sync them (edit one, copy to the other) before release"; exit 9; }
-  cp -R install install.sh License.md README.* module.prop bin/ acc-compat.sh amps.sh \
+  cp -R install install.sh License.md README.* changelog.md module.prop bin/ acc-compat.sh amps.sh \
     _builds/${basename}/${basename}/ 2>&1 \
     | grep -iv "can't preserve"
 

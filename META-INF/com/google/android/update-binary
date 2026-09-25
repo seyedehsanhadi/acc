@@ -295,7 +295,8 @@ fi
 
 ###
 echo "$name $version ($versionCode)
-Copyright 2017-2024, $author
+Original ACC: Copyright 2017-2024, VR-25
+Fork changes and AMPS: Copyright 2026, Seyed Ehsan Hadi
 GPLv3+
 
 Installing in $installDir/$id/..."

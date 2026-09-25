@@ -1,5 +1,5 @@
 <h1>Advanced Charging Controller (ACC)</h1>
-<p>Community-maintained fork of <a href="https://github.com/VR-25/acc">ACC</a> by VR-25, maintained by <a href="https://github.com/seyedehsanhadi">seyedehsanhadi</a>. ACC extends your battery's service life by limiting charge current, temperature, and voltage on any rooted Android (and KaiOS) device. Systemless, works with any root solution.</p>
+<p>This ACC fork is maintained and developed by <a href="https://github.com/seyedehsanhadi">Seyed Ehsan Hadi</a>. It builds on <a href="https://github.com/VR-25/acc">VR-25's original ACC</a>. ACC extends your battery's service life by limiting charge current, temperature, and voltage on any rooted Android (and KaiOS) device. Systemless, works with any root solution.</p>
 <p><strong>New in 6.5: AMPS.</strong> A universal charge-switch finder that auto-detects and verifies the switch that actually works on your phone, on any device. It is built into the companion app <a href="https://github.com/seyedehsanhadi/AccA">AccA</a> as "Find my switch", or run it standalone (below). Upstream ACC has been static since 2023; this fork carries a 2025 source base, a year of reliability work on the 6.x line, and AMPS.</p>
 <h2>Find your charging switch (AMPS)</h2>
 <p><strong>AMPS</strong> (<a href="amps.sh"><code>amps.sh</code></a>) - Adaptive Multi-device Probe &amp; Selector - is a standalone, root-only finder that detects which charge-control switch actually works on your device and prints a copy-paste ACC setup. It writes only ACC's standard reversible switches plus native percent-limits, snapshots every change, and restores on exit.</p>
@@ -76,7 +76,7 @@ Any root solution is supported.
 Regardless of whether the system is rooted with KernelSU/Magisk, the installation is always "systemless".</p>
 <hr />
 <h2>LICENSE</h2>
-<p>Copyright 2017-2024, VR25</p>
+<p>Copyright 2017-2024, VR25 (original ACC)<br />Copyright 2026, Seyed Ehsan Hadi (fork changes and AMPS)</p>
 <p>This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
 the Free Software Foundation, either version 3 of the License, or
@@ -173,9 +173,9 @@ The initialization script is <code>/data/adb/vr25/acc/service.sh</code>.</p>
 <h3>Build Tarballs and Flashable Zips</h3>
 <ol>
 <li>
-<p>Download and extract the source code: <code>git clone https://github.com/VR-25/acc.git</code>
-or <code>wget  https://github.com/VR-25/acc/archive/master.tar.gz -O - | tar -xz</code>
-or <code>curl -L#  https://github.com/VR-25/acc/archive/master.tar.gz | tar -xz</code></p>
+<p>Download and extract the source code: <code>git clone https://github.com/seyedehsanhadi/acc.git</code>
+or <code>wget  https://github.com/seyedehsanhadi/acc/archive/dev.tar.gz -O - | tar -xz</code>
+or <code>curl -L#  https://github.com/seyedehsanhadi/acc/archive/dev.tar.gz | tar -xz</code></p>
 </li>
 <li>
 <p><code>cd acc*</code></p>
@@ -206,14 +206,14 @@ For upgrades, if <code>%parent install dir%</code> is not supplied, the original
 </li>
 <li>
 <p><code>sh install-tarball.sh [module id, default: acc] [parent install dir (e.g., /data/data/mattecarra.accapp/files)]</code> installs the tarball (<code>acc*gz</code>) from the script's location.
-The archive must be in the same directory as this script - and obtained from GitHub: https://github.com/VR-25/acc/archive/$commit.tar.gz (<code>$commit</code> examples: <code>master</code>, <code>dev</code>, <code>v2020.5.20-rc</code>).</p>
+The archive must be in the same directory as this script - and obtained from GitHub: https://github.com/seyedehsanhadi/acc/archive/$commit.tar.gz (<code>$commit</code> examples: <code>master</code>, <code>dev</code>, <code>v2025.5.18-6.5.1-rc25</code>).</p>
 </li>
 <li>
 <p>One can also use a single command to download and install acc:</p>
 </li>
 </ul>
-<p><code>curl -sSL https://raw.githubusercontent.com/VR-25/acc/dev/install-online.sh | /system/bin/sh -s dev</code></p>
-<p><code>wget -qO- https://raw.githubusercontent.com/VR-25/acc/dev/install-online.sh | /system/bin/sh -s dev</code></p>
+<p><code>curl -sSL https://raw.githubusercontent.com/seyedehsanhadi/acc/dev/install-online.sh | /system/bin/sh -s dev</code></p>
+<p><code>wget -qO- https://raw.githubusercontent.com/seyedehsanhadi/acc/dev/install-online.sh | /system/bin/sh -s dev</code></p>
 <h4>Notes</h4>
 <ul>
 <li>
@@ -983,17 +983,17 @@ The simplest way is flashing acc from KernelSU/Magisk module manager.</p>
 <p>Alternatively, <code>install.sh</code>, <code>install-online.sh</code> or <code>install-tarball.sh</code> can be used.
 For details, refer back to <a href="#install-from-local-source-or-github">install from local source or GitHub</a>.</p>
 <p>Developers can also use the <em>updateJSON</em> API.
-The front-end downloads and parses <a href="https://raw.githubusercontent.com/VR-25/acc/master/module.json">this JSON file</a>.
+The front-end downloads and parses <a href="https://raw.githubusercontent.com/seyedehsanhadi/acc/dev/module.json">this JSON file</a>.
 The format is as follows:</p>
 <p><code>{
     "busybox": "https://github.com/Magisk-Modules-Repo/busybox-ndk",
-    "changelog": "https://raw.githubusercontent.com/VR-25/acc/master/changelog.md",
+    "changelog": "https://raw.githubusercontent.com/seyedehsanhadi/acc/dev/changelog.md",
     "curl": "https://github.com/Zackptg5/Cross-Compiled-Binaries-Android/tree/master/curl",
-    "tgz": "https://github.com/VR-25/acc/releases/download/$version/acc_${version}_${versionCode}.tgz",
-    "tgzInstaller": "https://github.com/VR-25/acc/releases/download/$version/install-tarball.sh",
+    "tgz": "https://github.com/seyedehsanhadi/acc/releases/download/$version/acc_${version}_${versionCode}.tgz",
+    "tgzInstaller": "https://github.com/seyedehsanhadi/acc/releases/download/$version/install-tarball.sh",
     "version": "STRING",
     "versionCode": INT,
-    "zipUrl": "https://github.com/VR-25/acc/releases/download/$version/acc_${version}_${versionCode}.zip"
+    "zipUrl": "https://github.com/seyedehsanhadi/acc/releases/download/$version/acc_${version}_${versionCode}.zip"
 }</code></p>
 <h3>Uninstalling ACC</h3>
 <p>Either run <code>/data/adb/vr25/acc/uninstall.sh</code> (no reboot required) or uninstall from KernelSU/Magisk module manager and reboot.</p>
@@ -1031,7 +1031,7 @@ Refer back to <a href="#terminal-commands">terminal commands</a> for details.</p
 <h3>acc -t Results Are Inconsistent</h3>
 <p>Refer to "default config &gt; batt_status_workaround".</p>
 <h3>Charging Switch</h3>
-<p>By default, ACC uses whichever <a href="https://github.com/VR-25/acc/blob/dev/install/ctrl-files.sh">charging switch</a> works ("automatic" mode).
+<p>By default, ACC uses whichever <a href="https://github.com/seyedehsanhadi/acc/blob/dev/install/ctrl-files.sh">charging switch</a> works ("automatic" mode).
 However, things don't always go well.</p>
 <ul>
 <li>
@@ -1162,7 +1162,7 @@ Your cooperation is greatly appreciated.</p>
 <p>Translation Notes</p>
 <ol>
 <li>
-<p>Start with copies of <a href="https://github.com/VR-25/acc/blob/dev/install/strings.sh">acc/strings.sh</a> and, optionally, <a href="https://github.com/VR-25/acc/blob/dev/README.md">README.md</a>.</p>
+<p>Start with copies of <a href="https://github.com/seyedehsanhadi/acc/blob/dev/install/strings.sh">acc/strings.sh</a> and, optionally, <a href="https://github.com/seyedehsanhadi/acc/blob/dev/README.md">README.md</a>.</p>
 </li>
 <li>
 <p>Modify the header of strings.sh to reflect the translation (e.g., # Español (es)).</p>

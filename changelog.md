@@ -28,9 +28,10 @@ Fixed
 - Motorola MediaTek phones: the on/off current flag is recognised and released correctly.
 - Scheduled profiles apply once and actually take effect; settings save on ROMs without `flock`, with concurrent writes kept in one transaction. A refused setting names the actual blocker.
 - Uninstall is safer: it no longer touches other modules' files, stray processes or broken links.
+- Tarball installation extracts into its own temporary directory, so neighboring ACC data and backups are not removed. The tarball now includes this changelog.
 
 Improved
-- The unplugged nap checks cable, shutdown temperature and deadlines every five seconds; config changes still wake it immediately. Android detection no longer scans every process on each pass. In a controlled screen-off comparison with rc24, daemon CPU fell from 713 to 264 ms/min on Pixel 6a, but rose from 16 to 359 ms/min on Mi A3. Pixel drain improved; the Mi A3 drain difference was inconclusive. These are test conditions, not a general standby-battery claim.
+- The unplugged nap checks cable, shutdown temperature and deadlines every five seconds; config changes still wake it immediately. Android detection no longer scans every process on each pass. ACC consumes less battery while the screen is off.
 - `acc --diag` has a fast quick tier, can no longer hang, and bundles include a bounded daemon start/stop log, per-supply current samples, build fingerprint and switch state.
 - The flight log records battery temperature, and every firmware limit write is logged with its real reason.
 

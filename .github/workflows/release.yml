@@ -35,15 +35,16 @@ jobs:
         run: awk '/^\*\*v/{c++} c==1{print} c==2{exit}' changelog.md > _release_body.md
 
       - name: Publish stable release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           prerelease: ${{ contains(github.ref_name, '-rc') }}
           name: ${{ github.ref_name }}
           body_path: _release_body.md
           files: |
-            _builds/*/*.zip
-            _builds/*/*.tgz
+            _builds/*/acc_v*.zip
+            _builds/*/acc_v*.tgz
             install-tarball.sh
-            install-online.sh
+            _builds/*/install-online.sh
             bin/acc_flashable_uninstaller.zip
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true

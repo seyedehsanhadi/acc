@@ -1,6 +1,6 @@
 # Advanced Charging Controller (ACC)
 
-Community-maintained fork of [ACC](https://github.com/VR-25/acc) by VR-25, maintained by [seyedehsanhadi](https://github.com/seyedehsanhadi). ACC extends your battery's service life by limiting charge current, temperature, and voltage on any rooted Android (and KaiOS) device. Systemless, works with any root solution.
+This ACC fork is maintained and developed by [Seyed Ehsan Hadi](https://github.com/seyedehsanhadi). It builds on [VR-25's original ACC](https://github.com/VR-25/acc). ACC extends your battery's service life by limiting charge current, temperature, and voltage on any rooted Android (and KaiOS) device. Systemless, works with any root solution.
 
 **New in 6.5: AMPS.** A universal charge-switch finder that auto-detects and verifies the switch that actually works on your phone, on any device. It is built into the companion app [AccA](https://github.com/seyedehsanhadi/AccA) as "Find my switch", or run it standalone (below). Upstream ACC has been static since 2023; this fork carries a 2025 source base, a year of reliability work on the 6.x line, and AMPS.
 
@@ -85,7 +85,8 @@ Regardless of whether the system is rooted with KernelSU/Magisk, the installatio
 ---
 ## LICENSE
 
-Copyright 2017-2024, VR25
+Copyright 2017-2024, VR25 (original ACC)
+Copyright 2026, Seyed Ehsan Hadi (fork changes and AMPS)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -209,9 +210,9 @@ The initialization script is `/data/adb/vr25/acc/service.sh`.
 
 ### Build Tarballs and Flashable Zips
 
-1. Download and extract the source code: `git clone https://github.com/VR-25/acc.git`
-or `wget  https://github.com/VR-25/acc/archive/master.tar.gz -O - | tar -xz`
-or `curl -L#  https://github.com/VR-25/acc/archive/master.tar.gz | tar -xz`
+1. Download and extract the source code: `git clone https://github.com/seyedehsanhadi/acc.git`
+or `wget  https://github.com/seyedehsanhadi/acc/archive/dev.tar.gz -O - | tar -xz`
+or `curl -L#  https://github.com/seyedehsanhadi/acc/archive/dev.tar.gz | tar -xz`
 
 2. `cd acc*`
 
@@ -235,13 +236,13 @@ The order of arguments doesn't matter.
 For upgrades, if `%parent install dir%` is not supplied, the original/current is used.
 
 - `sh install-tarball.sh [module id, default: acc] [parent install dir (e.g., /data/data/mattecarra.accapp/files)]` installs the tarball (`acc*gz`) from the script's location.
-The archive must be in the same directory as this script - and obtained from GitHub: https://github.com/VR-25/acc/archive/$commit.tar.gz (`$commit` examples: `master`, `dev`, `v2020.5.20-rc`).
+The archive must be in the same directory as this script - and obtained from GitHub: https://github.com/seyedehsanhadi/acc/archive/$commit.tar.gz (`$commit` examples: `dev`, `v2025.5.18-6.5.1-rc25`).
 
 - One can also use a single command to download and install acc:
 
-`curl -sSL https://raw.githubusercontent.com/VR-25/acc/dev/install-online.sh | /system/bin/sh -s dev`
+`curl -sSL https://raw.githubusercontent.com/seyedehsanhadi/acc/dev/install-online.sh | /system/bin/sh -s dev`
 
-`wget -qO- https://raw.githubusercontent.com/VR-25/acc/dev/install-online.sh | /system/bin/sh -s dev`
+`wget -qO- https://raw.githubusercontent.com/seyedehsanhadi/acc/dev/install-online.sh | /system/bin/sh -s dev`
 
 
 #### Notes
@@ -1220,19 +1221,19 @@ Alternatively, `install.sh`, `install-online.sh` or `install-tarball.sh` can be 
 For details, refer back to [install from local source or GitHub](#install-from-local-source-or-github).
 
 Developers can also use the _updateJSON_ API.
-The front-end downloads and parses [this JSON file](https://raw.githubusercontent.com/VR-25/acc/master/module.json).
+The front-end downloads and parses [this JSON file](https://raw.githubusercontent.com/seyedehsanhadi/acc/dev/module.json).
 The format is as follows:
 
 ```
 {
     "busybox": "https://github.com/Magisk-Modules-Repo/busybox-ndk",
-    "changelog": "https://raw.githubusercontent.com/VR-25/acc/master/changelog.md",
+    "changelog": "https://raw.githubusercontent.com/seyedehsanhadi/acc/dev/changelog.md",
     "curl": "https://github.com/Zackptg5/Cross-Compiled-Binaries-Android/tree/master/curl",
-    "tgz": "https://github.com/VR-25/acc/releases/download/$version/acc_${version}_${versionCode}.tgz",
-    "tgzInstaller": "https://github.com/VR-25/acc/releases/download/$version/install-tarball.sh",
+    "tgz": "https://github.com/seyedehsanhadi/acc/releases/download/$version/acc_${version}_${versionCode}.tgz",
+    "tgzInstaller": "https://github.com/seyedehsanhadi/acc/releases/download/$version/install-tarball.sh",
     "version": "STRING",
     "versionCode": INT,
-    "zipUrl": "https://github.com/VR-25/acc/releases/download/$version/acc_${version}_${versionCode}.zip"
+    "zipUrl": "https://github.com/seyedehsanhadi/acc/releases/download/$version/acc_${version}_${versionCode}.zip"
 }
 ```
 
@@ -1295,7 +1296,7 @@ Refer to "default config > batt_status_workaround".
 
 ### Charging Switch
 
-By default, ACC uses whichever [charging switch](https://github.com/VR-25/acc/blob/dev/install/ctrl-files.sh) works ("automatic" mode).
+By default, ACC uses whichever [charging switch](https://github.com/seyedehsanhadi/acc/blob/dev/install/ctrl-files.sh) works ("automatic" mode).
 However, things don't always go well.
 
 - Some switches are unreliable under certain conditions (e.g., while the screen is off).
@@ -1470,7 +1471,7 @@ Currently Supported Languages and Translation Levels (default, full, good, fair,
 
 Translation Notes
 
-1. Start with copies of [acc/strings.sh](https://github.com/VR-25/acc/blob/dev/install/strings.sh) and, optionally, [README.md](https://github.com/VR-25/acc/blob/dev/README.md).
+1. Start with copies of [acc/strings.sh](https://github.com/seyedehsanhadi/acc/blob/dev/install/strings.sh) and, optionally, [README.md](https://github.com/seyedehsanhadi/acc/blob/dev/README.md).
 
 2. Modify the header of strings.sh to reflect the translation (e.g., # Español (es)).
 

@@ -127,6 +127,8 @@ def verify(path):
         infos = z.infolist()
         names = {i.filename for i in infos}
         for i in infos:
+            if any(skip(part) for part in i.filename.rstrip('/').split('/')):
+                bad.append(f'EXCLUDED entry: {i.filename}')
             if i.create_system != 3:
                 bad.append(f'{i.filename}: host is not Unix (create_system={i.create_system})')
             if not ((i.external_attr >> 16) & 0xFFFF):
@@ -154,7 +156,7 @@ def verify(path):
             ver = ['(no module.prop)']
         print(f'VERIFY entries={len(infos)} exec={execs} {ver}')
     if bad:
-        print('FAILED -- this zip would not install on KernelSU/APatch:')
+        print('FAILED -- invalid release zip:')
         for b in bad[:20]:
             print('  ', b)
         return False
