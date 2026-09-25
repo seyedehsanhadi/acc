@@ -10,28 +10,28 @@ Changes since the fork baseline (v2025.5.18-stable.6.5):
 
 **v2025.5.18-6.5.1-rc25 (202505373)**
 
-Most of this came from field reports on phones the project had not run on before: Poco F4, Moto G64 5G, Redmi Note 10 Pro, Fairphone 5 and two OnePlus models. Bundles AMPS v7.3.3.
+Folds the rc25 test builds into one release. Most fixes came from field reports on Poco F4, Moto G64 5G, Redmi Note 10 Pro, Fairphone 5 and two OnePlus models. Bundles AMPS v7.3.3 (also bundled in AccA 2.0.1-rc24).
 
 Fixed
-- Current limits now hold on Xiaomi phones with charge pumps. A 4000 mA limit used to let about 8 A through.
-- Charging no longer drops and reconnects on fast-charge phones, either while a current limit is set or right after plugging in. ACC now leaves the charger's input and charge-pump nodes to the firmware.
-- Clearing a voltage limit always releases it. A race with the daemon, or a reboot, could leave the phone capped near 70% while the app showed no limit.
+- Current limits now hold on Xiaomi phones with charge pumps. A 4000 mA limit used to let about 8 A through because `restrict_chg` was never armed alongside `restrict_cur`; release restores only the flag ACC changed.
+- Charging no longer drops and reconnects on fast-charge phones, either while a current limit is set or right after plugging in. ACC leaves charger input and charge-pump nodes to firmware when the battery-side limit already holds; it still caps input where that limit does not hold.
+- Clearing a voltage limit always releases it. Reboot, clean initialization, or a daemon pass that started before the clear could leave the phone capped near 70% while the app showed no limit.
 - Clearing a voltage limit that sat below the battery no longer leaves the phone plugged in but not charging.
 - A phone can no longer be left unable to charge after a blocked switch, a rejected switch candidate, or a capacity pause that waited for the battery to cool.
-- `acc -e` and `acc -d` (and AccA's enable and disable buttons) hand control back to the daemon, and `acc -e` works when the switch is chosen automatically.
+- `acc -e` and `acc -d` (and AccA's enable and disable buttons) hand control back to the daemon, and `acc -e` works when the switch is chosen automatically. Enabling at or above the limit keeps the configured pause instead of briefly releasing it.
 - An automatically chosen switch no longer marks itself as manually locked, and a failing one is replaced again. Manual locks are still never replaced.
-- A working switch is no longer dropped because the current unit could not be read, and a proven microamp unit is remembered across reboots.
-- Temperature pauses are retried and held until the battery cools to your resume temperature.
+- A working switch is no longer dropped because the current unit could not be read; only a measured failure can replace it. A proven microamp unit is remembered across reboots, and an idling phone no longer gets a false `ampFactor` warning.
+- Temperature pauses are retried and held until the battery cools to your resume temperature. A capacity pause no longer waits for cooling unless a temperature pause actually occurred.
 - The shutdown temperature is stored on its own, raising max_temp no longer overwrites it, and the idle nap ends early when the battery reaches it.
-- Charger re-detection runs only on a supply that is really dead, so a working fast-charge contract is never renegotiated.
+- Charger re-detection runs only on a supply that is really dead, so a working fast-charge contract is never renegotiated. A terminated low-voltage charge is re-armed once after the voltage limit is cleared.
 - No more brief false 100% on plug or unplug, and no more permanent "unstable" current sign that made slow charging look like draining.
 - Motorola MediaTek phones: the on/off current flag is recognised and released correctly.
-- Scheduled profiles apply once and actually take effect; settings save on ROMs without `flock`.
+- Scheduled profiles apply once and actually take effect; settings save on ROMs without `flock`, with concurrent writes kept in one transaction. A refused setting names the actual blocker.
 - Uninstall is safer: it no longer touches other modules' files, stray processes or broken links.
 
 Improved
-- Much lower standby cost. In our test the daemon used about 7 times less CPU than rc24 on a Pixel 6a and about 19 times less on a Mi A3, roughly 3.5 mAh a day on the Pixel.
-- `acc --diag` has a fast quick tier, can no longer hang, and bundles now include a daemon start/stop log, per-supply current samples and the switch state.
+- The unplugged nap checks cable, shutdown temperature and deadlines every five seconds; config changes still wake it immediately. Android detection no longer scans every process on each pass. In a controlled screen-off comparison with rc24, daemon CPU fell from 713 to 264 ms/min on Pixel 6a, but rose from 16 to 359 ms/min on Mi A3. Pixel drain improved; the Mi A3 drain difference was inconclusive. These are test conditions, not a general standby-battery claim.
+- `acc --diag` has a fast quick tier, can no longer hang, and bundles include a bounded daemon start/stop log, per-supply current samples, build fingerprint and switch state.
 - The flight log records battery temperature, and every firmware limit write is logged with its real reason.
 
 **v2025.5.18-6.5.1-rc24 (202505333)**
